@@ -1,0 +1,71 @@
+﻿# =============================================================================
+# 项目依赖清单
+#   后端: Flask/          爬虫: scrapy/          前端: vue/（用 npm，不在本文件）
+#   目标环境: Python 3.11 + 虚拟环境 .venv（本清单即本机实测通过的版本）
+#
+# 安装步骤:
+#   1) pip install -r requirements.txt -i https://pypi.org/simple --extra-index-url https://www.paddlepaddle.org.cn/packages/stable/cpu/
+#   2) pip install --no-deps python-alipay-sdk==3.0.4
+#
+#   第 1 步为何显式指定 -i:
+#       本机 pip 默认源是清华镜像（pypi.tuna.tsinghua.edu.cn），实测不可达；
+#       若你的网络能正常访问清华源，可去掉 -i 参数。
+#   第 1 步为何要加 --extra-index-url:
+#       paddlepaddle 2.6.1 未发布到 PyPI，只在 PaddlePaddle 官方源提供。
+#   第 2 步为何要 --no-deps:
+#       python-alipay-sdk 硬性声明 pyopenssl==19.1.0，而该版本放不到现代
+#       cryptography 上（会让 Scrapy/Twisted 的 TLS 直接报错），
+#       所以跳过它自带的依赖解析，改用 PyPI 上正常的 pyOpenSSL，单独装本包。
+#
+# 本清单只包含两类内容:
+#   A. 项目源码中真实 import 的第三方包（后端 13 个 + 爬虫 5 个）
+#   B. 版本敏感、漂移后会导致旧版 Flask / Paddle 直接报错的间接依赖
+#
+# 未列出的说明:
+#   paddlenlp 2.6.1 自身声明了 fastapi、uvicorn、datasets、visualdl、paddlefsl、
+#   paddle2onnx、onnx、typer、rich 等一批包（训练/可视化/模型转换用），
+#   pip 安装时会自动带入；本项目只用到其 Bi-LSTM 推理能力，未直接使用这些包，
+#   因此不再逐条罗列，避免把整机环境导出当成项目依赖。
+# =============================================================================
+
+# ----- A1. Flask 后端（Flask/：app.py、api/、models/、base/、algorithm/） -----
+Flask==2.0.2
+Flask-SQLAlchemy==2.5.1
+flask-marshmallow==0.14.0
+SQLAlchemy==1.4.32
+PyMySQL==1.0.2
+jieba==0.42.1
+numpy==2.3.4
+pandas==2.3.3
+python-dotenv==1.0.1
+
+# ----- A2. 深度学习情感分析（Flask/deeplearning/，PaddleNLP Bi-LSTM） -----
+paddlepaddle==2.6.1
+paddlenlp==2.6.1
+
+# ----- A3. 三方服务 SDK -----
+# python-alipay-sdk 需按上面第 2 步单独安装（与 pyOpenSSL 版本互斥）:
+#   pip install --no-deps python-alipay-sdk==3.0.4
+baidu-aip==2.2.18.0
+aliyun-python-sdk-core==2.13.36
+
+# ----- A4. 爬虫（scrapy/） -----
+Scrapy==2.6.2
+Twisted==22.10.0
+requests==2.27.1
+lxml==6.0.2
+arrow==1.4.0
+
+# ----- B. 版本敏感的间接依赖（必须锁死，否则会解析出不兼容的新版本） -----
+Werkzeug==2.0.0
+Jinja2==3.1.6
+itsdangerous==2.2.0
+click==8.3.0
+MarkupSafe==3.0.3
+marshmallow==3.14.1
+protobuf==3.20.2
+opt-einsum==3.3.0
+
+# 说明:
+#   Werkzeug 必须锁 2.0.x —— Flask 2.0.2 在 Werkzeug 3.x 下无法导入
+#   protobuf / opt-einsum 是 paddlenlp、paddlepaddle 的硬性版本要求

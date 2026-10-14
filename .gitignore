@@ -1,0 +1,72 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ===== 虚拟环境 =====
+venv/
+.venv/
+.venv-scrapy/
+env/
+ENV/
+
+# ===== 深度学习模型/训练产物（体积大，按需保留） =====
+**/deeplearning/checkpoints/*.pdopt
+*.pdparams.bak
+output/
+runs/
+
+# ===== Scrapy =====
+.scrapy/
+scrapy/storage/
+scrapy/douban/proxy.txt
+*.log
+backend-smoke-*.out.log
+backend-smoke-*.err.log
+httpcache/
+
+# ===== Flask =====
+instance/
+upload/
+!.gitkeep
+.env
+.env.local
+*.pem
+*.key
+
+# ===== Vue / Node =====
+node_modules/
+vue/dist/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.eslintcache
+
+# ===== IDE =====
+.idea/
+.run/
+.vscode/
+**/.git.nested-backup-*/
+*.iml
+.pytest_cache/
+
+# ===== 系统 =====
+.DS_Store
+Thumbs.db
+desktop.ini
