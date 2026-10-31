@@ -33,11 +33,12 @@ class MovieCoverTmdbSpider(Spider):
     name = 'movie_cover_tmdb'
     allowed_domains = ['api.themoviedb.org', 'image.tmdb.org']
     custom_settings = {
-        'DOWNLOAD_DELAY': 0.5,
-        'AUTOTHROTTLE_START_DELAY': 0.5,
-        'AUTOTHROTTLE_MAX_DELAY': 10,
-        'CONCURRENT_REQUESTS': 2,
-        'CONCURRENT_REQUESTS_PER_IP': 1,
+        # TMDB 官方限速约 50 req/s；这里按每秒 ~10 个请求留足余量，
+        # 全量 3000+ 部时才有可接受的耗时。
+        'DOWNLOAD_DELAY': 0.1,
+        'AUTOTHROTTLE_ENABLED': False,
+        'CONCURRENT_REQUESTS': 8,
+        'CONCURRENT_REQUESTS_PER_DOMAIN': 4,
         'ROBOTSTXT_OBEY': True,
     }
 
@@ -124,7 +125,9 @@ class MovieCoverTmdbSpider(Spider):
         if not name or not YEAR_PATTERN.fullmatch(year):
             return None
         params = {
-            'query': name,
+            # TMDB 的中文检索对「第二季 / 2」这类季数后缀直接返回 0 条，
+            # 查询时去掉后缀，匹配时再用同一条去掉后缀的片名比较。
+            'query': self._search_query(name),
             'language': self.language,
             'include_adult': 'false',
             'page': 1,
@@ -193,9 +196,26 @@ class MovieCoverTmdbSpider(Spider):
             movie.get('release_date') or movie.get('first_air_date') or ''
         )
 
+    @staticmethod
+    def _search_query(name):
+        """Drop season / part markers that TMDB's Chinese search cannot handle."""
+        text = str(name or '').strip()
+        text = re.sub(
+            r'\s*(第[一二三四五六七八九十百零0-9]+\s*[季部]|Season\s*\d+|S\d{1,2})\s*$',
+            '',
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(r'\s*\d{1,2}\s*$', '', text)
+        return text.strip() or str(name or '').strip()
+
     def _pick_exact_title(self, results, name, expected_year=''):
-        key = self._normalize_title(name)
-        if not key:
+        keys = {
+            self._normalize_title(name),
+            self._normalize_title(self._search_query(name)),
+        }
+        keys = {key for key in keys if key}
+        if not keys:
             return None
         matched = []
         for movie in results:
@@ -207,7 +227,7 @@ class MovieCoverTmdbSpider(Spider):
                 self._normalize_title(value)
                 for value in self._result_titles(movie)
             }
-            if key in titles:
+            if keys & titles:
                 matched.append(movie)
         if not matched:
             return None
