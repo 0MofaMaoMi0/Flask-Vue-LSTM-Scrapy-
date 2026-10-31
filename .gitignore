@@ -51,6 +51,13 @@ upload/
 .env.local
 *.pem
 *.key
+# 真实敏感值只放 ..\敏感信息调用\*.env（仓库之外）；
+# 下列规则为防御性措施：万一该目录被移入或复制进仓库，也不会被提交。
+敏感信息调用/
+**/敏感信息调用/
+secrets.env
+secrets.*.env
+*.secrets.env
 
 # ===== Vue / Node =====
 node_modules/
