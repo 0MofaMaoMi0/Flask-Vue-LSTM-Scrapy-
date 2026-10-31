@@ -5,7 +5,7 @@
     </div>
       <v-row>
         <v-col cols="12" md="3" sm="6"
-            v-for="(item, index) in movies" :key="index">
+            v-for="(item, index) in movies" :key="item.douban_id || index">
           <movie-card :movie="item"/>
         </v-col>
       </v-row>
@@ -15,7 +15,7 @@
 
     <v-row>
       <v-col cols="12" md="3" sm="6"
-             v-for="(item, index) in recs" :key="index">
+             v-for="(item, index) in recs" :key="item.douban_id || index">
         <movie-card :movie="item"/>
       </v-col>
     </v-row>
@@ -24,7 +24,7 @@
     </div>
     <v-row>
       <v-col cols="12" md="3" sm="6"
-             v-for="(item, index) in recs2" :key="index">
+             v-for="(item, index) in recs2" :key="item.douban_id || index">
         <movie-card :movie="item"/>
       </v-col>
     </v-row>
@@ -40,75 +40,11 @@ export default {
   components: {  MovieCard },
   name: "Home",
   data: () => ({
-    movies: [
-      {
-        name : '肖申克的救赎',
-        rate : 9.7,
-        type : '犯罪 剧情',
-        image : 'https://img2.doubanio.com/view/photo/s_ratio_poster/public/p480747492.jpg',
-        color : 'red',
-        commentNum : 2478128,
-        intro: '希望让人自由',
-        url: 'https://movie.douban.com/subject/1292052/'
-      },
-      {
-        name : '这个杀手不太冷',
-        rate : 9.4,
-        type : '剧情 动作 犯罪',
-        image : 'https://img2.doubanio.com/view/photo/s_ratio_poster/public/p511118051.jpg',
-        color : 'blue',
-        commentNum : 2025581,
-        intro: '怪蜀黍和小萝莉不得不说的故事'
-      },
-      {
-        name : '海上钢琴师',
-        rate : 9.3,
-        type : '剧情 音乐',
-        image : 'https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2574551676.jpg',
-        color : 'yellow',
-        commentNum : 1454616,
-        intro: '每个人都要走一条自己坚定了的路，就算是粉身碎骨'
-      },
-      {
-        name : '教父',
-        rate : 9.3,
-        type : '犯罪 剧情',
-        image : 'https://img9.doubanio.com/view/photo/s_ratio_poster/public/p616779645.jpg',
-        color : 'deep-purple accent-1',
-        commentNum : 810666,
-        intro: '千万不要记恨你的对手，这样会让你失去理智'
-      },
-    ],
-    recs: [
-      {
-        name : '肖申克的救赎',
-        rate : 9.7,
-        type : '犯罪 剧情',
-        image : 'https://img2.doubanio.com/view/photo/s_ratio_poster/public/p480747492.jpg',
-        color : 'light-blue lighten-4'
-      },
-      {
-        name : '这个杀手不太冷',
-        rate : 9.4,
-        type : '剧情 动作 犯罪',
-        image : 'https://img2.doubanio.com/view/photo/s_ratio_poster/public/p511118051.jpg',
-        color : 'cyan lighten-1'
-      },
-      {
-        name : '海上钢琴师',
-        rate : 9.3,
-        type : '剧情 音乐',
-        image : 'https://img9.doubanio.com/view/photo/s_ratio_poster/public/p2574551676.jpg',
-        color : 'lime lighten-2'
-      },
-      {
-        name : '教父',
-        rate : 9.3,
-        type : '犯罪 剧情',
-        image : 'https://img9.doubanio.com/view/photo/s_ratio_poster/public/p616779645.jpg',
-        color : 'orange lighten-1'
-      },
-    ],
+    // 列表只承载接口数据：之前这里写死过 4 部演示影片，接口返回后
+    // 若与写死数据混用，会出现「卡片标题来自演示数据、详情链接指向
+    // 另一部片」的错位。现在一律以接口为准。
+    movies: [],
+    recs: [],
     recs2: []
   }),
   computed: {
