@@ -11,6 +11,7 @@ from sqlalchemy.sql import func
 from api.alipayApi import payBp
 from api.baiduApi import idocr
 from api.movieApi import movieBp
+from api.mediaApi import mediaBp
 from api.orderApi import orderBp
 from base.code import ResponseCode
 from base.core import JSONEncoder
@@ -34,6 +35,7 @@ app.register_blueprint(bp, url_prefix='/test')
 app.register_blueprint(userBp, url_prefix='/user')
 # 注册电影相关的方法
 app.register_blueprint(movieBp, url_prefix='/movie')
+app.register_blueprint(mediaBp, url_prefix='/media')
 app.register_blueprint(payBp, url_prefix='/alipay')
 app.register_blueprint(orderBp, url_prefix='/order')  # 订单接口
 

@@ -34,3 +34,7 @@ class Config:
     HOST = optional("FLASK_HOST", "0.0.0.0")
     PORT = int(optional("FLASK_PORT", "8080"))
     DEBUG = optional("FLASK_DEBUG", "false").strip().lower() in {"1", "true", "yes", "on"}
+    _poster_root = Path(optional("POSTER_STORAGE_ROOT", "data/covers"))
+    if not _poster_root.is_absolute():
+        _poster_root = PROJECT_ROOT / _poster_root
+    POSTER_STORAGE_ROOT = str(_poster_root.resolve())

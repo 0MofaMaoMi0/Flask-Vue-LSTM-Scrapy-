@@ -35,6 +35,8 @@ runs/
 # ===== Scrapy =====
 .scrapy/
 scrapy/storage/
+data/covers/*
+!data/covers/.gitkeep
 scrapy/douban/proxy.txt
 *.log
 backend-smoke-*.out.log

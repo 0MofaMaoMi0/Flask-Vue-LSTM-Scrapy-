@@ -1,0 +1,2 @@
+# Install after requirements.txt to enable WebP poster processing.
+Pillow==12.3.0

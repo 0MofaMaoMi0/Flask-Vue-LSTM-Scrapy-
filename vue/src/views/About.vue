@@ -3,6 +3,19 @@
       <h1>团队介绍</h1>
       <h2 class="mt-4"> <svg-icon color="lightgreen"  class="mr-3" :icon-class="appIcon" />{{appName}}大数据这款作品，这个是我们团队呕心沥血投入巨大精力开发的作品，希望能够带来好的市场反应</h2>
       <v-container class="mt-8">
+        <v-card outlined class="mb-6 pa-4">
+          <v-card-title>数据与图片来源说明</v-card-title>
+          <v-card-text>
+            <p>
+              部分电影海报可通过
+              <a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer">TMDB</a>
+              API 获取；启用该来源时请同时遵守 TMDB 的许可、署名和品牌规范。
+            </p>
+            <p class="mb-0">
+              This product uses the TMDB API but is not endorsed or certified by TMDB.
+            </p>
+          </v-card-text>
+        </v-card>
         <v-layout row wrap>
           <v-flex style="display: none;" sm6 xs12 md6 lg3 v-for="item in panels" :key="item.name">
             <v-card class="ma-3">
