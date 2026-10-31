@@ -6,15 +6,44 @@
 # https://doc.scrapy.org/en/latest/topics/spider-middleware.html
 
 import random
+from urllib.parse import urlsplit
+
 from scrapy import signals
+from scrapy.exceptions import NotConfigured
 from twisted.internet.error import TimeoutError
-from douban.util import AGENT_LIST,PRIVATE_PROXY,init_proxy,check_ip_valid,get_new_ip,get_proxy
+from douban.util import AGENT_LIST,PRIVATE_PROXY
 from douban.proxylib import ProxyTool
-import base64
 import douban.database as db
+from douban.runtime_config import get_douban_cookie, parse_cookie_header
 
 
 proxy_tool = ProxyTool()
+
+
+class EnvironmentCookieMiddleware(object):
+    """Inject an optional browser session without exposing it in source code."""
+
+    allowed_hosts = {'movie.douban.com'}
+
+    def __init__(self, raw_cookie):
+        self.cookies = parse_cookie_header(raw_cookie)
+        if not self.cookies:
+            raise NotConfigured('DOUBAN_COOKIE is empty or invalid')
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        raw_cookie = get_douban_cookie()
+        if not raw_cookie:
+            raise NotConfigured('DOUBAN_COOKIE is not configured')
+        return cls(raw_cookie)
+
+    def process_request(self, request, spider):
+        hostname = (urlsplit(request.url).hostname or '').lower()
+        if hostname not in self.allowed_hosts:
+            return None
+        for name, value in self.cookies.items():
+            request.cookies.setdefault(name, value)
+        return None
 
 class DoubanSpiderMiddleware(object):
     # Not all methods need to be defined. If a method is not defined,
@@ -178,7 +207,6 @@ class ProxyMiddleware(object):
             proxy_list.append(ip)  
 
         PROXY_LIST = proxy_list
-        #PROXY_LIST = get_proxy()
         print("=======###PROXY INFO: ", len(PROXY_LIST), PROXY_LIST)
         proxy_ip = random.choice(PROXY_LIST)
 
@@ -189,12 +217,8 @@ class ProxyMiddleware(object):
         cursor.close()
 
         # 设置代理的认证信息
-        #auth = base64.b64encode(bytes("136756895:g9zaye1k", 'utf-8'))
-        #request.headers['Proxy-Authorization'] = b'Basic ' + auth
-        #proxy_ip = "58.255.207.22:19783"
         ##private proxy
         if PRIVATE_PROXY:
-            # proxy = "http://136756895:g9zaye1k@" + proxy_ip
             proxy = "http://" + proxy_ip
         else:
             proxy = "http://" + proxy_ip

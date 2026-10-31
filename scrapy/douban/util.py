@@ -2,8 +2,6 @@
 # -*- coding: utf-8 -*-
 
 import hashlib
-import json
-import requests
 import douban.database as db
 
 def shorturl(url):
@@ -95,42 +93,6 @@ AGENT_LIST = [
 
 PRIVATE_PROXY=True
 
-
-def check_ip_valid(ip):
-    url = "https://dps.kdlapi.com/api/checkdpsvalid?orderid=966475943170494&signature=gu0yhmscwn5jva218dliy9gs6xg3oqov&proxy=" + ip
-    text = requests.get(url).text
-    result = json.loads(text)["data"][ip]
-    print("check result: ",result)
-    return result
-
-def get_new_ip():
-	url = "https://dps.kdlapi.com/api/getdps/?orderid=956490349441321&num=1&pt=1&dedup=1&sep=1"
-	#url = "https://dps.kdlapi.com/api/getdps/?orderid=966475943170494&num=1&pt=1&dedup=1&sep=1"
-	return requests.get(url).text.strip()
-
-def init_proxy():
-    with open("douban/proxy.txt") as fr:
-        PROXY_LIST = fr.readlines()
-        PROXY_LIST =[ip.strip() for ip in PROXY_LIST]
-        PROXY_LIST = list(set(PROXY_LIST))
-        print("init proxy list:", PROXY_LIST)
-        for proxy_ip in PROXY_LIST:
-            if check_ip_valid(proxy_ip) == False:
-                print("###Remove invalid ip!")
-                PROXY_LIST.remove(proxy_ip)
-
-        while len(PROXY_LIST) < 20:
-            print("###Get new ip......")
-            proxy_ip = get_new_ip()
-            PROXY_LIST.append(proxy_ip)
-            PROXY_LIST = list(set(PROXY_LIST))
-             
-        print("\n********PROXY_LIST********:", PROXY_LIST)
-        with open("douban/proxy.txt", "w") as fw:
-            print("save ip list to proxy.text!")
-            fw.write("\n".join(PROXY_LIST))
-        return PROXY_LIST
-
 def get_proxy():
     cursor = db.connection.cursor()
     sql = "SELECT DISTINCT(proxy_ip) FROM proxys where valid = 1 "
@@ -142,5 +104,3 @@ def get_proxy():
         proxy_list.append(ip)
     cursor.close()
     return proxy_list
-
-#PROXY_LIST = init_proxy()

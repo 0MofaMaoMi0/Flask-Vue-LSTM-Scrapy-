@@ -1,147 +1,114 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
 
-
-
-"""
-
-import string
-import random
-import douban.util as util
-import douban.database as db
-import douban.validator as validator
-
-from scrapy import Request, Spider
+from douban import validator
+from douban.database import get_connection
 from douban.items import PersonMeta
+from scrapy import Request, Spider
 
-
-cursor = db.connection.cursor()
 
 class PersonMetaSpider(Spider):
+    """Collect celebrity metadata for people referenced by movie credits."""
 
     name = 'person_item'
-    user_agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 \
-                  (KHTML, like Gecko) Chrome/67.0.3396.62 Safari/537.36'
-    allowed_domains = ["Person.douban.com"]
+    allowed_domains = ['movie.douban.com']
+    handled_statuses = [301, 302, 303, 307, 308, 403, 404, 429]
 
-    #select person id from db 
-    sql = 'SELECT person_id FROM person_obj WHERE person_id NOT IN (SELECT person_id FROM person) ORDER BY person_id DESC'
-    print("select person_id from db: ", sql)
-    cursor.execute(sql)
-    person_ids = cursor.fetchall()
+    def __init__(self, limit=100, person_ids=None, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.limit = max(0, int(limit))
+        self.person_ids = [
+            value.strip() for value in (person_ids or '').split(',')
+            if value.strip()
+        ]
 
-    start_urls = [
-        'https://movie.douban.com/celebrity/%s/' % i['person_id'] for i in person_ids
-        # 'https://movie.douban.com/celebrity/1054424/' 
-    ]
+    def _load_people(self):
+        if self.person_ids:
+            return [(person_id, '') for person_id in self.person_ids]
 
-    def start_requests(self):
-        for url in self.start_urls:
-            print("======url:", url)
-            bid = ''.join(random.choice(string.ascii_letters + string.digits) for x in range(11))
-            cookies = {
-                'bid': bid,
-                'dont_redirect': True,
-                'handle_httpstatus_list': [302],
-            }
+        sql = (
+            'SELECT po.person_id, po.name FROM person_obj AS po '
+            'WHERE NOT EXISTS ('
+            '  SELECT 1 FROM person AS p WHERE p.person_id=po.person_id'
+            ') ORDER BY po.person_id DESC'
+        )
+        params = ()
+        if self.limit:
+            sql += ' LIMIT %s'
+            params = (self.limit,)
 
-            yield Request(url, cookies=cookies,meta={'main_url':url})
+        connection = get_connection()
+        try:
+            with connection.cursor() as cursor:
+                cursor.execute(sql, params)
+                return [
+                    (str(row['person_id']), row.get('name') or '')
+                    for row in cursor.fetchall()
+                ]
+        finally:
+            connection.close()
 
-    #获取ID
-    def get_person_id(self, meta, response):
-        main_url = response.meta['main_url']
-        response_url = response.url
-        print("##### main_url:", main_url)
-        print("##### response_url: ", response_url)
+    @staticmethod
+    def _request_meta(person_id, fallback_name):
+        return {
+            'person_id': person_id,
+            'fallback_name': fallback_name,
+            'dont_redirect': True,
+            'handle_httpstatus_list': PersonMetaSpider.handled_statuses,
+        }
 
-        person_id = main_url.split("celebrity")[1].split("/")[1]
-        meta['person_id'] = person_id
-        print("==============person_id:", person_id)
-        #meta['person_id'] = response.url[33:-1]
-        return meta
+    async def start(self):
+        for person_id, fallback_name in self._load_people():
+            url = 'https://movie.douban.com/celebrity/{}/'.format(person_id)
+            yield Request(url, meta=self._request_meta(person_id, fallback_name))
 
-    #获取性别
-    def get_sex(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="性别"]]'
-        data = response.xpath(regx).extract()
-        print("============get_sex:", data)
-        if data:
-            meta["sex"] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-    #出生日期
-    def get_birth(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="出生日期"]]'
-        data = response.xpath(regx).extract()
-        print("============get_birth:", data)
-        if data:
-            meta['birth'] = validator.str_to_date(validator.match_date(data[0].strip("\n")))
-            if not meta['birth']:
-                meta['birth'] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-
-    def get_birthplace(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="出生地"]]'
-        data = response.xpath(regx).extract()
-        print("============get_birthplace:", data)
-        if data:
-            meta["birthplace"] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-    def get_biography(self, meta, response):
-        regx = '//div[@class="article"]/div[@id="intro"]/div[@class="bd"]/span[@class="short"]/text()'
-        data = response.xpath(regx).extract()
-        if data:
-            meta['biography'] = data[0]
-        return meta
-
-    def get_profession(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="职业"]]'
-        data = response.xpath(regx).extract()
-        if data:
-            meta['profession'] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-    def get_constellatory(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="星座"]]'
-        data = response.xpath(regx).extract()
-        if data:
-            meta['constellatory'] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-    def get_name_zh(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="更多中文名"]]'
-        data = response.xpath(regx).extract()
-        if data:
-            meta['name_zh'] = data[0].strip("\n").split(":")[-1]
-        return meta
-
-    def get_name_en(self, meta, response):
-        regx = '//div[@class="info"]/ul/li/text()[preceding-sibling::span[text()="更多外文名"]]'
-        data = response.xpath(regx).extract()
-        if data:
-            meta['name_en'] = data[0].strip("\n").split(":")[-1]
-        return meta
+    @staticmethod
+    def _info_value(response, label):
+        values = response.xpath(
+            '//div[contains(@class,"info")]//li['
+            'span[normalize-space()="{}"]]/text()'.format(label)
+        ).getall()
+        text = ' '.join(value.strip() for value in values if value.strip())
+        return text.lstrip(':：').strip()
 
     def parse(self, response):
-        print("=====================================+++++++++",response.url)
-        if 404 == response.status:
-            print("Person.meta.response.url: ",response.url)
-        else:
-            meta = PersonMeta()
-            self.get_person_id(meta, response)
-            self.get_sex(meta, response)
-            self.get_birth(meta, response)
-            self.get_birthplace(meta, response)
-            self.get_biography(meta, response)
-            self.get_profession(meta, response)
-            self.get_constellatory(meta, response)
-            self.get_name_zh(meta, response)
-            self.get_name_en(meta, response)
-            return meta
+        person_id = response.meta['person_id']
+        if response.status != 200:
+            self.logger.warning(
+                'Person page rejected: person=%s status=%s url=%s',
+                person_id, response.status, response.url,
+            )
+            return
 
-    def second_parse(self,response):
-        """print user-agent"""
-        print("\nChange User-Agent: ", response.request.headers['User-Agent'])
+        name = response.xpath(
+            'normalize-space(string(//div[@id="content"]//h1[1]))'
+        ).get(default='').strip()
+        name = name or response.meta.get('fallback_name', '').strip()
+        if not name:
+            self.logger.warning('Missing person name: %s', response.url)
+            return
+
+        birth_raw = self._info_value(response, '出生日期')
+        birth = validator.str_to_date(validator.match_date(birth_raw))
+        biography = response.xpath(
+            'normalize-space(string(//div[@id="intro"]'
+            '//span[contains(@class,"all")]))'
+        ).get(default='').strip()
+        if not biography:
+            biography = response.xpath(
+                'normalize-space(string(//div[@id="intro"]'
+                '//span[contains(@class,"short")]))'
+            ).get(default='').strip()
+
+        yield PersonMeta(
+            person_id=person_id,
+            name=name,
+            sex=self._info_value(response, '性别'),
+            birth=birth or birth_raw,
+            birthplace=self._info_value(response, '出生地'),
+            biography=validator.truncate_text(biography),
+            profession=self._info_value(response, '职业'),
+            constellatory=self._info_value(response, '星座'),
+            name_zh=self._info_value(response, '更多中文名'),
+            name_en=self._info_value(response, '更多外文名'),
+        )

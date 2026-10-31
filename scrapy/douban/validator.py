@@ -10,7 +10,7 @@ import re
 import arrow
 
 def match_year(s):
-    matches = re.findall('[\d]{4}', s)
+    matches = re.findall(r'\d{4}', s or '')
     if matches:
         return matches[0]
     else:
@@ -18,7 +18,7 @@ def match_year(s):
 
 
 def match_date(s):
-    matches = re.findall('[\d-]{8,10}', s)
+    matches = re.findall(r'\d{4}-\d{1,2}-\d{1,2}', s or '')
     if matches:
         return matches[0]
     else:
@@ -33,7 +33,7 @@ def str_to_date(s):
 
 
 def is_match_chinese(s):
-    matches = re.findall('[\u4e00-\u9fa5]+', s)
+    matches = re.findall(r'[\u4e00-\u9fa5]+', s or '')
     if matches:
         return True
     else:
@@ -41,15 +41,17 @@ def is_match_chinese(s):
 
 
 def process_slash_str(s):
-    alias = []
-    items = s.split('/')
-    for item in items:
-        if (is_match_chinese(item)):
-            alias.append(item)
-    return '/'.join(alias[0:30])
+    """Normalize slash-separated values without dropping foreign names."""
+    items = [item.strip() for item in (s or '').split('/') if item.strip()]
+    return '/'.join(items[:30])
 
 
 def process_url(s):
-    if (len(s) < 255):
+    if s and len(s) < 255:
         return s
     return ''
+
+
+def truncate_text(s, max_length=255):
+    """Keep text within the legacy MySQL varchar column size."""
+    return (s or '').strip()[:max_length]

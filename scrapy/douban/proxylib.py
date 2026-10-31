@@ -86,7 +86,7 @@ class ProxyTool(object):
         for n in range(first, end):
             actual_url = base_url + str(n)
             html = requests.get(url=actual_url, headers=self.headers).text
-            pattern = '(\d+\.\d+\.\d+\.\d+)</td>\s*<td>(\d+)'
+            pattern = r'(\d+\.\d+\.\d+\.\d+)</td>\s*<td>(\d+)'
             re_list = re.findall(pattern, html)
  
             for ip_port in re_list:
@@ -144,16 +144,6 @@ class ProxyTool(object):
 #                print(ip_port)
 #                if ip_port:
 #                    file.write('\'' + ip_port + "\'\n")
-                    
-                    
-import json
-def check_ip_valid(ip):
-    url = "https://dps.kdlapi.com/api/checkdpsvalid?orderid=966475943170494&signature=gu0yhmscwn5jva218dliy9gs6xg3oqov&proxy=" + ip
-    text = requests.get(url).text
-    result = json.loads(text)["data"][ip]
-    return result
-
-
 if __name__ == "__main__":
     with open("proxy.txt") as fr:
         ip_list = fr.readlines()

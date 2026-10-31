@@ -65,12 +65,19 @@ CREATE TABLE `comments` (
   `content` text COLLATE utf8mb4_unicode_ci NOT NULL,
   `votes` int(10) unsigned NOT NULL DEFAULT '0',
   `rating` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
-  `created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  `comment_time` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `updated_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `comments_douban_id_index` (`douban_id`),
   KEY `comments_douban_comment_id_index` (`douban_comment_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=3460029 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Application-facing comments enriched by Flask/docomment.py.
+DROP TABLE IF EXISTS `comments2`;
+CREATE TABLE `comments2` LIKE `comments`;
+ALTER TABLE `comments2`
+  ADD COLUMN `label` varchar(50) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  ADD COLUMN `score` double DEFAULT NULL;
 
 -- ----------------------------
 -- Table structure for movies
@@ -83,6 +90,12 @@ CREATE TABLE `movies` (
   `name` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `alias` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `cover` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `cover_source_url` varchar(512) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `cover_path` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `cover_status` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'pending',
+  `cover_hash` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `cover_checked_at` datetime DEFAULT NULL,
+  `cover_error` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `year` smallint(5) unsigned NOT NULL DEFAULT '0',
   `regions` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
   `genres` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
@@ -112,6 +125,10 @@ CREATE TABLE `movies` (
   KEY `movies_imdb_id_index` (`imdb_id`),
   KEY `movies_douban_id_index` (`douban_id`)
 ) ENGINE=InnoDB AUTO_INCREMENT=286399 DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Application-facing movie table populated by douban.sync_movies.
+DROP TABLE IF EXISTS `movies2`;
+CREATE TABLE `movies2` LIKE `movies`;
 
 
 -- ----------------------------

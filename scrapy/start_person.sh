@@ -1,7 +1,12 @@
 #!/bin/sh
+set -eu
 
-ps -ef | grep scrapy | grep -v grep | grep 'person_item' | cut -c 6-12 | xargs kill -9
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+if [ -x "$SCRIPT_DIR/../.venv-scrapy/bin/python" ]; then
+    PYTHON="$SCRIPT_DIR/../.venv-scrapy/bin/python"
+else
+    PYTHON="$SCRIPT_DIR/../.venv-scrapy/Scripts/python.exe"
+fi
 
-cd /Users/liudiwei/github/SwiftQA/AntSpider/scrapy
-
-/Users/liudiwei/anaconda3/bin/python /Users/liudiwei/anaconda3/bin/scrapy crawl person_item
+cd "$SCRIPT_DIR"
+exec "$PYTHON" -m scrapy crawl person_item "$@"

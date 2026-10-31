@@ -1,5 +1,11 @@
 # -*- coding: utf-8 -*-
 
+from douban.runtime_config import (
+    get_douban_user_agent,
+    get_poster_public_prefix,
+    get_poster_storage_root,
+)
+
 # Scrapy settings for douban project
 #
 # For simplicity, this file contains only settings considered important or
@@ -9,22 +15,28 @@
 #     https://doc.scrapy.org/en/latest/topics/downloader-middleware.html
 #     https://doc.scrapy.org/en/latest/topics/spider-middleware.html
 
-import random
-from douban.util import AGENT_LIST
-
 BOT_NAME = 'douban'
 
 SPIDER_MODULES = ['douban.spiders']
 NEWSPIDER_MODULE = 'douban.spiders'
 
-LOG_LEVEL = 'DEBUG'
-IMAGES_STORE = './storage/'
+LOG_LEVEL = 'INFO'
+IMAGES_STORE = get_poster_storage_root()
+IMAGES_EXPIRES = 90
+IMAGES_MIN_WIDTH = 120
+IMAGES_MIN_HEIGHT = 160
+POSTER_PUBLIC_PREFIX = get_poster_public_prefix()
+POSTER_MAX_WIDTH = 360
+POSTER_MAX_HEIGHT = 540
+POSTER_WEBP_QUALITY = 82
+POSTER_MAX_BYTES = 5 * 1024 * 1024
 
-# Crawl responsibly by identifying yourself (and your website) on the user-agent
-USER_AGENT = random.choice(AGENT_LIST)
+# Use one stable identity. An authenticated browser session should provide its
+# matching User-Agent through DOUBAN_USER_AGENT instead of rotating identities.
+USER_AGENT = get_douban_user_agent()
 
 # Obey robots.txt rules
-ROBOTSTXT_OBEY = False
+ROBOTSTXT_OBEY = True
 
 
 
@@ -36,29 +48,32 @@ SCHEDULER_MEMORY_QUEUE = 'scrapy.squeues.FifoMemoryQueue'
 DEPTH_LIMIT = 0
 DEPTH_STATS_VERBOSE=True
 
-#download timeout
-DOWNLOAD_TIMEOUT = 10
+# Download timeout
+DOWNLOAD_TIMEOUT = 30
 
 # Configure maximum concurrent requests performed by Scrapy (default: 16)
-# CONCURRENT_REQUESTS = 500
+CONCURRENT_REQUESTS = 2
 
 # Configure a delay for requests for the same website (default: 0)
 # See https://doc.scrapy.org/en/latest/topics/settings.html#download-delay
 # See also autothrottle settings and docs
 DOWNLOAD_DELAY = 10
+RANDOMIZE_DOWNLOAD_DELAY = True
 # The download delay setting will honor only one of:
 # CONCURRENT_REQUESTS_PER_DOMAIN = 16
-CONCURRENT_REQUESTS_PER_IP = 10
+CONCURRENT_REQUESTS_PER_IP = 1
 
-# Disable cookies (enabled by default)
-COOKIES_ENABLED = False
-RETRY_ENABLED = False
+# Keep Scrapy's cookie handling enabled. The project middleware remains inert
+# when neither DOUBAN_COOKIE nor the legacy COOKIE variable is configured.
+COOKIES_ENABLED = True
+RETRY_ENABLED = True
 
 #SET REDIRECT ENABLE
 #REDIRECT_ENABLED = False 
 #HTTPERROR_ALLOWED_CODES = [302,] 
 
 RETRY_TIMES = 2
+RETRY_HTTP_CODES = [408, 429, 500, 502, 503, 504, 522, 524]
 
 # Disable Telnet Console (enabled by default)
 # TELNETCONSOLE_ENABLED = False
@@ -71,18 +86,15 @@ RETRY_TIMES = 2
 
 # Enable or disable spider middlewares
 # See https://doc.scrapy.org/en/latest/topics/spider-middleware.html
-SPIDER_MIDDLEWARES = {
-   'douban.middlewares.DoubanSpiderMiddleware': 543,
-}
+# No project-specific spider middleware is required. The legacy proxy and
+# rotating-UA helpers remain disabled and are not imported by normal crawls.
+SPIDER_MIDDLEWARES = {}
 
-# Enable or disable downloader middlewares
-# See https://doc.scrapy.org/en/latest/topics/downloader-middleware.html   UAER-AGENT
-# DOWNLOADER_MIDDLEWARES = {
-#     'douban.middlewares.ProxyMiddleware': 400,
-#     'douban.middlewares.RandomUserAgentMiddleware':543,
-#     'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware': None,
-#     'scrapy.spidermiddlewares.depth.DepthMiddleware': 900,
-# }
+# Inject the optional environment Cookie only for movie.douban.com. Legacy
+# proxy and random-UA middleware stays disabled.
+DOWNLOADER_MIDDLEWARES = {
+    'douban.middlewares.EnvironmentCookieMiddleware': 650,
+}
 
 # Enable or disable extensions
 # See https://doc.scrapy.org/en/latest/topics/extensions.html
@@ -99,14 +111,14 @@ ITEM_PIPELINES = {
 
 # Enable and configure the AutoThrottle extension (disabled by default)
 # See https://doc.scrapy.org/en/latest/topics/autothrottle.html
-# AUTOTHROTTLE_ENABLED = True
+AUTOTHROTTLE_ENABLED = True
 # The initial download delay
-# AUTOTHROTTLE_START_DELAY = 5
+AUTOTHROTTLE_START_DELAY = 10
 # The maximum download delay to be set in case of high latencies
-# AUTOTHROTTLE_MAX_DELAY = 60
+AUTOTHROTTLE_MAX_DELAY = 60
 # The average number of requests Scrapy should be sending in parallel to
 # each remote server
-# AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
+AUTOTHROTTLE_TARGET_CONCURRENCY = 1.0
 # Enable showing throttling stats for every response received:
 # AUTOTHROTTLE_DEBUG = False
 
