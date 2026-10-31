@@ -18,7 +18,9 @@ from scrapy.exceptions import NotConfigured
 
 
 TMDB_FIND_URL = 'https://api.themoviedb.org/3/find/{}'
-TMDB_SEARCH_URL = 'https://api.themoviedb.org/3/search/movie'
+# 豆瓣的 movies 表里混有剧集与演出录像，/search/movie 对它们返回空，
+# 因此统一走 /search/multi（结果含 movie/tv/person，person 直接跳过）。
+TMDB_SEARCH_URL = 'https://api.themoviedb.org/3/search/multi'
 TMDB_IMAGE_URL = 'https://image.tmdb.org/t/p/{}/{}'
 IMDB_ID_PATTERN = re.compile(r'^tt\d+$')
 YEAR_PATTERN = re.compile(r'^\d{4}$')
@@ -126,7 +128,6 @@ class MovieCoverTmdbSpider(Spider):
             'language': self.language,
             'include_adult': 'false',
             'page': 1,
-            'year': year,
         }
         return Request(
             '{}?{}'.format(TMDB_SEARCH_URL, urlencode(params)),
@@ -153,21 +154,72 @@ class MovieCoverTmdbSpider(Spider):
     def parse_search(self, response, row):
         payload = response.json()
         expected_year = str(row.get('year') or '').strip()
+        if not YEAR_PATTERN.fullmatch(expected_year):
+            expected_year = ''
         results = payload.get('results', [])
-        if YEAR_PATTERN.fullmatch(expected_year):
-            results = [
-                movie for movie in results
-                if str(movie.get('release_date') or '').startswith(expected_year)
-            ]
-        result = self._first_poster(results)
+        # 不用 TMDB 的 year 参数：它按上映年份硬过滤，会把年份口径不一致的
+        # 条目（如剧集、重映片）整个排除。改为片名必须一致、同年优先。
+        result = self._pick_exact_title(results, row.get('name'), expected_year)
         if result is None:
             self.logger.warning(
-                'TMDB search has no confident poster for douban_id=%s name=%s',
+                'TMDB search has no exact title match for douban_id=%s name=%s '
+                '(year=%s, results=%d)',
                 row.get('douban_id'),
                 row.get('name'),
+                expected_year or '-',
+                len(results),
             )
             return
         yield self._poster_item(row, result['poster_path'])
+
+    @staticmethod
+    def _normalize_title(value):
+        text = str(value or '').casefold()
+        return re.sub(r'[\s\u3000·・:：_\-—,，.。!！?？()（）\[\]【】《》"\']', '', text)
+
+    @staticmethod
+    def _result_titles(movie):
+        values = (
+            movie.get('title'),
+            movie.get('name'),
+            movie.get('original_title'),
+            movie.get('original_name'),
+        )
+        return [value for value in values if value]
+
+    @staticmethod
+    def _result_date(movie):
+        return str(
+            movie.get('release_date') or movie.get('first_air_date') or ''
+        )
+
+    def _pick_exact_title(self, results, name, expected_year=''):
+        key = self._normalize_title(name)
+        if not key:
+            return None
+        matched = []
+        for movie in results:
+            if movie.get('media_type') == 'person':
+                continue
+            if not movie.get('poster_path'):
+                continue
+            titles = {
+                self._normalize_title(value)
+                for value in self._result_titles(movie)
+            }
+            if key in titles:
+                matched.append(movie)
+        if not matched:
+            return None
+        if expected_year:
+            same_year = [
+                movie for movie in matched
+                if self._result_date(movie).startswith(expected_year)
+            ]
+            if same_year:
+                return same_year[0]
+        # 年份口径不同（剧集/重映）时以片名为准，取 TMDB 返回顺序的第一条。
+        return matched[0]
 
     @staticmethod
     def _first_poster(results):

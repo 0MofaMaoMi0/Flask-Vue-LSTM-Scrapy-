@@ -86,8 +86,9 @@ class SpiderParsingTests(unittest.TestCase):
 
         request = spider._request_for_row(row)
 
-        self.assertIn('/3/search/movie?', request.url)
-        self.assertIn('year=1994', request.url)
+        self.assertIn('/3/search/multi?', request.url)
+        self.assertIn('query=', request.url)
+        self.assertNotIn('year=', request.url)
         self.assertNotIn('test-token', request.url)
         self.assertEqual(b'Bearer test-token', request.headers['Authorization'])
 
@@ -97,6 +98,7 @@ class SpiderParsingTests(unittest.TestCase):
                 'results': [
                     {
                         'id': 278,
+                        'title': '肖申克的救赎',
                         'release_date': '1994-09-23',
                         'poster_path': '/poster-test.jpg',
                     },
@@ -115,6 +117,84 @@ class SpiderParsingTests(unittest.TestCase):
 
         row['year'] = 0
         self.assertIsNone(spider._request_for_row(row))
+
+    def test_tmdb_cover_spider_rejects_same_year_different_title(self):
+        with patch.dict(os.environ, {
+            'TMDB_API_READ_TOKEN': 'test-token',
+            'TMDB_LANGUAGE': 'zh-CN',
+            'TMDB_IMAGE_SIZE': 'w500',
+        }):
+            spider = MovieCoverTmdbSpider()
+        row = {
+            'douban_id': '6087553',
+            'imdb_id': '',
+            'name': '泰坦尼克号',
+            'year': 2012,
+            'cover': 'https://img.example/douban.jpg',
+            'cover_path': '',
+            'cover_hash': '',
+        }
+        request = spider._request_for_row(row)
+        response = TextResponse(
+            url=request.url,
+            body=json.dumps({
+                'results': [
+                    {
+                        'id': 12345,
+                        'title': '泰坦尼克号：结案',
+                        'release_date': '2012-04-05',
+                        'poster_path': '/wrong-poster.jpg',
+                    },
+                ],
+            }).encode('utf-8'),
+            encoding='utf-8',
+            request=request,
+        )
+
+        self.assertEqual([], list(spider.parse_search(response, row)))
+
+    def test_tmdb_cover_spider_prefers_same_year_when_title_matches(self):
+        with patch.dict(os.environ, {'TMDB_API_READ_TOKEN': 'test-token'}):
+            spider = MovieCoverTmdbSpider()
+        row = {
+            'douban_id': '1292722',
+            'imdb_id': '',
+            'name': '泰坦尼克号',
+            'year': 1997,
+            'cover': '',
+            'cover_path': '',
+            'cover_hash': '',
+        }
+        request = spider._request_for_row(row)
+        response = TextResponse(
+            url=request.url,
+            body=json.dumps({
+                'results': [
+                    {
+                        'id': 1,
+                        'title': '泰坦尼克号',
+                        'release_date': '1943-01-01',
+                        'poster_path': '/old.jpg',
+                    },
+                    {
+                        'id': 2,
+                        'title': '泰坦尼克号',
+                        'release_date': '1997-12-18',
+                        'poster_path': '/new.jpg',
+                    },
+                ],
+            }).encode('utf-8'),
+            encoding='utf-8',
+            request=request,
+        )
+
+        items = list(spider.parse_search(response, row))
+
+        self.assertEqual(1, len(items))
+        self.assertEqual(
+            'https://image.tmdb.org/t/p/w500/new.jpg',
+            items[0]['cover_source_url'],
+        )
 
     def test_subject_spider_starts_explore_api_with_bounded_page_size(self):
         response = make_response(
