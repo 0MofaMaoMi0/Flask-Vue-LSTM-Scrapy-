@@ -9,7 +9,7 @@
 
 | 模块 | 功能 |
 | --- | --- |
-| 数据采集 | 爬取豆瓣电影详情、影评、名人信息，支持随机 UA / Cookie / 代理 IP 池 |
+| 数据采集 | 在遵守 robots.txt 和限速配置下采集电影详情、公开短评与影人信息，支持定向 ID 和运行上限 |
 | 情感分析 | 基于 PaddleNLP 的 Bi-LSTM 中文情感二分类（positive / negative），批量给影评打标签 |
 | 智能推荐 | ItemCF（基于物品）与 UserCF（基于用户）两种协同过滤推荐算法 |
 | 数据可视化 | 词云、年代产量、类型排行、国家分布、评分散点、时间轴、世界地图等 5 套大屏 |
@@ -52,8 +52,8 @@ YuanDaiMa/
 │   ├── douban/
 │   │   ├── spiders/            # movie_subject / movie_meta / movie_comment / person_meta
 │   │   ├── pipelines.py        # 数据清洗与入库
-│   │   ├── middlewares.py      # 随机 UA 等下载中间件
-│   │   ├── proxylib.py         # 代理 IP 池
+│   │   ├── middlewares.py      # 历史中间件实现（默认不启用）
+│   │   ├── proxylib.py         # 历史代理辅助代码（默认不启用）
 │   │   ├── database.py         # MySQL 连接
 │   │   └── settings.py
 │   ├── sql/douban.sql          # 建表脚本
@@ -105,8 +105,8 @@ MYSQL_PASSWORD=你的密码
 MYSQL_DATABASE=flask_douban_comment
 ```
 
-> 当前代码尚未读取 `.env`，连接串仍直接写在源码里，见「配置说明」一节的清单。复制
-> `.env` 不会自动改变实际连接配置。
+> 后端与爬虫均通过项目根目录的 `project_config.py` 加载 `.env`；进程环境变量优先于
+> 文件中的同名配置。
 
 ### 3. 启动后端
 
@@ -142,11 +142,28 @@ npm run serve
 # 在项目根目录执行；首次运行时创建并安装
 .\.venv\Scripts\python.exe -m venv .venv-scrapy
 .\.venv-scrapy\Scripts\python.exe -m pip install -r scrapy\requirements.txt --index-url https://pypi.org/simple
+.\.venv-scrapy\Scripts\python.exe -m pip install -r scrapy\requirements-images.txt --index-url https://pypi.org/simple
 
-# 例如，执行人员 ID 回填（运行前确保 MySQL 已启动）
+# 进入爬虫目录（需要读取任务时确保 MySQL 已启动）
 cd scrapy
+# 默认从豆瓣电影 explore 页的动态接口收集 1 页电影 ID
+..\.venv-scrapy\Scripts\python.exe -m scrapy crawl movie_subject
+# 电影详情默认最多处理 100 条
+..\.venv-scrapy\Scripts\python.exe -m scrapy crawl movie_meta -a limit=100
+# 将电影演职员 ID 回填到 person_obj
 ..\.venv-scrapy\Scripts\python.exe -m douban.rebuild_pid
 ```
+
+评论、人物采集及 `movies → movies2` 的只读预览/显式同步命令见
+[`scrapy/README.md`](scrapy/README.md)。爬虫仅在 `.env` 配置 Cookie 时注入会话，
+代理和随机 UA 默认关闭，不会自动进行全量抓取。
+
+海报默认作为 WebP 持久化到项目根目录 `data/covers/`，MySQL 仅保存
+原始 URL、相对路径、哈希和状态。Flask 通过 `/media/covers/` 提供带长缓存的
+图片响应，Vue 通过 `/api/media/covers/` 同源代理访问。图片下载遵守来源站点
+的 `robots.txt`；被禁止的来源只记录失败状态并保留原始 URL，不自动绕过。
+需要批量补齐时，可通过数据库中的 IMDb ID 使用可选的 TMDB 适配器，或者导入
+按豆瓣 ID 命名的已授权本地图片；配置和命令见 `scrapy/README.md`。
 
 ---
 
