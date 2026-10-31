@@ -47,7 +47,7 @@
       </div>
 
       <div class="my-4 text-subtitle-1" v-if="movie.directors">
-        {{movie.directors}}
+        导演：{{movie.directors}}
       </div>
 
       <div v-if="movie.storyline">{{shortText(movie.storyline, 90)}}</div>
