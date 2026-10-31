@@ -12,8 +12,12 @@
       ></v-progress-linear>
     </template>
 
+    <!-- 海报按 2:3 竖版容器 + contain 展示：豆瓣海报本身就是 2:3，
+         旧写法固定 height=250（横向条）会把竖版海报裁掉上下两端。 -->
     <v-img
-        height="250"
+        class="poster"
+        :aspect-ratio="2/3"
+        contain
         :src="posterUrl(movie)"
         :lazy-src="posterPlaceholder"
         @error="usePosterPlaceholder"
