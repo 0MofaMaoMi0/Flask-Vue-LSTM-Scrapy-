@@ -38,3 +38,9 @@ class Config:
     if not _poster_root.is_absolute():
         _poster_root = PROJECT_ROOT / _poster_root
     POSTER_STORAGE_ROOT = str(_poster_root.resolve())
+    # 海报回源代理的磁盘缓存上限（MB）；0 表示完全不落盘，只依赖浏览器缓存。
+    POSTER_PROXY_CACHE_MB = float(optional("POSTER_PROXY_CACHE_MB", "0") or 0)
+    POSTER_PROXY_USER_AGENT = optional(
+        "POSTER_PROXY_USER_AGENT",
+        optional("DOUBAN_USER_AGENT", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"),
+    )

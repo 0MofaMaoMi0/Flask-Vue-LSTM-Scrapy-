@@ -14,7 +14,7 @@
 
     <v-img
         height="250"
-        :src="doubanImg(movie.cover)"
+        :src="posterUrl(movie)"
         :lazy-src="posterPlaceholder"
         @error="usePosterPlaceholder"
     ></v-img>
@@ -193,6 +193,18 @@ export default {
       // 数据库已经保存完整的豆瓣海报 URL。旧实现强制转发到 images.weserv.nl，
       // 该代理已对这些地址返回 404，导致整页海报空白。
       return src || this.posterPlaceholder
+    },
+    posterUrl(movie) {
+      // 本地已存好的 WebP 直接引用；其余（豆瓣外链）走后端按需回源，
+      // 由服务端带上豆瓣 Referer 取图，浏览器不会再被防盗链拦下。
+      const cover = (movie && movie.cover) || ''
+      if (cover.startsWith('/api/media/covers/')) {
+        return cover
+      }
+      if (cover && movie.douban_id) {
+        return '/api/media/poster/' + movie.douban_id
+      }
+      return this.posterPlaceholder
     },
     usePosterPlaceholder(event) {
       if (event && event.target) {
