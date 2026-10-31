@@ -42,15 +42,15 @@
         </div>
       </v-row>
 
-      <div class="my-4 text-subtitle-1">
-        {{movie.genres}}·{{movie.regions}}
+      <div class="my-4 text-subtitle-1" v-if="genreRegion(movie)">
+        {{genreRegion(movie)}}
       </div>
 
-      <div class="my-4 text-subtitle-1">
-        {{movie.director}}
+      <div class="my-4 text-subtitle-1" v-if="movie.directors">
+        {{movie.directors}}
       </div>
 
-      <div>{{movie.intro}}</div>
+      <div v-if="movie.storyline">{{shortText(movie.storyline, 90)}}</div>
     </v-card-text>
 
     <v-divider class="mx-4"></v-divider>
@@ -210,6 +210,21 @@ export default {
       if (event && event.target) {
         event.target.src = this.posterPlaceholder
       }
+    },
+    // 类型与国家都为空时不要留下一个孤零零的「·」
+    genreRegion(movie) {
+      const parts = [(movie && movie.genres) || '', (movie && movie.regions) || '']
+        .map(text => String(text).trim())
+        .filter(Boolean)
+      return parts.join(' · ')
+    },
+    // 卡片上只放摘要，完整简介留给下方「介绍」区
+    shortText(text, limit) {
+      const value = String(text || '').trim()
+      if (!value) {
+        return ''
+      }
+      return value.length > limit ? value.slice(0, limit) + '…' : value
     },
     reserve (url) {
       url = "https://movie.douban.com/subject/" + url

@@ -41,7 +41,10 @@ def get():
     if keyword is None:
         keyword = ""
     # print(keyword)
-    result = db.session.query(Movie).filter(Movie.name.like('%' + keyword + '%')).order_by(Movie.douban_score.desc()).all()[:8]
+    # 数据库层直接 limit，避免把全表 2700+ 行 ORM 对象都拉进内存再切片
+    result = db.session.query(Movie).filter(
+        Movie.name.like('%' + keyword + '%')
+    ).order_by(Movie.douban_score.desc(), Movie.id.asc()).limit(8).all()
     data = movie_schema.dump(result)
     res.update(code=ResponseCode.SUCCESS, data=data)
     return res.data
@@ -50,8 +53,10 @@ def get():
 @movieBp.route('/getHot', methods=["GET"])
 def getHot():
     res = ResMsg()
-    # 热门只显示4个， 所以进行了切片，如果是数据很多的情况下，切片非常慢，最好直接用limit来访问数据库
-    result = db.session.query(Movie).order_by(Movie.douban_score.desc()).all()[:4]
+    # 热门只显示 4 个，直接在数据库层 limit
+    result = db.session.query(Movie).order_by(
+        Movie.douban_score.desc(), Movie.id.asc()
+    ).limit(4).all()
     # 使用Marshmallow来对结果封装json
     data = movie_schema.dump(result)
     res.update(code=ResponseCode.SUCCESS, data=data)
@@ -61,7 +66,9 @@ def getHot():
 @movieBp.route('/getRec', methods=["GET"])
 def getRec():
     res = ResMsg()
-    result = db.session.query(Movie).filter(Movie.genres.like('%科幻%')).order_by(Movie.douban_score.desc()).all()[:4]
+    result = db.session.query(Movie).filter(
+        Movie.genres.like('%科幻%')
+    ).order_by(Movie.douban_score.desc(), Movie.id.asc()).limit(4).all()
     data = movie_schema.dump(result)
     res.update(code=ResponseCode.SUCCESS, data=data)
     return res.data
@@ -104,7 +111,12 @@ def getAreaChart():
     kh = []
     ranges = [('1900', '1970'), ('1970', '1990'), ('1990', '2000'), ('2000', '2010'), ('2010', '2020')]
     for r in ranges:
-        khcnt = db.session.query(Movie).filter(Movie.year >= r[0], Movie.year < r[1]).count()
+        # 字段名是 kh（科幻），前端也按「科幻产量」展示；旧实现只统计了
+        # 该年代的全部影片数，口径与名字不符，这里补上类型过滤。
+        khcnt = db.session.query(Movie).filter(
+            Movie.genres.like('%科幻%'),
+            Movie.year >= r[0], Movie.year < r[1],
+        ).count()
         chart3 = dict(name=r[0] + '-' + r[1], value=khcnt)
         kh.append(chart3)
     # data = chart_data.dump(result)
@@ -153,9 +165,11 @@ def getTypeRank():
 @movieBp.route('/getNationRank', methods=["GET"])
 def getNationRank():
     res = ResMsg()
-    nations = ['摩纳哥', '西班牙', '印度', '比利时', '塞浦路斯', '英国', '冒险', '韩国', '希腊', '奥地利', '意大利', '动画', '德国', '泰国', '喜剧', '澳大利亚',
+    # 只列国家/地区：旧列表里混进了「冒险 / 动画 / 喜剧 / 悬疑」这类类型词，
+    # 会被当成分国家统计，画到世界地图上就成了脏数据。
+    nations = ['摩纳哥', '西班牙', '印度', '比利时', '塞浦路斯', '英国', '韩国', '希腊', '奥地利', '意大利', '德国', '泰国', '澳大利亚',
                '中国台湾', '巴西', '中国香港', '墨西哥', '加拿大', '匈牙利', '中国大陆', '瑞典', '新西兰', '卡塔尔', '捷克', '瑞士', '南非', '法国', '伊朗',
-               '黎巴嫩', '阿联酋', '日本', '悬疑', '约旦', '爱尔兰', '波兰', '丹麦', '美国', '阿根廷', '荷兰']
+               '黎巴嫩', '阿联酋', '日本', '约旦', '爱尔兰', '波兰', '丹麦', '美国', '阿根廷', '荷兰']
     datas = []
     for t in nations:
         cnt = db.session.query(Movie).filter(Movie.regions.like('%' + t + '%')).count()
@@ -179,11 +193,17 @@ def getTypeRate():
     datas = []
     for t in types:
         data = []
-        movies = db.session.query(Movie).filter(Movie.genres.like('%' + t + '%')).all()
+        # 只取有真实评分的条目：库里有 523 行 douban_score=0（未评分），
+        # 画进散点图会压在 y=0 形成一条假数据带。
+        movies = db.session.query(Movie).filter(
+            Movie.genres.like('%' + t + '%'),
+            Movie.douban_score > 0,
+            Movie.year > 0,
+        ).all()
         for m in movies:
             rateData = []
             rateData.append(int(m.year))
-            rateData.append(m.douban_score)
+            rateData.append(float(m.douban_score))
             data.append(rateData)
         datas.append(data)
     res.update(code=ResponseCode.SUCCESS, data=dict(datas=datas, labels=types))
