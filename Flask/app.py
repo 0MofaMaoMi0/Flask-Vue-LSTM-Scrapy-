@@ -12,6 +12,7 @@ from api.alipayApi import payBp
 from api.baiduApi import idocr
 from api.movieApi import movieBp
 from api.mediaApi import mediaBp
+from api.catalogApi import catalogBp, statsBp
 from api.posterProxy import posterBp
 from api.orderApi import orderBp
 from base.code import ResponseCode, ResponseMessage
@@ -38,6 +39,9 @@ app.register_blueprint(userBp, url_prefix='/user')
 app.register_blueprint(movieBp, url_prefix='/movie')
 app.register_blueprint(mediaBp, url_prefix='/media')
 app.register_blueprint(posterBp, url_prefix='/media')
+# 新 UI 用的读取接口：分页列表 / 详情 / 评论分页，以及统计聚合
+app.register_blueprint(catalogBp, url_prefix='/movie')
+app.register_blueprint(statsBp, url_prefix='/stats')
 
 
 @app.teardown_appcontext

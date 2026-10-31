@@ -45,6 +45,21 @@ class MovieSchema(ma.Schema):
 
 movie_schema = MovieSchema(many=True)
 
+
+def serialize_movies(rows):
+    """统一影片序列化：在 schema 结果上补一个前端可直接用的海报地址。
+
+    `cover` 字段历史上混放过本地路径、TMDB 直链和豆瓣外链，前端要自己判断类型；
+    这里额外给出 `poster`（走按需回源接口），新 UI 只认这一个字段即可。
+    """
+    data = movie_schema.dump(rows)
+    for item in data:
+        douban_id = item.get('douban_id')
+        item['poster'] = (
+            '/api/media/poster/{}'.format(douban_id) if douban_id else ''
+        )
+    return data
+
 # jieba分词接口，用来分词， movieApi里的getWordCut方法会调用这个
 def getWords():
     intros = db.session.query(Movie).all()

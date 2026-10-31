@@ -12,6 +12,7 @@
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -19,7 +20,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
-from flask import Blueprint, Response, abort, current_app, redirect
+from flask import Blueprint, Response, abort, current_app, redirect, request
 from sqlalchemy import text
 
 from base.core import db
@@ -36,6 +37,9 @@ HOST_INTERVAL_SECONDS = 0.2
 FAILURE_THRESHOLD = 3
 BREAKER_COOLDOWN_SECONDS = 60
 IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+# TMDB 支持的图片尺寸；`?w=` 只在这个白名单里生效，避免把参数拼进远端 URL
+TMDB_IMAGE_SIZES = ('w92', 'w154', 'w185', 'w342', 'w500', 'w780', 'original')
+TMDB_SIZE_PATTERN = re.compile(r'/t/p/[^/]+/')
 SOURCE_CACHE_LIMIT = 5000
 
 _host_lock = threading.Lock()
@@ -227,6 +231,12 @@ def _fetch_douban(url, referer):
         return body, content_type
 
 
+def _requested_size():
+    """`?w=w342` 之类的尺寸参数，只接受 TMDB 白名单内的值。"""
+    raw = (request.args.get('w') or '').strip()
+    return raw if raw in TMDB_IMAGE_SIZES else ''
+
+
 @posterBp.route('/poster/<douban_id>', methods=['GET'])
 def get_poster(douban_id):
     if not douban_id.isdigit():
@@ -241,6 +251,9 @@ def get_poster(douban_id):
     if target.startswith(LOCAL_PREFIX):
         return redirect(target, code=302)
     if 'image.tmdb.org' in target:
+        size = _requested_size()
+        if size:
+            target = TMDB_SIZE_PATTERN.sub('/t/p/{}/'.format(size), target, count=1)
         return redirect(target, code=302)
     if not target.startswith(('http://', 'https://')) or not _is_douban_image(target):
         abort(404)

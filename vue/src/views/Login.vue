@@ -196,14 +196,11 @@ export default {
       const loginForm = {"username": this.username, "password": this.password}
       login(loginForm).then(res=>{
         const {data} = res
-        if(data.code != 0)
-          this.$snackbar({content: data.msg, top:true, center:true, color:'red',multiLine: true})
-        else {
-          // localStorage.setItem('uid', data.data)
-          this.$store.dispatch('setUid', data.data)
-          this.$snackbar({content: '登录成功', top:true, center:true, color:'green',multiLine: true})
-          this.$router.push('/home')
-        }
+        this.$store.dispatch('setUid', data.data)
+        this.$snackbar({content: '登录成功', top:true, center:true, color:'green',multiLine: true})
+        this.$router.push('/home')
+      }).catch(err => {
+        this.$snackbar({content: err.message, top:true, center:true, color:'red',multiLine: true})
       })
     },
     register(){
@@ -213,13 +210,10 @@ export default {
       }
 
       const registForm = {"username": this.username, "password": this.password, "realname": this.realname}
-      register(registForm).then(res=>{
-        const {data} = res
-        if(data.code != 0)
-          this.$snackbar({content: data.msg, top:true, center:true, color:'red',multiLine: true})
-        else {
-          this.$snackbar({content: '注册成功', top:true, center:true, color:'green',multiLine: true})
-        }
+      register(registForm).then(()=>{
+        this.$snackbar({content: '注册成功', top:true, center:true, color:'green',multiLine: true})
+      }).catch(err => {
+        this.$snackbar({content: err.message, top:true, center:true, color:'red',multiLine: true})
       })
     }
   }
