@@ -238,7 +238,15 @@ class MovieCoverTmdbSpider(Spider):
             ]
             if same_year:
                 return same_year[0]
-        # 年份口径不同（剧集/重映）时以片名为准，取 TMDB 返回顺序的第一条。
+            # 年份对不上时，只接受剧集（季数后缀会让剧集年份天然错位），
+            # 否则宁可留空：同名不同年的电影很容易张冠李戴。
+            same_title_tv = [
+                movie for movie in matched
+                if movie.get('media_type') == 'tv'
+            ]
+            if same_title_tv:
+                return same_title_tv[0]
+            return None
         return matched[0]
 
     @staticmethod
