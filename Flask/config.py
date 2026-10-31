@@ -29,6 +29,12 @@ class Config:
         )
     )
     SQLALCHEMY_TRACK_MODIFICATIONS = False
+    # 连接池收紧：坏连接先探活，超时时间短一些，避免线程被长时间占住。
+    SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_pre_ping": True,
+        "pool_recycle": 1800,
+        "pool_timeout": 10,
+    }
     JSON_AS_ASCII = False
     SECRET_KEY = required("SECRET_KEY")
     HOST = optional("FLASK_HOST", "0.0.0.0")

@@ -29,9 +29,11 @@ posterBp = Blueprint('poster', __name__)
 LOCAL_PREFIX = '/api/media/covers/'
 DOUBAN_REFERER = 'https://movie.douban.com/subject/{}/'
 DOUBAN_HOST_SUFFIX = '.doubanio.com'
-UPSTREAM_TIMEOUT = 8
+UPSTREAM_TIMEOUT = (3, 6)
 UPSTREAM_MAX_BYTES = 5 * 1024 * 1024
 HOST_INTERVAL_SECONDS = 0.2
+FAILURE_THRESHOLD = 3
+BREAKER_COOLDOWN_SECONDS = 60
 IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
 
 _host_lock = threading.Lock()
@@ -39,6 +41,30 @@ _host_next_slot = {}
 _inflight_lock = threading.Lock()
 _inflight = {}
 _cache_lock = threading.Lock()
+_breaker_lock = threading.Lock()
+_breaker_state = {}
+
+
+def _breaker_open(host):
+    with _breaker_lock:
+        failures, opened_at = _breaker_state.get(host, (0, 0.0))
+        if opened_at and time.monotonic() - opened_at < BREAKER_COOLDOWN_SECONDS:
+            return True
+    return False
+
+
+def _breaker_record(host, ok):
+    """连续失败达到阈值就短暂熔断，避免整页海报把工作线程全占住。"""
+    with _breaker_lock:
+        if ok:
+            _breaker_state.pop(host, None)
+            return
+        failures, opened_at = _breaker_state.get(host, (0, 0.0))
+        failures += 1
+        if failures >= FAILURE_THRESHOLD:
+            _breaker_state[host] = (0, time.monotonic())
+        else:
+            _breaker_state[host] = (failures, 0.0)
 
 
 def _wait_for_host_slot(host):
@@ -126,13 +152,16 @@ def _fetch_douban(url, referer):
     cached = _cache_read(url)
     if cached is not None:
         return cached
+    host = urlsplit(url).hostname or ''
+    if _breaker_open(host):
+        return None
     with _inflight_lock:
         gate = _inflight.setdefault(url, threading.Lock())
     with gate:
         cached = _cache_read(url)
         if cached is not None:
             return cached
-        _wait_for_host_slot(urlsplit(url).hostname or '')
+        _wait_for_host_slot(host)
         try:
             response = requests.get(
                 url,
@@ -144,16 +173,20 @@ def _fetch_douban(url, referer):
                 stream=True,
             )
         except requests.RequestException:
+            _breaker_record(host, False)
             return None
         try:
             if response.status_code != 200:
+                _breaker_record(host, False)
                 return None
             body = response.raw.read(UPSTREAM_MAX_BYTES + 1, decode_content=True)
             if not body or len(body) > UPSTREAM_MAX_BYTES:
+                _breaker_record(host, False)
                 return None
             content_type = response.headers.get('Content-Type') or 'image/jpeg'
         finally:
             response.close()
+        _breaker_record(host, True)
         _cache_write(url, body, content_type)
         return body, content_type
 

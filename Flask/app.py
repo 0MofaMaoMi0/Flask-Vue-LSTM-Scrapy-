@@ -38,6 +38,17 @@ app.register_blueprint(userBp, url_prefix='/user')
 app.register_blueprint(movieBp, url_prefix='/movie')
 app.register_blueprint(mediaBp, url_prefix='/media')
 app.register_blueprint(posterBp, url_prefix='/media')
+
+
+@app.teardown_appcontext
+def _release_db_session(exception=None):
+    """请求结束一律归还数据库连接。
+
+    原先只有 movieBp / userBp 各自声明了 after_request，新增蓝图一旦忘记挂
+    清理钩子就会持续泄漏连接池（默认 5+10），把登录等查库接口全部拖死。
+    这里在应用级统一收口，任何蓝图都不会漏。
+    """
+    db.session.remove()
 app.register_blueprint(payBp, url_prefix='/alipay')
 app.register_blueprint(orderBp, url_prefix='/order')  # 订单接口
 
@@ -161,4 +172,5 @@ if __name__ == '__main__':
         debug=app.config['DEBUG'],
         host=app.config['HOST'],
         port=app.config['PORT'],
+        threaded=True,
     )
