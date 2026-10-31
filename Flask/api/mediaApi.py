@@ -13,6 +13,9 @@ def get_cover(filename):
     response = send_from_directory(
         current_app.config['POSTER_STORAGE_ROOT'],
         filename,
+        # 部分 Windows/Slim 镜像的 mimetypes 库不认识 .webp，会返回空
+        # Content-Type；配合 nosniff 浏览器就不会渲染图片，这里显式声明。
+        mimetype='image/webp',
         conditional=True,
         max_age=31536000,
     )
