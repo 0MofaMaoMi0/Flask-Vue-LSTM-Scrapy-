@@ -13,7 +13,7 @@ from api.baiduApi import idocr
 from api.movieApi import movieBp
 from api.mediaApi import mediaBp
 from api.orderApi import orderBp
-from base.code import ResponseCode
+from base.code import ResponseCode, ResponseMessage
 from base.core import JSONEncoder
 from base.response import ResMsg
 from api.testApi import bp
@@ -99,25 +99,30 @@ def api_upload():
     res.update(data=new_filename, code=0)
     return res.data
 
+# 身份证识别专用：只收图片，且限制单张体积
+ID_CARD_EXTENSIONS = set(['png', 'jpg', 'jpeg', 'bmp', 'PNG', 'JPG', 'JPEG', 'BMP'])
+ID_CARD_MAX_BYTES = 4 * 1024 * 1024
+
 @app.route('/file/idocr', methods=['POST'], strict_slashes=False)
 def api_id_ocr():
+    # 身份证照片只在内存中流转：不写 upload/ 目录，识别完随请求释放。
     res = ResMsg()
-    file_dir=os.path.join(basedir, app.config['UPLOAD_FOLDER'])
-    if not os.path.exists(file_dir):
-        os.makedirs(file_dir)
-    f = request.files['myfile']
-    if f and allowed_file(f.filename):
-        fname = f.filename
-        # fname = secure_filename(f.filename)  有中文这个会有问题
-        # print(fname)
-        ext = fname.rsplit('.', 1)[1]
-        unix_time = int(time.time())
-        new_filename = str(unix_time)+'.'+ext
-        f.save(os.path.join(file_dir, new_filename))
-        current_path = os.path.dirname(__file__)
+    f = request.files.get('myfile')
+    if not f or '.' not in (f.filename or ''):
+        res.update(code=ResponseCode.FAIL, msg=ResponseMessage.INVALID_PARAMETER)
+        return res.data
+    ext = f.filename.rsplit('.', 1)[1]
+    if ext not in ID_CARD_EXTENSIONS:
+        res.update(code=ResponseCode.FAIL, msg=ResponseMessage.INVALID_PARAMETER)
+        return res.data
+    image_bytes = f.read()
+    if not image_bytes or len(image_bytes) > ID_CARD_MAX_BYTES:
+        res.update(code=ResponseCode.FAIL, msg=ResponseMessage.INVALID_PARAMETER)
+        return res.data
 
-        idno, name = idocr(current_path + '/upload/' + new_filename)
-    res.update(data=dict(idno=idno,pic=new_filename,name=name), code=0)
+    idno, name = idocr(image_bytes)
+    # pic 字段保留但恒为 None：照片不再由后端留存，前端改用本地 blob 预览。
+    res.update(data=dict(idno=idno, pic=None, name=name), code=ResponseCode.SUCCESS)
     return res.data
 
 @app.route('/file/download/<filename>/')

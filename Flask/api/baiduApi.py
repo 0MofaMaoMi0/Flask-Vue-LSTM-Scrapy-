@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 """Baidu OCR integration configured from the local `.env` file."""
 
-import os
-
 from aip import AipOcr
 
 from config import required
@@ -20,13 +18,12 @@ def _client():
     )
 
 
-def get_file_content(file_path):
-    with open(file_path, "rb") as file_pointer:
-        return file_pointer.read()
+def idocr(image_bytes):
+    """识别身份证：直接接收图片字节，全程不落盘。
 
-
-def idocr(filename):
-    print("当前路径 -> %s" % os.getcwd())
-    result = _client().idcard(get_file_content(filename), ID_CARD_SIDE)
+    调用方只把上传流读进内存，识别结束随请求释放；身份证照片既不会写进
+    Flask/upload/ 目录，也不会留在磁盘缓存里。
+    """
+    result = _client().idcard(image_bytes, ID_CARD_SIDE)
     words = result["words_result"]
     return words["公民身份号码"]["words"], words["姓名"]["words"]

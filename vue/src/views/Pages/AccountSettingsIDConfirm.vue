@@ -169,15 +169,23 @@ export default {
     },
     getImages(el){
       const file = el.target.files[0]
-      // console.log(file)
+      if (!file) return
       const type = file.type.split("/")[0]
       if (type === "image"){
+        // 身份证照片不再由后端保存，预览改用浏览器本地 blob
+        if (this.idcardImage && this.idcardImage.indexOf('blob:') === 0) {
+          URL.revokeObjectURL(this.idcardImage)
+        }
+        this.idcardImage = URL.createObjectURL(file)
         doidocr(file).then(res=>{
-          // console.log(res.data)
+          if (res.data.code !== 0) {
+            this.$snackbar({content: '识别失败，请换一张清晰的身份证照片', top:true, center:true, color:'red',multiLine: true})
+            return
+          }
           this.idnum = res.data.data.idno
           this.name = res.data.data.name
-          this.idcardImage = this.serverImg(res.data.data.pic)
-          console.log(this.idcardImage)
+        }).catch(()=>{
+          this.$snackbar({content: '识别失败，请稍后重试', top:true, center:true, color:'red',multiLine: true})
         })
       }else{
         this.$snackbar({content: '只能上传图片格式', top:true, center:true, color:'red',multiLine: true})
