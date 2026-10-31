@@ -15,6 +15,7 @@ from douban.database import get_connection
 
 POSTER_COLUMNS = [
     'cover',
+    'cover_source_url',
     'cover_path',
     'cover_status',
     'cover_hash',
