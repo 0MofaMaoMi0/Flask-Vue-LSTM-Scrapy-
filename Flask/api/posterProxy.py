@@ -14,14 +14,15 @@ import json
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import requests
 from flask import Blueprint, Response, abort, current_app, redirect
+from sqlalchemy import text
 
 from base.core import db
-from models.movie import Movie
 
 
 posterBp = Blueprint('poster', __name__)
@@ -35,6 +36,7 @@ HOST_INTERVAL_SECONDS = 0.2
 FAILURE_THRESHOLD = 3
 BREAKER_COOLDOWN_SECONDS = 60
 IMMUTABLE_CACHE = 'public, max-age=31536000, immutable'
+SOURCE_CACHE_LIMIT = 5000
 
 _host_lock = threading.Lock()
 _host_next_slot = {}
@@ -43,6 +45,40 @@ _inflight = {}
 _cache_lock = threading.Lock()
 _breaker_lock = threading.Lock()
 _breaker_state = {}
+_source_lock = threading.Lock()
+_source_cache = OrderedDict()
+
+
+def _lookup_source(douban_id):
+    """用独立的短连接查一次地址，查完立刻归还连接池。
+
+    这里刻意不走 ORM session：海报回源要花 3~6 秒做网络请求，如果把
+    session（以及它占用的连接）跨过网络请求持有，刷新几次就会把连接池
+    抽干，连登录、列表接口都会一起 500。
+    """
+    with _source_lock:
+        cached = _source_cache.get(douban_id)
+        if cached is not None:
+            _source_cache.move_to_end(douban_id)
+            return cached
+    sql = text(
+        'SELECT cover, cover_source_url FROM movies2 '
+        'WHERE douban_id = :douban_id LIMIT 1'
+    )
+    with db.engine.connect() as connection:
+        row = connection.execute(sql, {'douban_id': douban_id}).fetchone()
+    if row is None:
+        result = None
+    else:
+        result = (
+            (row[1] or '').strip(),
+            (row[0] or '').strip(),
+        )
+    with _source_lock:
+        _source_cache[douban_id] = result
+        if len(_source_cache) > SOURCE_CACHE_LIMIT:
+            _source_cache.popitem(last=False)
+    return result
 
 
 def _breaker_open(host):
@@ -195,12 +231,11 @@ def _fetch_douban(url, referer):
 def get_poster(douban_id):
     if not douban_id.isdigit():
         abort(404)
-    row = db.session.query(Movie).filter(Movie.douban_id == douban_id).first()
-    if row is None:
+    lookup = _lookup_source(douban_id)
+    if lookup is None:
         abort(404)
+    source, cover = lookup
 
-    source = (getattr(row, 'cover_source_url', '') or '').strip()
-    cover = (getattr(row, 'cover', '') or '').strip()
     target = source or cover
 
     if target.startswith(LOCAL_PREFIX):
@@ -210,6 +245,7 @@ def get_poster(douban_id):
     if not target.startswith(('http://', 'https://')) or not _is_douban_image(target):
         abort(404)
 
+    # 到这里数据库连接已经归还，下面的网络请求不会占用连接池。
     result = _fetch_douban(target, DOUBAN_REFERER.format(douban_id))
     if result is None:
         abort(502)

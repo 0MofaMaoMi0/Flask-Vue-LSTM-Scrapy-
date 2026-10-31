@@ -31,6 +31,8 @@ class Config:
     SQLALCHEMY_TRACK_MODIFICATIONS = False
     # 连接池收紧：坏连接先探活，超时时间短一些，避免线程被长时间占住。
     SQLALCHEMY_ENGINE_OPTIONS = {
+        "pool_size": 10,
+        "max_overflow": 20,
         "pool_pre_ping": True,
         "pool_recycle": 1800,
         "pool_timeout": 10,

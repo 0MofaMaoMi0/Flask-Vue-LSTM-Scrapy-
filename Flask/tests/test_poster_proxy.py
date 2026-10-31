@@ -38,6 +38,8 @@ class PosterProxyTest(unittest.TestCase):
     def setUp(self):
         posterProxy._host_next_slot.clear()
         posterProxy._inflight.clear()
+        posterProxy._breaker_state.clear()
+        posterProxy._source_cache.clear()
         self.client = app_module.app.test_client()
         app_module.app.config.update(
             TESTING=True,
@@ -45,16 +47,13 @@ class PosterProxyTest(unittest.TestCase):
             POSTER_PROXY_USER_AGENT="test-agent",
         )
 
-    def _patch_row(self, cover="", source=""):
-        row = SimpleNamespace(
-            douban_id="1292052", cover=cover, cover_source_url=source
+    def _patch_source(self, cover="", source=""):
+        return mock.patch.object(
+            posterProxy, "_lookup_source", return_value=(source, cover)
         )
-        fake_db = mock.MagicMock()
-        fake_db.session.query.return_value.filter.return_value.first.return_value = row
-        return mock.patch.object(posterProxy, "db", fake_db)
 
     def test_local_webp_redirects_without_touching_upstream(self):
-        with self._patch_row(cover="/api/media/covers/a6/30/x.webp?v=1"):
+        with self._patch_source(cover="/api/media/covers/a6/30/x.webp?v=1"):
             with mock.patch.object(posterProxy.requests, "get") as get:
                 response = self.client.get("/media/poster/1292052")
         self.assertEqual(302, response.status_code)
@@ -63,7 +62,7 @@ class PosterProxyTest(unittest.TestCase):
 
     def test_tmdb_source_redirects_to_cdn(self):
         source = "https://image.tmdb.org/t/p/w500/aAdnwqwk.jpg"
-        with self._patch_row(cover="https://img2.doubanio.com/x.jpg", source=source):
+        with self._patch_source(cover="https://img2.doubanio.com/x.jpg", source=source):
             with mock.patch.object(posterProxy.requests, "get") as get:
                 response = self.client.get("/media/poster/1292052")
         self.assertEqual(302, response.status_code)
@@ -72,7 +71,7 @@ class PosterProxyTest(unittest.TestCase):
 
     def test_douban_cover_is_fetched_with_referer_and_cached_headers(self):
         cover = "https://img2.doubanio.com/view/photo/p480747492.jpg"
-        with self._patch_row(cover=cover):
+        with self._patch_source(cover=cover):
             with mock.patch.object(
                 posterProxy.requests, "get", return_value=_FakeResponse()
             ) as get:
@@ -82,13 +81,11 @@ class PosterProxyTest(unittest.TestCase):
         self.assertIn("immutable", response.headers["Cache-Control"])
         self.assertEqual("nosniff", response.headers["X-Content-Type-Options"])
         referer = get.call_args.kwargs["headers"]["Referer"]
-        self.assertEqual(
-            "https://movie.douban.com/subject/1292052/", referer
-        )
+        self.assertEqual("https://movie.douban.com/subject/1292052/", referer)
 
     def test_upstream_failure_becomes_502(self):
         cover = "https://img2.doubanio.com/view/photo/p480747492.jpg"
-        with self._patch_row(cover=cover):
+        with self._patch_source(cover=cover):
             with mock.patch.object(
                 posterProxy.requests,
                 "get",
@@ -102,17 +99,34 @@ class PosterProxyTest(unittest.TestCase):
         self.assertEqual(404, response.status_code)
 
     def test_missing_row_is_404(self):
-        with self._patch_row() as _:
-            posterProxy.db.session.query.return_value.filter.return_value.first.return_value = None
+        with mock.patch.object(posterProxy, "_lookup_source", return_value=None):
             response = self.client.get("/media/poster/999999")
         self.assertEqual(404, response.status_code)
 
     def test_non_douban_host_is_not_proxied(self):
-        with self._patch_row(cover="https://evil.example/poster.jpg"):
+        with self._patch_source(cover="https://evil.example/poster.jpg"):
             with mock.patch.object(posterProxy.requests, "get") as get:
                 response = self.client.get("/media/poster/1292052")
         self.assertEqual(404, response.status_code)
         get.assert_not_called()
+
+    def test_lookup_source_uses_short_lived_engine_connection(self):
+        """查库必须走独立连接并立即归还，不能把 ORM session 跨过网络请求持有。"""
+        fake_connection = mock.MagicMock()
+        fake_connection.execute.return_value.fetchone.return_value = (
+            "",
+            "https://img2.doubanio.com/x.jpg",
+        )
+        context = mock.MagicMock()
+        context.__enter__.return_value = fake_connection
+        context.__exit__.return_value = False
+        fake_db = mock.MagicMock()
+        fake_db.engine.connect.return_value = context
+        with mock.patch.object(posterProxy, "db", fake_db):
+            result = posterProxy._lookup_source("30443686")
+        self.assertEqual(("https://img2.doubanio.com/x.jpg", ""), result)
+        context.__exit__.assert_called_once()
+        fake_db.session.query.assert_not_called()
 
 
 if __name__ == "__main__":
