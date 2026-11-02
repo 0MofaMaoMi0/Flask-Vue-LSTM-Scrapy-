@@ -1,0 +1,1 @@
+<script setup lang="ts">import PosterWall from './components/PosterWall.vue'</script><template><PosterWall/><RouterView v-slot="{Component}"><Transition name="route"><component :is="Component"/></Transition></RouterView></template>

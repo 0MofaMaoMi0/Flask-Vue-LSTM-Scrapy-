@@ -1,0 +1,270 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07090f">
+  <title>MovieInsight — 登录 V3.7 · 静态欢迎词</title>
+  <meta name="description" content="MovieInsight 电影海报墙与电影片头式登录交互原型">
+  <style>
+    :root{color-scheme:dark;--bg:#07090f;--ivory:#f5eee5;--amber:#d2b88e;--muted:#b3b2b9;--line:rgba(248,240,225,.21);--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;--serif:'Noto Serif SC','Songti SC','SimSun',serif}
+    *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:var(--bg)} body{color:var(--ivory);font-family:var(--sans);overflow-x:hidden} button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:2px solid #f9dbad;outline-offset:4px} a{color:inherit}
+    .wall{position:fixed;inset:0;z-index:0;overflow:hidden;background:linear-gradient(125deg,#08111a,#100e17 46%,#1a1113)}
+    .wall-grid{position:absolute;inset:-20% -11%;display:flex;gap:12px;transform:rotate(-7deg) scale(1.1);pointer-events:none;filter:saturate(.78) contrast(1.09);}
+    .strip{flex:1;min-width:100px;overflow:hidden;position:relative;--duration:46s}
+    .track{display:flex;flex-direction:column;animation:poster-drift var(--duration) ease-in-out infinite alternate;will-change:transform}
+    .strip:nth-child(even) .track{animation-direction:alternate-reverse}
+    /* 不复制海报，不轮播重复的电影：每条轨道在自己的唯一海报上做往复慢移。 */
+    .set{display:flex;flex-direction:column;gap:12px;padding-bottom:12px}
+    .poster{position:relative;aspect-ratio:2/3;overflow:hidden;background:linear-gradient(145deg,#141a24,#1b1820 45%,#0b111b);box-shadow:0 12px 30px #0009;border:1px solid #c4a37d29;isolation:isolate}
+    .poster:nth-child(3n){aspect-ratio:4/5.4}
+    .poster.missing{background:linear-gradient(150deg,#131923,#1c1a20 55%,#0b111b)}
+    .poster img{position:relative;z-index:1;display:block;width:100%;height:100%;object-fit:cover;user-select:none;-webkit-user-drag:none;opacity:0;transition:opacity .55s ease}.poster img.ready{opacity:1}
+    
+    @keyframes poster-drift{from{transform:translate3d(0,-2%,0)}to{transform:translate3d(0,-17%,0)}}
+    /* 海报本身没有 blur：用暗色和渐变保持前景可读 */
+    .shade{position:absolute;inset:0;pointer-events:none;background:linear-gradient(90deg,rgba(2,4,9,.58),rgba(3,5,11,.13) 22%,rgba(3,5,11,.14) 77%,rgba(2,4,8,.58)),linear-gradient(0deg,rgba(3,4,8,.88),transparent 24%,transparent 77%,rgba(3,4,8,.82));}
+    .focus-vignette{position:absolute;inset:0;pointer-events:none;background:radial-gradient(ellipse 36% 51% at 50% 49%,rgba(4,6,12,.93) 0%,rgba(5,7,13,.88) 38%,rgba(6,8,14,.45) 66%,transparent 100%);}
+    .film-edge{position:absolute;inset:0;opacity:.10;pointer-events:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 130 130'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.7' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='130' height='130' filter='url(%23n)' opacity='.22'/%3E%3C/svg%3E")}
+    .film-bars{position:absolute;inset:0;pointer-events:none;border-top:1px solid #eddfca18;border-bottom:1px solid #eddfca18}
+    /* V3.2：两层页面纯淡入淡出；不采用遮屏、抽屉或向左滑出的黑框。 */
+    .screen{position:fixed;inset:0;z-index:1;display:flex;min-height:100svh;max-height:100svh;overflow-y:auto;opacity:0;visibility:hidden;pointer-events:none;transition:opacity .72s ease,visibility 0s linear .72s}
+    .screen.active{opacity:1;visibility:visible;pointer-events:auto;transition:opacity .72s ease,visibility 0s linear 0s}
+    .auth-shell{animation:none!important;transform:none!important}
+    .welcome{align-items:center;justify-content:center;text-align:center;padding:100px 20px}
+    .welcome-content{width:min(100%,470px);display:flex;flex-direction:column;align-items:center}
+    .logo{width:72px;height:72px;margin:0 0 18px;filter:drop-shadow(0 3px 15px #000a)}
+    .eyebrow{color:#d9c2a2;letter-spacing:.47em;font-size:10px;font-weight:600;margin:0 0 31px 5px}
+    .rule{width:36px;height:1px;background:#e2bf8d;margin-bottom:33px}
+    .welcome h1{font-family:var(--serif);font-size:clamp(42px,5.2vw,71px);font-weight:600;letter-spacing:.16em;line-height:1.18;margin:0 0 22px;text-shadow:0 5px 28px #000d}
+    .subtitle{font-size:14px;color:#ddd5d0;letter-spacing:.18em;line-height:1.8;margin:0 0 55px}
+    /* 烟熏液态玻璃按钮：仅按钮背板局部折射，绝不模糊海报墙本身 */
+    .liquid{position:relative;isolation:isolate;overflow:hidden;background:linear-gradient(145deg,rgba(255,255,255,.17),rgba(255,255,255,.035) 49%,rgba(255,255,255,.11));color:#fffaf2;border:1px solid #ffffff72;border-radius:999px;box-shadow:inset 0 2px 0 #ffffff66,inset 0 -7px 19px #08070b6b,0 17px 37px #0009,0 0 0 1px #0006;backdrop-filter:blur(12px) saturate(1.2);-webkit-backdrop-filter:blur(12px) saturate(1.2);transition:transform .25s,box-shadow .25s,border-color .25s}
+    .liquid::before{content:"";position:absolute;z-index:-1;left:-80%;top:-130%;width:65%;height:330%;background:linear-gradient(90deg,transparent,rgba(255,255,255,.30),transparent);transform:rotate(24deg);transition:left .62s ease}
+    .liquid::after{content:"";position:absolute;z-index:-1;inset:2px;border-radius:inherit;border:1px solid #ffffff25;pointer-events:none}
+    .liquid:hover{transform:translateY(-3px);border-color:#f9efe8b8;box-shadow:inset 0 2px 0 #ffffff89,inset 0 -5px 22px #0b0b1591,0 23px 49px #000c,0 0 25px #e5d0a32e}
+    .liquid:hover::before{left:155%}.liquid:active{transform:translateY(0)}
+    .welcome-login{width:min(350px,100%);height:61px;font-size:15px;font-weight:600;letter-spacing:.35em}
+    .register-link{background:none;border:0;color:#e8e0dbb0;font-size:13px;letter-spacing:.25em;margin-top:21px;padding:12px 32px}
+    .register-link:hover{color:#fff}
+    .quiet-line{width:118px;height:1px;background:linear-gradient(90deg,transparent,#bda58a85,transparent);margin-top:5px}
+    .auth{align-items:center;justify-content:center;padding:82px clamp(17px,4.7vw,90px)}
+    .auth-shell{width:min(1100px,100%);min-height:clamp(560px,73vh,735px);display:grid;grid-template-columns:1.08fr .92fr;overflow:hidden;border:1px solid rgba(238,223,198,.27);background:rgba(5,7,13,.24);box-shadow:0 28px 90px rgba(0,0,0,.45);backdrop-filter:saturate(1.12);-webkit-backdrop-filter:saturate(1.12)}
+    .story{position:relative;padding:clamp(30px,4vw,61px);display:flex;flex-direction:column;justify-content:space-between;isolation:isolate;overflow:hidden;background:linear-gradient(110deg,rgba(10,13,21,.43),rgba(8,11,19,.18) 65%,rgba(10,10,16,.29))}
+    .story::before{content:"";position:absolute;inset:0;z-index:-1;background:radial-gradient(ellipse at 16% 54%,rgba(31,41,55,.32),transparent 61%),linear-gradient(95deg,rgba(3,4,10,.40),rgba(5,7,12,.17))}
+    .tiny-label{font-size:11px;letter-spacing:.32em;color:#d0b997}
+    .story-title{font-family:var(--serif);font-size:clamp(39px,4vw,59px);letter-spacing:.08em;font-weight:600;line-height:1.45;margin:0 0 20px}
+    .story-title em{color:#e3c69b;font-style:normal}
+    .story-desc{color:#c8bdba;font-size:13px;line-height:2.2;letter-spacing:.12em;max-width:335px;margin:0}
+    .story-bottom{border-top:1px solid #c3a98c3c;padding-top:18px;color:#b3a697;letter-spacing:.26em;font-size:10px}
+    .form-panel{padding:80px clamp(29px,5.1vw,66px) 55px;background:linear-gradient(154deg,rgba(16,18,26,.56),rgba(11,13,20,.47));display:flex;justify-content:center;flex-direction:column;position:relative}
+    .form-panel:before{content:"";position:absolute;left:0;top:0;bottom:0;width:1px;background:linear-gradient(transparent,#d9bb9752,transparent)}
+    .back{position:absolute;left:clamp(29px,5.1vw,66px);top:35px;background:transparent;border:0;padding:8px 0;color:#b6aaa1;font-size:12px;letter-spacing:.1em}
+    .back:hover{color:white}
+    .form-kicker{font-size:10px;letter-spacing:.32em;color:#cab08b;margin-bottom:17px}
+    .form-title{font-family:var(--serif);font-size:clamp(34px,3.7vw,49px);letter-spacing:.13em;font-weight:600;margin:0 0 12px}
+    .form-subtitle{font-size:12px;line-height:1.8;color:#b0a8ab;letter-spacing:.07em;margin:0 0 42px}
+    .fields{display:flex;flex-direction:column;gap:20px}
+    .field{display:flex;flex-direction:column;gap:9px}
+    .field label{font-size:12px;letter-spacing:.13em;color:#ddd5d0}
+    .field input{height:52px;width:100%;color:#f9f4ef;background:rgba(11,13,22,.36);border:1px solid #d3c5b453;border-radius:10px;padding:0 16px;outline:none;transition:background .25s,border-color .25s}
+    .field input::placeholder{color:#8e8a91}
+    .field input:focus{background:rgba(15,18,29,.55);border-color:#d7c19d}
+    .password-wrap{position:relative}.password-wrap input{padding-right:72px}.showpass{position:absolute;right:7px;top:8px;height:36px;padding:0 9px;background:transparent;border:0;color:#c2b9b3;font-size:12px}
+    .form-options{display:flex;align-items:center;justify-content:space-between;font-size:12px;color:#b9b2af;margin:-3px 0 4px}
+    .check{display:flex;align-items:center;gap:9px}.check input{accent-color:#d2b88e}
+    .submit{height:55px;width:100%;border-radius:12px;margin-top:2px;font-size:15px;letter-spacing:.25em;font-weight:600}
+    .form-hint{margin-top:24px;color:#a9a0a1;font-size:11px;line-height:1.8;text-align:center}
+    .form-error{display:none;margin:0;color:#f5ad9d;font-size:12px;line-height:1.5}
+    .form-error.show{display:block}.message{min-height:19px;font-size:12px;color:#e1c69e;margin:6px 0 0;line-height:1.5}
+    @media(max-width:980px){.wall-grid{inset:-20% -22%;gap:9px}.strip:nth-child(n+8){display:none}.auth-shell{min-height:620px}.story-title{font-size:39px}}
+    @media(max-width:720px){.wall-grid{inset:-16% -51%;gap:8px;transform:rotate(-8deg) scale(1.12)}.strip:nth-child(n+6){display:none}.shade{background:linear-gradient(90deg,#02040b80,#02040b35 50%,#02040b80),linear-gradient(0deg,#030407db,transparent 28%,transparent 72%,#02040bc9)}.focus-vignette{background:radial-gradient(ellipse 75% 45% at 50% 47%,#050712ef 0%,#050712d4 45%,#0507123c 100%)}.welcome h1{font-size:47px}.auth{padding:80px 16px 55px;align-items:flex-start}.auth-shell{display:flex;flex-direction:column;min-height:calc(100svh - 135px)}.story{min-height:165px;padding:24px 28px 19px;gap:13px}.story-title{font-size:25px;line-height:1.4;margin:0}.story-title br{display:none}.story-desc,.story-bottom{display:none}.form-panel{flex:1;padding:65px 27px 30px}.form-panel:before{display:none}.back{top:20px;left:27px}.form-subtitle{margin-bottom:29px}.fields{gap:16px}.field input{height:48px}}
+    @media(max-width:400px){.welcome h1{font-size:40px}.story-title{font-size:22px}.form-title{font-size:31px}.form-panel{padding-left:22px;padding-right:22px}.back{left:22px}}
+    @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}.track{animation:none!important;transform:translate3d(0,-7%,0)!important}}
+    .poster-state{position:fixed;z-index:8;left:50%;bottom:16px;transform:translateX(-50%);max-width:calc(100vw - 24px);background:rgba(19,21,30,.87);border:1px solid #d6b8937c;border-radius:9px;color:#f5e5c8;font-size:12px;padding:10px 16px;text-align:center;box-shadow:0 8px 30px #0008;letter-spacing:.03em;pointer-events:none}
+    .poster-state[hidden]{display:none!important}
+
+    /* V3.7：恢复欢迎标题为静态文字，沿用原版衬线排版与居中布局。 */
+    .welcome h1.static-welcome{font-family:Georgia,'Times New Roman',serif;font-size:clamp(35px,5.1vw,70px);font-weight:600;letter-spacing:.015em;white-space:nowrap;line-height:1.18;margin:0 0 22px;text-shadow:0 5px 28px #000d;}
+    /* 用户指定：真正透明的按钮底色，保留柔和的外部光圈与内部边缘反射。 */
+    button.liquid{background:rgba(9,12,20,.04)!important;border:1px solid rgba(227,228,247,.66);color:#f8f2ed;
+      backdrop-filter:none;-webkit-backdrop-filter:none;
+      box-shadow:0 0 0 1px rgba(102,120,161,.19),0 0 13px rgba(122,141,186,.35),
+      0 0 30px rgba(69,83,121,.30),inset 0 1px 0 rgba(255,255,255,.37),
+      inset 0 -3px 10px rgba(146,165,210,.09);
+      transition:box-shadow .5s ease,transform .5s ease,border-color .5s ease,color .5s ease;}
+    button.liquid:hover,button.liquid:focus-visible{transform:translateY(-1px);border-color:#e4dff0;
+      box-shadow:0 0 0 1px rgba(197,198,233,.43),0 0 22px rgba(148,166,225,.70),
+      0 0 58px rgba(90,111,188,.35),inset 0 2px 0 rgba(255,255,255,.49),
+      inset 0 0 18px rgba(125,141,193,.12);color:#fff;}
+    button.liquid:active{transform:translateY(0);transition-duration:.1s;
+      box-shadow:0 0 0 1px rgba(197,198,233,.46),0 0 33px rgba(148,166,225,.65),inset 0 0 22px rgba(129,147,193,.15);}
+    button.liquid::before{background:linear-gradient(90deg,transparent,rgba(255,255,255,.20),transparent);}
+    button.liquid::after{inset:2px;border-color:rgba(255,255,255,.19);}
+    @media(max-width:720px){.welcome h1.static-welcome{font-size:clamp(31px,8.6vw,47px);}}
+    @media(max-width:400px){.welcome h1.static-welcome{font-size:clamp(29px,8.4vw,39px);}}
+    @media(prefers-reduced-motion:reduce){.wall-grid .track{animation:none!important}button.liquid{transition:none!important}button.liquid::before{display:none}}
+  </style>
+</head>
+<body>
+  <div class="wall" aria-hidden="true">
+    <div class="wall-grid" id="wallGrid"></div>
+    <div class="shade"></div><div class="focus-vignette"></div><div class="film-edge"></div><div class="film-bars"></div>
+  </div>
+  <div id="posterMessage" class="poster-state" role="status" aria-live="polite" hidden></div>
+  <main class="screen welcome active" id="welcome" aria-label="欢迎页">
+    <div class="welcome-content">
+      <svg class="logo" viewBox="0 0 110 110" fill="none" aria-hidden="true"><circle cx="52" cy="53" r="38" stroke="#e4d6c3" stroke-width="1.8"/><circle cx="52" cy="53" r="12" stroke="#e4d6c3" stroke-width="1.6"/><circle cx="52" cy="25" r="9.5" fill="#e5d9c8"/><circle cx="79" cy="44" r="9.5" fill="#e5d9c8"/><circle cx="68" cy="77" r="9.5" fill="#e5d9c8"/><circle cx="36" cy="77" r="9.5" fill="#e5d9c8"/><circle cx="25" cy="44" r="9.5" fill="#e5d9c8"/><path d="M84 83l20 15" stroke="#e5d9c8" stroke-width="3"/></svg>
+      <p class="eyebrow">MOVIEINSIGHT · AN OPENING SCENE</p>
+      <div class="rule"></div>
+      <h1 class="static-welcome">Welcome back.</h1>
+      <p class="subtitle">登录以使用完整功能</p>
+      <button class="liquid welcome-login" type="button" data-nav="login">登 录</button>
+      <button class="register-link" type="button" data-nav="register">注 册</button>
+      <div class="quiet-line" aria-hidden="true"></div>
+    </div>
+  </main>
+  <section class="screen auth" id="login" aria-label="登录页面">
+    <div class="auth-shell">
+      <aside class="story"><span class="tiny-label">01 / THE STORY CONTINUES</span><div><h2 class="story-title">光影未止，<br> <em>故事继续。</em></h2><p class="story-desc">穿越每一帧光影，让数据为你找到下一部值得珍藏的电影。</p></div><span class="story-bottom">THE FRAME IS YOURS TO DISCOVER</span></aside>
+      <div class="form-panel"><button class="back" data-nav="welcome" type="button">← 返回欢迎页</button><div class="form-kicker">MEMBERSHIP / SIGN IN</div><h2 class="form-title">登录账号</h2><p class="form-subtitle">继续探索，未完待续的电影世界。</p>
+        <form id="loginForm" class="fields" novalidate>
+          <div class="field"><label for="loginName">用户名</label><input id="loginName" type="text" required autocomplete="username" placeholder="请输入用户名" maxlength="48"></div>
+          <div class="field"><label for="loginPassword">密码</label><div class="password-wrap"><input id="loginPassword" type="password" required autocomplete="current-password" placeholder="请输入登录密码"><button class="showpass" type="button" data-target="loginPassword">显示</button></div></div>
+          <div class="form-options"><label class="check"><input type="checkbox" id="rememberName"> 记住用户名</label><span>SECURE ENTRANCE</span></div>
+          <p class="form-error" id="loginError" role="alert"></p>
+          <button type="submit" class="liquid submit">登 录 →</button><p class="message" id="loginMessage" role="status"></p>
+        </form><p class="form-hint">尚无账号？<a href="#register" data-nav="register">去注册</a>　·　演示版不连接真实账户</p>
+      </div>
+    </div>
+  </section>
+  <section class="screen auth" id="register" aria-label="注册页面">
+    <div class="auth-shell">
+      <aside class="story"><span class="tiny-label">02 / YOUR FIRST FRAME</span><div><h2 class="story-title">每段旅程，<br> <em>始于一帧。</em></h2><p class="story-desc">从这里开启自己的电影档案，收藏故事，发现更多可能。</p></div><span class="story-bottom">A NEW STORY IS ABOUT TO BEGIN</span></aside>
+      <div class="form-panel"><button class="back" data-nav="welcome" type="button">← 返回欢迎页</button><div class="form-kicker">MEMBERSHIP / SIGN UP</div><h2 class="form-title">创建账号</h2><p class="form-subtitle">填写基本信息，开启你的电影旅程。</p>
+        <form id="registerForm" class="fields" novalidate>
+          <div class="field"><label for="registerName">用户名</label><input id="registerName" type="text" required autocomplete="username" placeholder="设置用户名" maxlength="48"></div>
+          <div class="field"><label for="realName">姓名</label><input id="realName" type="text" required autocomplete="name" placeholder="请输入姓名" maxlength="48"></div>
+          <div class="field"><label for="registerPassword">密码</label><div class="password-wrap"><input id="registerPassword" type="password" required autocomplete="new-password" minlength="8" placeholder="至少 8 个字符"><button class="showpass" type="button" data-target="registerPassword">显示</button></div></div>
+          <div class="field"><label for="confirmPassword">确认密码</label><div class="password-wrap"><input id="confirmPassword" type="password" required autocomplete="new-password" placeholder="再次输入密码"><button class="showpass" type="button" data-target="confirmPassword">显示</button></div></div>
+          <p class="form-error" id="registerError" role="alert"></p><button class="liquid submit" type="submit">创 建 账 号 →</button><p class="message" id="registerMessage" role="status"></p>
+        </form><p class="form-hint">已经有账号？<a href="#login" data-nav="login">去登录</a>　·　演示版不会提交数据</p>
+      </div>
+    </div>
+  </section>
+<script>
+  'use strict';
+  // 32 部不重复固定精选：来源为公开 TMDB poster_path；不需要、不储存用户 TMDB API Token。
+  const MOVIES = [
+    {title:"INTERSTELLAR",zh:"星际穿越",path:"/gEU2QniE6E77NI6lCU6MxlNBvIx.jpg"},
+    {title:"INCEPTION",zh:"盗梦空间",path:"/pIkRyD18kl4FhoCNQuWxWu5cBLM.jpg"},
+    {title:"THE GODFATHER",zh:"教父",path:"/3bhkrj58Vtu7enYsRolD1fZdja1.jpg"},
+    {title:"BLADE RUNNER 2049",zh:"银翼杀手2049",path:"/gajva2L0rPYkEWjzgFlBXCAVBE5.jpg"},
+    {title:"DUNE",zh:"沙丘",path:"/d5NXSklXo0qyIYkgV94XAgMIckC.jpg"},
+    {title:"THE DARK KNIGHT",zh:"黑暗骑士",path:"/qJ2tW6WMUDux911r6m7haRef0WH.jpg"},
+    {title:"FIGHT CLUB",zh:"搏击俱乐部",path:"/pB8BM7pdSp6B6Ih7QZ4DrQ3PmJK.jpg"},
+    {title:"THE MATRIX",zh:"黑客帝国",path:"/f89U3ADr1oiB1s9GkdPOEpXUk5H.jpg"},
+    {title:"SHAWSHANK",zh:"肖申克的救赎",path:"/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg"},
+    {title:"TITANIC",zh:"泰坦尼克号",path:"/9xjZS2rlVxm8SFx8kPC3aIGCOYQ.jpg"},
+    {title:"GLADIATOR",zh:"角斗士",path:"/ty8TGRuvJLPUmAR1H1nRIsgwvim.jpg"},
+    {title:"FORREST GUMP",zh:"阿甘正传",path:"/saHP97rTPS5eLmrLQEcANmKrsFl.jpg"},
+    {title:"STAR WARS: FORCE AWAKENS",zh:"星球大战7",path:"/fYzpM9GmpBlIC893fNjoWCwE24H.jpg"},
+    {title:"ANT-MAN",zh:"蚁人",path:"/D6e8RJf2qUstnfkTslTXNTUAlT.jpg"},
+    {title:"JURASSIC WORLD",zh:"侏罗纪世界",path:"/jjBgi2r5cRt36xF6iNUEhzscEcb.jpg"},
+    {title:"THE MARTIAN",zh:"火星救援",path:"/5aGhaIHYuQbqlHWvWYqMCnj40y2.jpg"},
+    {title:"MAD MAX FURY ROAD",zh:"疯狂的麦克斯4",path:"/kqjL17yufvn9OVLyXYpvtyrFfak.jpg"},
+    {title:"MISSION IMPOSSIBLE 5",zh:"碟中谍5",path:"/z2sJd1OvAGZLxgjBdSnQoLCfn3M.jpg"},
+    {title:"MINIONS",zh:"小黄人大眼萌",path:"/s5uMY8ooGRZOL0oe4sIvnlTsYQO.jpg"},
+    {title:"TERMINATOR GENISYS",zh:"终结者：创世纪",path:"/5JU9ytZJyR3zmClGmVm9q4Geqbd.jpg"},
+    {title:"SPECTRE",zh:"007：幽灵党",path:"/mSvpKOWbyFtLro9BjfEGqUw5dXE.jpg"},
+    {title:"MOCKINGJAY PART 2",zh:"饥饿游戏3（下）",path:"/nN4cEJMHJHbJBsp3vvvhtNWLGqg.jpg"},
+    {title:"SOUTHPAW",zh:"铁拳",path:"/z3nGs7UED9XlqUkgWeT4jQ80m1N.jpg"},
+    {title:"BIG HERO 6",zh:"超能陆战队",path:"/3zQvuSAUdC3mrx9vnSEpkFX0968.jpg"},
+    {title:"THE REVENANT",zh:"荒野猎人",path:"/oXUWEc5i3wYyFnL1Ycu8ppxxPvs.jpg"},
+    {title:"INSIDE OUT",zh:"头脑特工队",path:"/aAmfIX3TT40zUHGcCKrlOZRKC7u.jpg"},
+    {title:"THE HOBBIT",zh:"霍比特人3",path:"/vgAHvS0bT3fpcpnJqT6uDTUsHTo.jpg"},
+    {title:"THE HATEFUL EIGHT",zh:"八恶人",path:"/fqe8JxDNO8B8QfOGTdjh6sPCdSC.jpg"},
+    {title:"MOCKINGJAY PART 1",zh:"饥饿游戏3（上）",path:"/cWERd8rgbw7bCMZlwP207HUXxym.jpg"},
+    {title:"AVENGERS ULTRON",zh:"复仇者联盟2",path:"/t90Y3G8UGQp0f0DrP60wRu9gfrH.jpg"},
+    {title:"EVEREST",zh:"绝命海拔",path:"/t3ELL46AnqjS9djz1vEVh4MpKv0.jpg"},
+    {title:"STAR WARS",zh:"星球大战",path:"/6FfCtAuVAW8XJjZ7eWeLibRLWTw.jpg"}
+  ];
+  const orders = [[10, 6, 18, 31], [4, 13, 2, 28], [5, 25, 17, 20], [11, 0, 27, 14], [22, 9, 7, 30], [16, 3, 26, 19], [21, 15, 8, 24], [1, 23, 29, 12]];
+  const wall=document.getElementById('wallGrid');
+  // 图片本地优先；未找到本地海报时显示检查提示，避免无效 CDN 请求。永不生成虚假的电影海报。
+  const errorImage=e=>{
+    const el=e.currentTarget;
+    el.classList.remove('ready');
+    el.closest('.poster').classList.add('missing');
+    missingPosterIds.add(Number(el.dataset.index));
+    showPosterState();
+  };
+  const posterNodes=Array.from({length:MOVIES.length},()=>[]);
+  const missingPosterIds=new Set();
+  const posterMessage=document.getElementById('posterMessage');
+  const showPosterState=()=>{
+    if(missingPosterIds.size===0){posterMessage.hidden=true;return;}
+    posterMessage.hidden=false;
+    posterMessage.textContent=`${missingPosterIds.size} 张海报尚未下载 · 请运行“下载并固定海报.cmd”`;
+  };
+  const imageLoaded=e=>{
+    const el=e.currentTarget;
+    el.classList.add('ready');
+    el.closest('.poster').classList.remove('missing');
+    missingPosterIds.delete(Number(el.dataset.index));
+    showPosterState();
+  };
+  orders.forEach((order,i)=>{
+    const column=document.createElement('div');column.className='strip';
+    column.style.setProperty('--duration',[53,62,48,67,57,71,59,65][i]+'s');
+    const track=document.createElement('div');track.className='track';
+    track.style.animationDelay='-'+[5,28,17,38,9,47,30,22][i]+'s';
+    const set=document.createElement('div');set.className='set';
+    // 每部电影在海报墙中只生成一次，整个 DOM 的 poster_path 都不重复。
+    order.forEach((index,k)=>{
+      const movie=MOVIES[index],tile=document.createElement('div');tile.className='poster';
+      const img=document.createElement('img');img.alt='';img.width=342;img.height=513;
+      img.decoding='async';img.loading='eager';img.dataset.index=String(index);
+      img.addEventListener('load',imageLoaded);img.addEventListener('error',errorImage);
+      img.src='posters/'+String(index+1).padStart(2,'0')+'.jpg';
+      posterNodes[index].push(img);tile.appendChild(img);set.appendChild(tile);
+    });
+    track.appendChild(set);column.appendChild(track);wall.appendChild(column);
+  });
+  // 页面仅通过 opacity 交叉淡入淡出，彻底取消全屏黑色遮罩的推拉转场。
+  const screens=[...document.querySelectorAll('.screen')];
+  const screenIds=['welcome','login','register'];
+  function show(id,replace=false){
+    if(!screenIds.includes(id))id='welcome';
+    const current=document.querySelector('.screen.active');
+    if(current?.id===id)return;
+    for(const screen of screens){
+      const on=screen.id===id;
+      screen.classList.toggle('active',on);
+      screen.setAttribute('aria-hidden',String(!on));
+      screen.inert=!on;
+    }
+    if(!replace && location.hash.slice(1)!==id)history.pushState({page:id},'',`#${id}`);
+    if(id==='login'||id==='register'){
+      const target=document.querySelector(`#${id} .form-title`);
+      if(target){target.setAttribute('tabindex','-1');setTimeout(()=>{if(document.getElementById(id).classList.contains('active'))target.focus({preventScroll:true})},250);}
+    }
+  }
+  document.querySelectorAll('[data-nav]').forEach(el=>el.addEventListener('click',e=>{e.preventDefault();show(el.dataset.nav)}));
+  window.addEventListener('popstate',()=>{const id=location.hash.slice(1);show(['welcome','login','register'].includes(id)?id:'welcome',true)});
+  {const initial=screenIds.includes(location.hash.slice(1))?location.hash.slice(1):'welcome';screens.forEach(s=>{const active=s.id===initial;s.classList.toggle('active',active);s.setAttribute('aria-hidden',String(!active));s.inert=!active;})}
+  document.querySelectorAll('.showpass').forEach(btn=>btn.addEventListener('click',()=>{const field=document.getElementById(btn.dataset.target);field.type=field.type==='password'?'text':'password';btn.textContent=field.type==='password'?'显示':'隐藏';}));
+  const errors={login:document.getElementById('loginError'),register:document.getElementById('registerError')};
+  const setError=(screen,text)=>{errors[screen].textContent=text;errors[screen].classList.toggle('show',Boolean(text));};
+  try{const remembered=localStorage.getItem('movieinsight-username');if(remembered){document.getElementById('loginName').value=remembered;document.getElementById('rememberName').checked=true}}catch(_){}
+  document.getElementById('loginForm').addEventListener('submit',e=>{e.preventDefault();setError('login','');const user=document.getElementById('loginName').value.trim(),pass=document.getElementById('loginPassword').value;if(!user||!pass){setError('login','请输入用户名和密码');return;}
+    try{const box=document.getElementById('rememberName');if(box.checked)localStorage.setItem('movieinsight-username',user);else localStorage.removeItem('movieinsight-username')}catch(_){}
+    document.getElementById('loginMessage').textContent='✓ 表单检查通过 · 演示版未调用真实登录接口';
+  });
+  document.getElementById('registerForm').addEventListener('submit',e=>{e.preventDefault();setError('register','');const u=document.getElementById('registerName').value.trim(),n=document.getElementById('realName').value.trim(),p=document.getElementById('registerPassword').value,c=document.getElementById('confirmPassword').value;
+    if(!u||!n||!p||!c){setError('register','请填写全部注册信息');return;}if(p.length<8){setError('register','密码至少需要 8 个字符');return;}if(p!==c){setError('register','两次输入的密码不一致');return;}
+    document.getElementById('registerMessage').textContent='✓ 表单检查通过 · 演示版不会创建账号';
+  });
+</script>
+
+</body></html>
