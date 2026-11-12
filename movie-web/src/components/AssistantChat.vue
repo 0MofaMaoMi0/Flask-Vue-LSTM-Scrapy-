@@ -3,6 +3,8 @@
 
 import {ref,onMounted,onBeforeUnmount,onDeactivated,nextTick,computed,watch} from 'vue'
 import {useAuthStore} from '../stores/auth'
+import {useRoute} from 'vue-router'
+import TMDBSettings from './TMDBSettings.vue'
 import {aiWorkspace} from '../services/aiWorkspace'
 import {movieArtwork} from '../services/movieArtwork'
 const props=defineProps<{surface:'explore'|'floating'}>()
@@ -103,6 +105,8 @@ function deleteSession(id:string){if(busy.value)return;sessions.value=sessions.v
 function clearSessions(){if(busy.value)return;sessions.value=[];activeSession.value='';newSession();notice.value='已清空此窗口显示记录，未删除服务端数据。'}
 function importSession(other:SavedSession){if(busy.value)return;newSession();const s=sessions.value[0]!;s.title='导入 · '+other.title;s.history=clone(other.history);history.value=clone(s.history);conversation.value=null;pending=null;saveSession();sharedOpen.value=false;notice.value='已复制记录；后续提问使用独立的新模型上下文，不修改另一窗口。'}
 watch([history,conversation,message,result],saveSession,{deep:true})
+const settingsRoute=useRoute()
+watch(()=>[settingsRoute.path,settingsRoute.query.settings],()=>{if(props.surface==='explore'&&settingsRoute.path==='/ai'&&settingsRoute.query.settings==='tmdb')openSettings('tmdb')},{immediate:true})
 function openSettings(tab='ai'){settingsTab.value=tab;settings.value=true;apiKey.value='';profileOpen.value=false}
 function feedback(turn:any,value:string){turn.feedback=turn.feedback===value?null:value;notice.value='反馈仅在此页记录，未写入评价或推荐数据。'}
 function followup(title:string){message.value='我想进一步了解《'+title+'》，适合什么心情观看？'}
@@ -140,7 +144,7 @@ onMounted(()=>newSession())
 <div v-if="history.length" class="date-line">当前会话</div>
 <template v-for="(turn,i) in history" :key="i"><div class="msg user"><div class="bubble">{{turn.question}}</div><div class="mi17-user-actions"><button class="response-action" @click="copyAnswer(turn.question)">复制</button><button class="response-action" :disabled="busy" @click="message=turn.question">编辑</button></div></div><div class="msg assistant"><div class="avatar"><span class="orb-skin mini"><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name"><span>MovieInsight AI</span><small>{{sourceLabel(turn.result)}}</small></div><div class="reply"><p class="reply-body">{{turn.answer}}</p></div>
 <template v-if="turn.result?.items?.length"><div class="trust-note">库内电影 · 真实目录 ID</div><div class="cards-head"><strong>电影选择 · {{turn.result.items.length}} 部</strong><span>横向浏览 · 可追问</span></div><div class="cards-rail"><article v-for="m in turn.result.items" :key="m.movie_id" class="movie-card"><router-link :to="movieUrl(m.movie_id)" class="poster" :aria-label="'查看'+m.title+'详情'"><img v-if="movieArtwork[String(m.movie_id)]" class="poster-uploaded" :src="movieArtwork[String(m.movie_id)]!.poster" :alt="m.title+'海报'" loading="lazy"/><div v-else class="poster-title">{{m.title}}</div></router-link><div class="movie-info"><div class="movie-title">{{m.title}}</div><div class="movie-meta">{{m.release_year||'年份未知'}} · {{m.genres?.join(' / ')}}</div><span class="verified">库内影片</span><p class="why">{{m.reasons?.join('；')}}</p><div class="movie-actions"><router-link class="mini-btn" :to="movieUrl(m.movie_id)">详情</router-link><button class="mini-btn" :disabled="busy" @click="movieWant(m.movie_id)">想看</button><button class="mini-btn" @click="followup(m.title)">追问</button></div></div></article></div></template>
-<div v-if="turn.result?.discoveries?.length" class="no-result"><strong>库外电影发现 · 尚未入库</strong><article v-for="m in turn.result.discoveries" :key="m.title"><p>{{m.title}} · {{m.year||'年份未确认'}}</p><p>{{m.reason}}</p><small>{{m.verification==='TMDB_TITLE_YEAR_MATCH'?'TMDB 标题与年份匹配，仍未入库':'未经 TMDB 核实的模型建议'}}</small><a v-if="m.tmdb_url&&modelLink(m.tmdb_url)" :href="m.tmdb_url" target="_blank" rel="noopener noreferrer">查看 TMDB</a></article></div>
+<div v-if="turn.result?.discoveries?.length" class="no-result"><strong>库外电影发现 · 尚未入库</strong><article v-for="m in turn.result.discoveries" :key="m.title"><p>{{m.title}} · {{m.year||'年份未确认'}}</p><p>{{m.reason}}</p><small>{{m.verification==='TMDB_TITLE_YEAR_MATCH'?'TMDB 标题与年份匹配，仍未入库':m.verification==='TMDB_OFFICIAL_LIST_SNAPSHOT'?'TMDB 官方榜单快照核验，仍未入库':'未经 TMDB 核实的模型建议'}}</small><a v-if="m.tmdb_url&&modelLink(m.tmdb_url)" :href="m.tmdb_url" target="_blank" rel="noopener noreferrer">查看 TMDB</a></article></div>
 <div class="followups"><button class="followup" @click="message='那更偏烧脑一点呢？'">更偏烧脑一点</button><button class="followup" @click="message='有没有更温暖、更有希望的？'">想要温暖一点</button><button class="followup" @click="message='当前库里还有哪些电影？'">库里还有什么</button></div>
 <div class="response-actions"><div class="response-actions-buttons"><button class="response-action" aria-label="复制这条回复" @click="copyAnswer(turn.answer)"><svg class="ico"><use :href="'#'+uid('i-copy')"/></svg><span>复制</span></button><button class="response-action" :disabled="busy" @click="message=turn.question;notice='已填入原问题；确认发送可能产生新的模型费用。'"><svg class="ico"><use :href="'#'+uid('i-refresh')"/></svg><span>重新提问</span></button><button class="response-action" :aria-pressed="turn.feedback==='up'" @click="feedback(turn,'up')"><svg class="ico"><use :href="'#'+uid('i-thumb-up')"/></svg><span>有帮助</span></button><button class="response-action" :aria-pressed="turn.feedback==='down'" @click="feedback(turn,'down')"><svg class="ico"><use :href="'#'+uid('i-thumb-down')"/></svg><span>需改进</span></button></div></div>
 <p v-if="turn.result?.cost" class="reply-status">模型调用 {{turn.result.cost.provider_calls??'未知'}} 次 · 输入 {{turn.result.cost.input_tokens??'未知'}} / 输出 {{turn.result.cost.output_tokens??'未知'}} Token · 金额 {{turn.result.cost.amount===0?'0':'未知'}}</p><p v-for="limit in turn.result?.limitations" :key="limit" class="reply-status">{{limit}}</p></div></div></template>
@@ -168,6 +172,7 @@ onMounted(()=>newSession())
 <button :class="{active:settingsTab==='account'}" @click="settingsTab='account'" class="gs-tab" data-gs-tab="account">◉　个人资料</button>
 <button :class="{active:settingsTab==='display'}" @click="settingsTab='display'" class="gs-tab" data-gs-tab="display">◈　外观与布局</button>
 <button :class="{active:settingsTab==='ai'}" @click="settingsTab='ai'" class="gs-tab" data-gs-tab="ai">✧　AI 与 BYOK</button>
+<button :class="{active:settingsTab==='tmdb'}" @click="settingsTab='tmdb'" class="gs-tab" data-gs-tab="tmdb"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>　TMDB 数据连接</button>
 <button :class="{active:settingsTab==='privacy'}" @click="settingsTab='privacy'" class="gs-tab" data-gs-tab="privacy">◇　隐私与数据</button>
 <button :class="{active:settingsTab==='about'}" @click="settingsTab='about'" class="gs-tab" data-gs-tab="about">ⓘ　关于 MovieInsight</button>
 </nav>
@@ -201,6 +206,7 @@ onMounted(()=>newSession())
 <p class="assistant-note">状态：{{status.verification||'DISCONNECTED'}}；今日已派发 {{status.daily_calls_used??0}} / {{status.daily_calls??'不限'}} 次（UTC日）。列表检查不发送生成请求。不设每日或每轮调用次数上限；仍受90秒超时、并发和上下文长度保护。金额未取得可靠账单时显示未知。</p>
 <label class="check"><input v-model="paidConsent" type="checkbox"/>我明确同意发送一次可能计费的模型连接测试。</label><button type="button" :disabled="busy||configBusy||!paidConsent||!status.enabled" @click="testConnection">发送模型测试（可能计费）</button>
 </div></div></section>
+<section aria-label="TMDB 数据连接设置" class="gs-panel" v-if="settings&&settingsTab==='tmdb'"><div class="gs-card"><TMDBSettings :id-prefix="props.surface"/></div></section>
 <section aria-label="隐私与数据设置" class="gs-panel" :id="uid('gs-privacy')" data-source-id="gs-privacy" v-show="settingsTab==='privacy'">
 <div class="gs-card"><h2>隐私与数据</h2><p>可查看当前页面的数据范围与控制方式。</p>
 <div class="gs-setting-row"><div><h3>聊天记录</h3><p>当前登录页面内保留；刷新后不自动恢复记录。</p></div><span class="gs-pill">本地临时</span></div>
@@ -210,7 +216,7 @@ onMounted(()=>newSession())
 </div>
 </section>
 <section aria-label="关于 MovieInsight" class="gs-panel" :id="uid('gs-about')" data-source-id="gs-about" v-show="settingsTab==='about'">
-<div class="gs-card"><h2>关于 MovieInsight</h2><p>AI 驱动的电影发现工具。目录、个人行为与助手请求都由服务端校验。</p><div class="gs-divider"></div><p>用户自带模型 Key；电影资料与个人行为由服务端验证。</p><div class="gs-notice" style="margin-top:16px">当前版本：M9 · 界面已接入真实目录与个人行为数据。</div></div>
+<div class="gs-card"><h2>关于 MovieInsight</h2><p>AI 驱动的电影发现工具。目录、个人行为与助手请求都由服务端校验。</p><div class="gs-divider"></div><p>用户自带模型 Key；电影资料与个人行为由服务端验证。</p><p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p><p><a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer">电影数据来源：The Movie Database（TMDB）</a></p><div class="gs-notice" style="margin-top:16px">当前版本：M9 · 界面已接入真实目录与个人行为数据。</div></div>
 </section>
 </div>
 </div>

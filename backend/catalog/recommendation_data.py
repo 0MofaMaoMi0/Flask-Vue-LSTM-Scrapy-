@@ -13,11 +13,12 @@ _cache=WeakKeyDictionary()
 _lock=Lock()
 
 def load_candidates(engine):
+    from .tmdb_connection import enrich
     with _lock:
         entry=_cache.get(engine)
-        if entry and monotonic()-entry[0]<30:return [dict(m) for m in entry[1]]
+        if entry and monotonic()-entry[0]<30:return enrich([dict(m) for m in entry[1]])
         rows=_load_candidates(engine);_cache[engine]=(monotonic(),rows)
-        return [dict(m) for m in rows]
+        return enrich([dict(m) for m in rows])
 
 def valid_number(value,maximum=None):
     return type(value) in (int,float) and math.isfinite(value) and value>=0 and (maximum is None or value<=maximum)
@@ -25,6 +26,7 @@ def valid_number(value,maximum=None):
 def features(row,payload,stamp,source):
     heat=payload.get('popularity');score=payload.get('vote_average');votes=payload.get('vote_count');revenue=payload.get('revenue')
     row.update(tmdb_popularity=float(heat) if valid_number(heat) else None,tmdb_rating=float(score) if valid_number(score,10) and type(votes) is int and votes>0 else None,vote_count=votes if type(votes) is int and votes>=0 else None,revenue=int(revenue) if valid_number(revenue) and revenue>0 else None,popularity_observed_at=stamp,feature_source=source,feature_as_of=stamp)
+    if 'revenue' in payload:row['revenue_as_of']=stamp
 
 def _load_candidates(engine):
     t=CatalogBase.metadata.tables

@@ -58,7 +58,13 @@ def persisted_order(folder,user,channel,period,filters,ordered):
             tmp.write_text(json.dumps({'version':VERSION,'period':period,'ids':ordered}),encoding='utf-8');os.chmod(tmp,0o600);os.replace(tmp,target)
     return ordered,'PERSISTED_PERIOD'
 
-def public_snapshot(channel):
+def public_snapshot(channel,*,online=True):
+    from .tmdb_connection import current
+    context=current()
+    if context:
+        service,user,binding=context
+        latest=service.snapshot(channel,user if online else None,binding)
+        if latest:return latest
     path=Path(os.environ.get('MI2_TMDB_BOARD_DIR') or DATA)/(channel+'.json')
     if not path.is_file():return None
     try:
@@ -70,7 +76,7 @@ def public_snapshot(channel):
 
 def context_stamp():
     now=datetime.now(timezone.utc)
-    return [VERSION,period_for('daily',now),period_for('weekly',now),[(c,(public_snapshot(c) or {}).get('captured_at')) for c in sorted(PUBLIC)]]
+    return [VERSION,period_for('daily',now),period_for('weekly',now),[(c,(public_snapshot(c,online=False) or {}).get('captured_at')) for c in sorted(PUBLIC)]]
 
 def external_movie(row,genres):
     if type(row.get('id')) is not int or row['id']<1 or row.get('adult') is True:return None
@@ -152,7 +158,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
                     chosen=max(remaining,key=lambda m:(score(m),-m['movie_id']));ranked.append(chosen);remaining.remove(chosen)
                     for genre in chosen.get('genres',[]):counts[genre]=counts.get(genre,0)+1
                     decade=(chosen.get('release_year') or 0)//10;decades[decade]=decades.get(decade,0)+1
-                options=dict(filters=filters,keyword=keyword,min_votes=min_votes,weights=weights)
+                options=dict(filters={k:v for k,v in filters.items() if v not in (None,[],False)},keyword=keyword,min_votes=min_votes,weights=weights)
                 order,cache_status=persisted_order(cache_dir,user,channel,period,options,[m['movie_id'] for m in ranked])
                 # Cached IDs are always checked against current visibility, hard filters and negative feedback.
                 valid={m['movie_id']:m for m in eligible};ranked=[valid[mid] for mid in order if mid in valid]
@@ -171,6 +177,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
             result['min_votes']=threshold
         elif channel=='revenue':
             ranked=sorted((m for m in eligible if m.get('revenue') is not None and m['revenue']>0),key=lambda m:(-m['revenue'],m['movie_id']))
+            result['source_as_of']=max((m.get('revenue_as_of') or m.get('feature_as_of') or '' for m in ranked),default='') or None
             for m in ranked:reasons[str(m['movie_id'])]=['TMDB记录的有效累计收入，非期间票房']
             result['limitations'].append('只覆盖库内有有效收入资料的影片，不代表完整全球票房榜；不是日/周票房。')
         elif channel=='because':
@@ -193,7 +200,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     result['ranked_window_count']=len(ranked)
     for index,m in enumerate(ranked[:limit],1):
         local=m.get('movie_id') is not None;key=str(m['movie_id']) if local and channel not in PUBLIC else str(m.get('tmdb_id'))
-        item={k:m.get(k) for k in ('movie_id','tmdb_id','title','original_title','release_year','runtime_minutes','original_language','genres','poster','tmdb_rating','vote_count','revenue','tmdb_popularity','feature_source','feature_as_of','popularity_observed_at')}
+        item={k:m.get(k) for k in ('movie_id','tmdb_id','title','original_title','release_year','runtime_minutes','original_language','genres','poster','tmdb_rating','vote_count','revenue','revenue_as_of','tmdb_popularity','feature_source','feature_as_of','popularity_observed_at')}
         item.update(key=('local:'+str(m['movie_id'])) if local else 'tmdb:'+str(m['tmdb_id']),in_catalog=local,rank=index,source_rank=source_ranks.get(str(m.get('tmdb_id'))),reasons=reasons.get(key,[]),score=scores.get(str(m.get('movie_id'))),tmdb_url='https://www.themoviedb.org/movie/'+str(m['tmdb_id']) if m.get('tmdb_id') else None,verification='LOCAL_DATABASE' if local else 'TMDB_OFFICIAL_LIST')
         result['items'].append(item)
     if not result['items'] and result['status']=='OK':result['status']='NO_DATA'
@@ -201,4 +208,11 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
 
 def for_app(app,user,channel='personal',**kwargs):
     folder=os.environ.get('MI2_RECOMMENDATION_CACHE_DIR') or str(Path(app.config['MEDIA_CACHE_DIR'])/'.private-recommendations')
-    return board(load_candidates(app.extensions['auth_engine']),app.extensions['m6_behavior'].snapshot(user),user,channel,cache_dir=folder,**kwargs)
+    from .tmdb_connection import using,request_binding
+    service=app.extensions.get('tmdb_connection');binding=request_binding(app)
+    with using(service,user,binding):
+        result=board(load_candidates(app.extensions['auth_engine']),app.extensions['m6_behavior'].snapshot(user),user,channel,cache_dir=folder,**kwargs)
+        if service:
+            result['tmdb_connection']=service.status(user,binding)
+            if result['tmdb_connection']['last_error']:result['limitations'].append('TMDB在线读取失败，当前使用可用缓存；可在数据连接中检查原因。')
+        return result

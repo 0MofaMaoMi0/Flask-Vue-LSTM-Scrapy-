@@ -1,5 +1,6 @@
 """V2 BYOK API. No platform key or global paid-approval gate."""
 import json,re,time,hashlib,secrets
+from pathlib import Path
 from flask import Blueprint,request,jsonify,Response,stream_with_context
 from app.auth import session_row,csrf_ok
 from .store import connect_store,tables
@@ -17,7 +18,7 @@ def install(app):
         import resource
         resource.setrlimit(resource.RLIMIT_CORE,(0,0))
     engine=connect_store(url,app.config['M6_SERVER_UUID']);md=tables();vault=Vault();ledger=Ledger(engine,md)
-    service=AgentService(engine,md,CatalogReader(app.extensions['auth_engine'],app.extensions['m6_behavior']),vault,ledger,app.config.get('M7_TEST_PROVIDER_FACTORY') if app.config.get('TESTING') else None)
+    service=AgentService(engine,md,CatalogReader(app.extensions['auth_engine'],app.extensions['m6_behavior'],app.extensions.get('tmdb_connection'),Path(app.config['MEDIA_CACHE_DIR'])/'.private-recommendations'),vault,ledger,app.config.get('M7_TEST_PROVIDER_FACTORY') if app.config.get('TESTING') else None)
     app.extensions.update(m7_engine=engine,m7_vault=vault,m7_agent=service,m7_ledger=ledger)
     bp=Blueprint('assistant_v2',__name__,url_prefix='/api/v1/assistant')
     def reply(data=None,code='OK',status=200):return jsonify(code=code,data=data),status

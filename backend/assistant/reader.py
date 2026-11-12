@@ -4,7 +4,7 @@ from catalog.models import CatalogBase
 from catalog.recommendation import recommend
 from .conditions import matches,genre_groups
 class CatalogReader:
-    def __init__(self,engine,behavior):self.engine=engine;self.behavior=behavior
+    def __init__(self,engine,behavior,tmdb=None,cache_dir=None):self.engine=engine;self.behavior=behavior;self.tmdb=tmdb;self.cache_dir=cache_dir
     def snapshot(self,user):
         from catalog.recommendation_data import load_candidates
         return load_candidates(self.engine),self.behavior.snapshot(user),False
@@ -22,7 +22,7 @@ class CatalogReader:
         from catalog.recommendation_boards import board
         from flask import has_app_context,current_app
         from pathlib import Path
-        folder=Path(current_app.config['MEDIA_CACHE_DIR'])/'.private-recommendations' if has_app_context() else None
+        folder=Path(current_app.config['MEDIA_CACHE_DIR'])/'.private-recommendations' if has_app_context() else self.cache_dir
         movies,state,_=self.snapshot(user)
         return board(movies,state,user,channel,filters=filters,keyword=keyword,limit=limit,scope=scope,cache_dir=folder,trusted_filters=True)
 
@@ -36,6 +36,21 @@ class CatalogReader:
                 for row in c.execute(select(links.c.movie_id,g.c.name_zh).join(g,g.c.genre_id==links.c.genre_id).where(links.c.movie_id.in_(ids))):grouped.setdefault(row.movie_id,[]).append(row.name_zh)
             for row in rows:row['genres']=grouped.get(row['movie_id'],[])
             return rows
+    def live_movie(self,user,movie_id):
+        from catalog.tmdb_connection import current,TMDBError
+        from catalog.recommendation_data import load_candidates
+        rows=self.get_movies([movie_id]);context=current()
+        if not rows or not context:return rows
+        service,owner,binding=context
+        if owner!=user or not service.status(user,binding)['configured']:return rows
+        mapped=next((m for m in load_candidates(self.engine) if m['movie_id']==movie_id),None)
+        if not mapped or not str(mapped.get('tmdb_id') or '').isdecimal():return rows
+        try:
+            doc=service.detail(user,binding,int(mapped['tmdb_id']));enriched=service.enrich([mapped])[0]
+            for k in ('tmdb_id','tmdb_rating','vote_count','revenue','tmdb_popularity','feature_source','feature_as_of'):rows[0][k]=enriched.get(k)
+            rows[0]['tmdb_details']=dict(doc['movie'],source_as_of=doc['captured_at'],identity='TMDB_ID_NOT_INTERNAL_ID')
+        except TMDBError:rows[0]['tmdb_status']='CACHE_OR_LOCAL_FALLBACK'
+        return rows
     def search(self,user,filters,keyword='',limit=10):
         from sqlalchemy import exists
         md=CatalogBase.metadata;m=md.tables['movies'];g=md.tables['genres'];links=md.tables['movie_genres'];stmt=select(m.c.movie_id).where(m.c.catalog_status=='active')

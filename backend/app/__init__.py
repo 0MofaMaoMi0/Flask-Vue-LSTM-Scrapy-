@@ -57,6 +57,8 @@ def create_app(overrides=None):
     if app.config.get('M6_ISOLATED') is True:
         from catalog.m6_business import install_m6_business
         install_m6_business(app)
+        from catalog.tmdb_api import install as install_tmdb
+        install_tmdb(app)
         app.config.setdefault("M7_DATABASE_URL", os.environ.get("MI2_M7_DATABASE_URL", ""))
         from assistant.api_v2 import install as install_assistant
         install_assistant(app)

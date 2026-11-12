@@ -4,9 +4,17 @@ from .agent_provider import NoRedirect
 class TMDBVerifier:
     def __init__(self,token=None):self.token=token if token is not None else os.environ.get('MI2_TMDB_READ_TOKEN','')
     def verify(self,title,year=None):
+        from catalog.tmdb_connection import current,TMDBError
+        context=current()
+        if context and context[0].status(context[1],context[2])['configured']:
+            service,user,binding=context
+            try:
+                tid=service.search(user,binding,title,year)
+                if tid:return {'verification':'TMDB_TITLE_YEAR_MATCH','tmdb_id':tid,'in_catalog':False,'movie_id':None,'tmdb_url':'https://www.themoviedb.org/movie/'+str(tid)}
+            except TMDBError:pass
         from catalog.recommendation_boards import PUBLIC,public_snapshot
         for channel in sorted(PUBLIC):
-            snapshot=public_snapshot(channel)
+            snapshot=public_snapshot(channel,online=False)
             for movie in (snapshot or {}).get('items',[]):
                 if movie.get('adult') is True or type(movie.get('id')) is not int or movie['id']<1:continue
                 if title.casefold().strip() not in [str(movie.get(k) or '').casefold().strip() for k in ('title','original_title')]:continue
