@@ -1,0 +1,1577 @@
+{
+  "source_sha256": "79abfdd6be1e495f59ee01e3c6469d80414486aa514f214098a082e6c2fb28b1",
+  "columns": {
+    "movies": [
+      "movie_id",
+      "title",
+      "original_title",
+      "release_date",
+      "release_year",
+      "runtime_minutes",
+      "original_language",
+      "overview",
+      "catalog_status",
+      "is_adult",
+      "created_at",
+      "updated_at"
+    ],
+    "movie_external_ids": [
+      "id",
+      "movie_id",
+      "source",
+      "external_id",
+      "verified_method",
+      "verified_at",
+      "created_at",
+      "core_source_slot"
+    ],
+    "movie_source_records": [
+      "id",
+      "movie_id",
+      "source",
+      "source_record_id",
+      "fetched_at",
+      "source_updated_at",
+      "payload_hash",
+      "metadata_json",
+      "ingest_batch_id",
+      "license_status"
+    ],
+    "movie_aliases": [
+      "id",
+      "movie_id",
+      "title",
+      "title_normalized",
+      "language",
+      "source",
+      "created_at"
+    ],
+    "movie_ratings_summary": [
+      "movie_id",
+      "source",
+      "score_value",
+      "score_scale",
+      "vote_count",
+      "observed_at",
+      "selected_source_record_pk"
+    ],
+    "genres": [
+      "genre_id",
+      "name_zh",
+      "name_en",
+      "tmdb_genre_id"
+    ],
+    "movie_genres": [
+      "movie_id",
+      "genre_id"
+    ],
+    "people": [
+      "person_id",
+      "name",
+      "original_name",
+      "created_at",
+      "updated_at"
+    ],
+    "person_external_ids": [
+      "id",
+      "person_id",
+      "source",
+      "external_id",
+      "verified_method",
+      "verified_at"
+    ],
+    "movie_credits": [
+      "credit_id",
+      "movie_id",
+      "person_id",
+      "source",
+      "source_credit_key",
+      "role_type",
+      "job",
+      "character_name",
+      "sort_order"
+    ],
+    "movie_assets": [
+      "asset_id",
+      "movie_id",
+      "asset_type",
+      "source",
+      "source_path",
+      "language",
+      "width",
+      "height",
+      "is_primary",
+      "license_status",
+      "updated_at",
+      "primary_slot"
+    ],
+    "legacy_movie_map": [
+      "id",
+      "legacy_table",
+      "legacy_pk",
+      "legacy_douban_id",
+      "movie_id",
+      "match_status",
+      "match_method",
+      "reviewed_at",
+      "reason_code",
+      "reason_note"
+    ],
+    "ingest_batches": [
+      "batch_id",
+      "source",
+      "mode",
+      "status",
+      "started_at",
+      "finished_at",
+      "source_snapshot_ref",
+      "counts_json",
+      "error_summary"
+    ],
+    "ingest_items": [
+      "id",
+      "batch_id",
+      "source_record_id",
+      "status",
+      "movie_id",
+      "error_code",
+      "payload_hash",
+      "attempt_count",
+      "updated_at"
+    ],
+    "match_reviews": [
+      "id",
+      "source",
+      "source_record_id",
+      "candidate_movie_id",
+      "match_features_json",
+      "status",
+      "review_reason",
+      "reviewed_at",
+      "approved_source_record_id"
+    ],
+    "data_quality_issues": [
+      "id",
+      "batch_id",
+      "source",
+      "source_record_id",
+      "issue_type",
+      "severity",
+      "status",
+      "detail_json",
+      "created_at"
+    ]
+  },
+  "structure": {
+    "genres": {
+      "columns": [
+        {
+          "name": "genre_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "name_zh",
+          "type": "VARCHAR(64)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "name_en",
+          "type": "VARCHAR(64)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "tmdb_genre_id",
+          "type": "VARCHAR(32) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE genres (\n\tgenre_id BIGINT NOT NULL AUTO_INCREMENT, \n\tname_zh VARCHAR(64) NOT NULL, \n\tname_en VARCHAR(64), \n\ttmdb_genre_id VARCHAR(32) COLLATE utf8mb4_bin, \n\tPRIMARY KEY (genre_id), \n\tCONSTRAINT uq_genres_0 UNIQUE (tmdb_genre_id)\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": []
+    },
+    "ingest_batches": {
+      "columns": [
+        {
+          "name": "batch_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(32) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "mode",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "started_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "finished_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_snapshot_ref",
+          "type": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "counts_json",
+          "type": "JSON",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "error_summary",
+          "type": "VARCHAR(512)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE ingest_batches (\n\tbatch_id BIGINT NOT NULL AUTO_INCREMENT, \n\tsource VARCHAR(32) COLLATE utf8mb4_bin NOT NULL, \n\tmode VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tstatus VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tstarted_at DATETIME(6) NOT NULL, \n\tfinished_at DATETIME(6), \n\tsource_snapshot_ref VARCHAR(255) NOT NULL, \n\tcounts_json JSON NOT NULL, \n\terror_summary VARCHAR(512), \n\tPRIMARY KEY (batch_id), \n\tCONSTRAINT ck_ingest_batches_0 CHECK (mode IN ('dry-run','write')), \n\tCONSTRAINT ck_ingest_batches_1 CHECK (status IN ('pending','running','succeeded','partial','failed'))\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_ingest_batches_0 ON ingest_batches (source, started_at, batch_id)"
+      ]
+    },
+    "movies": {
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "title",
+          "type": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "original_title",
+          "type": "VARCHAR(255)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "release_date",
+          "type": "DATE",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "release_year",
+          "type": "SMALLINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "runtime_minutes",
+          "type": "SMALLINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "original_language",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "overview",
+          "type": "TEXT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "catalog_status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": "draft",
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "is_adult",
+          "type": "BOOL",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movies (\n\tmovie_id BIGINT NOT NULL AUTO_INCREMENT, \n\ttitle VARCHAR(255) NOT NULL, \n\toriginal_title VARCHAR(255), \n\trelease_date DATE, \n\trelease_year SMALLINT, \n\truntime_minutes SMALLINT, \n\toriginal_language VARCHAR(16) COLLATE utf8mb4_bin, \n\toverview TEXT, \n\tcatalog_status VARCHAR(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'draft', \n\tis_adult BOOL, \n\tcreated_at DATETIME(6) NOT NULL, \n\tupdated_at DATETIME(6) NOT NULL, \n\tPRIMARY KEY (movie_id), \n\tCONSTRAINT ck_movies_0 CHECK (catalog_status IN ('draft','active','hidden')), \n\tCONSTRAINT ck_movies_1 CHECK (release_year IS NULL OR release_year BETWEEN 1800 AND 2199), \n\tCONSTRAINT ck_movies_2 CHECK (runtime_minutes IS NULL OR (runtime_minutes>0 AND runtime_minutes<=1500))\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movies_0 ON movies (catalog_status, release_year, movie_id)",
+        "CREATE INDEX ix_movies_1 ON movies (title)"
+      ]
+    },
+    "people": {
+      "columns": [
+        {
+          "name": "person_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "name",
+          "type": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "original_name",
+          "type": "VARCHAR(255)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE people (\n\tperson_id BIGINT NOT NULL AUTO_INCREMENT, \n\tname VARCHAR(255) NOT NULL, \n\toriginal_name VARCHAR(255), \n\tcreated_at DATETIME(6) NOT NULL, \n\tupdated_at DATETIME(6) NOT NULL, \n\tPRIMARY KEY (person_id)\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_people_0 ON people (name)"
+      ]
+    },
+    "data_quality_issues": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "batch_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(32) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_record_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "issue_type",
+          "type": "VARCHAR(64)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "severity",
+          "type": "VARCHAR(16)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "detail_json",
+          "type": "JSON",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE data_quality_issues (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tbatch_id BIGINT NOT NULL, \n\tsource VARCHAR(32) COLLATE utf8mb4_bin NOT NULL, \n\tsource_record_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tissue_type VARCHAR(64) NOT NULL, \n\tseverity VARCHAR(16) NOT NULL, \n\tstatus VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tdetail_json JSON NOT NULL, \n\tcreated_at DATETIME(6) NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_data_quality_issues_0 UNIQUE (batch_id, source, source_record_id, issue_type), \n\tCONSTRAINT ck_data_quality_issues_0 CHECK (severity IN ('info','warning','error')), \n\tCONSTRAINT ck_data_quality_issues_1 CHECK (status IN ('open','resolved','accepted')), \n\tFOREIGN KEY(batch_id) REFERENCES ingest_batches (batch_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_data_quality_issues_0 ON data_quality_issues (status, severity, id)"
+      ]
+    },
+    "ingest_items": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "batch_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_record_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "error_code",
+          "type": "VARCHAR(64)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "payload_hash",
+          "type": "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "attempt_count",
+          "type": "INTEGER",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": "1",
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE ingest_items (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tbatch_id BIGINT NOT NULL, \n\tsource_record_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tstatus VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tmovie_id BIGINT, \n\terror_code VARCHAR(64), \n\tpayload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, \n\tattempt_count INTEGER NOT NULL DEFAULT '1', \n\tupdated_at DATETIME(6) NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_ingest_items_0 UNIQUE (batch_id, source_record_id), \n\tCONSTRAINT ck_ingest_items_0 CHECK (status IN ('inserted','updated','skipped','review','error')), \n\tCONSTRAINT ck_ingest_items_1 CHECK (attempt_count>=1), \n\tFOREIGN KEY(batch_id) REFERENCES ingest_batches (batch_id) ON DELETE RESTRICT ON UPDATE RESTRICT, \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_ingest_items_0 ON ingest_items (movie_id)"
+      ]
+    },
+    "legacy_movie_map": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "legacy_table",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "legacy_pk",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "legacy_douban_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "match_status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "match_method",
+          "type": "VARCHAR(32)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "reviewed_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "reason_code",
+          "type": "VARCHAR(64) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "reason_note",
+          "type": "VARCHAR(255)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE legacy_movie_map (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tlegacy_table VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tlegacy_pk BIGINT NOT NULL, \n\tlegacy_douban_id VARCHAR(128) COLLATE utf8mb4_bin, \n\tmovie_id BIGINT, \n\tmatch_status VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tmatch_method VARCHAR(32), \n\treviewed_at DATETIME(6), \n\treason_code VARCHAR(64) COLLATE utf8mb4_bin, \n\treason_note VARCHAR(255), \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_legacy_movie_map_0 UNIQUE (legacy_table, legacy_pk), \n\tCONSTRAINT ck_legacy_movie_map_0 CHECK (legacy_table IN ('movies','movies2')), \n\tCONSTRAINT ck_legacy_movie_map_1 CHECK (match_status IN ('matched','unmatched','review','blocked','skipped')), \n\tCONSTRAINT ck_legacy_movie_map_2 CHECK (match_status<>'matched' OR movie_id IS NOT NULL), \n\tCONSTRAINT ck_legacy_movie_map_3 CHECK (match_status NOT IN ('skipped','blocked') OR (reason_code IS NOT NULL AND CHAR_LENGTH(TRIM(reason_code))>0)), \n\tCONSTRAINT ck_legacy_movie_map_4 CHECK (reason_code IS NULL OR reason_code IN ('excluded_tv','invalid_source_id','type_conflict','identity_conflict','requires_review')), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_legacy_movie_map_0 ON legacy_movie_map (movie_id)",
+        "CREATE INDEX ix_legacy_movie_map_1 ON legacy_movie_map (legacy_douban_id)"
+      ]
+    },
+    "match_reviews": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(32) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_record_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "candidate_movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "match_features_json",
+          "type": "JSON",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": "pending",
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "review_reason",
+          "type": "VARCHAR(512)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "reviewed_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "approved_source_record_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": "CASE WHEN status='approved' THEN source_record_id ELSE NULL END",
+          "persisted": false
+        }
+      ],
+      "ddl": "\nCREATE TABLE match_reviews (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tsource VARCHAR(32) COLLATE utf8mb4_bin NOT NULL, \n\tsource_record_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tcandidate_movie_id BIGINT NOT NULL, \n\tmatch_features_json JSON NOT NULL, \n\tstatus VARCHAR(16) COLLATE utf8mb4_bin NOT NULL DEFAULT 'pending', \n\treview_reason VARCHAR(512), \n\treviewed_at DATETIME(6), \n\tapproved_source_record_id VARCHAR(128) COLLATE utf8mb4_bin GENERATED ALWAYS AS (CASE WHEN status='approved' THEN source_record_id ELSE NULL END) VIRTUAL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_match_reviews_0 UNIQUE (source, source_record_id, candidate_movie_id), \n\tCONSTRAINT uq_match_reviews_1 UNIQUE (source, approved_source_record_id), \n\tCONSTRAINT ck_match_reviews_0 CHECK (status IN ('pending','approved','rejected')), \n\tFOREIGN KEY(candidate_movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_match_reviews_0 ON match_reviews (status, id)"
+      ]
+    },
+    "movie_aliases": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "title",
+          "type": "VARCHAR(255)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "title_normalized",
+          "type": "VARCHAR(255) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "language",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_aliases (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tmovie_id BIGINT NOT NULL, \n\ttitle VARCHAR(255) NOT NULL, \n\ttitle_normalized VARCHAR(255) COLLATE utf8mb4_bin NOT NULL, \n\tlanguage VARCHAR(16) COLLATE utf8mb4_bin, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tcreated_at DATETIME(6) NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_movie_aliases_0 UNIQUE (movie_id, source, title_normalized), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_aliases_0 ON movie_aliases (title_normalized, movie_id)"
+      ]
+    },
+    "movie_assets": {
+      "columns": [
+        {
+          "name": "asset_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "asset_type",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_path",
+          "type": "VARCHAR(512) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "language",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "width",
+          "type": "INTEGER",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "height",
+          "type": "INTEGER",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "is_primary",
+          "type": "BOOL",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": "0",
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "license_status",
+          "type": "VARCHAR(24) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "primary_slot",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": "CASE WHEN is_primary THEN asset_type ELSE NULL END",
+          "persisted": false
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_assets (\n\tasset_id BIGINT NOT NULL AUTO_INCREMENT, \n\tmovie_id BIGINT NOT NULL, \n\tasset_type VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tsource_path VARCHAR(512) COLLATE utf8mb4_bin NOT NULL, \n\tlanguage VARCHAR(16) COLLATE utf8mb4_bin, \n\twidth INTEGER, \n\theight INTEGER, \n\tis_primary BOOL NOT NULL DEFAULT '0', \n\tlicense_status VARCHAR(24) COLLATE utf8mb4_bin NOT NULL, \n\tupdated_at DATETIME(6) NOT NULL, \n\tprimary_slot VARCHAR(16) COLLATE utf8mb4_bin GENERATED ALWAYS AS (CASE WHEN is_primary THEN asset_type ELSE NULL END) VIRTUAL, \n\tPRIMARY KEY (asset_id), \n\tCONSTRAINT uq_movie_assets_0 UNIQUE (movie_id, asset_type, source, source_path), \n\tCONSTRAINT uq_movie_assets_1 UNIQUE (movie_id, primary_slot), \n\tCONSTRAINT ck_movie_assets_0 CHECK (asset_type IN ('poster','backdrop')), \n\tCONSTRAINT ck_movie_assets_1 CHECK (width IS NULL OR width>0), \n\tCONSTRAINT ck_movie_assets_2 CHECK (height IS NULL OR height>0), \n\tCONSTRAINT ck_movie_assets_3 CHECK (NOT is_primary OR license_status='allowed'), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_assets_0 ON movie_assets (movie_id, asset_type, is_primary)"
+      ]
+    },
+    "movie_credits": {
+      "columns": [
+        {
+          "name": "credit_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "person_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_credit_key",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "role_type",
+          "type": "VARCHAR(8) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "job",
+          "type": "VARCHAR(128)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "character_name",
+          "type": "VARCHAR(255)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "sort_order",
+          "type": "INTEGER",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": "0",
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_credits (\n\tcredit_id BIGINT NOT NULL AUTO_INCREMENT, \n\tmovie_id BIGINT NOT NULL, \n\tperson_id BIGINT NOT NULL, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tsource_credit_key VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\trole_type VARCHAR(8) COLLATE utf8mb4_bin NOT NULL, \n\tjob VARCHAR(128), \n\tcharacter_name VARCHAR(255), \n\tsort_order INTEGER NOT NULL DEFAULT '0', \n\tPRIMARY KEY (credit_id), \n\tCONSTRAINT uq_movie_credits_0 UNIQUE (movie_id, source, source_credit_key), \n\tCONSTRAINT ck_movie_credits_0 CHECK (role_type IN ('cast','crew')), \n\tCONSTRAINT ck_movie_credits_1 CHECK (sort_order>=0), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT, \n\tFOREIGN KEY(person_id) REFERENCES people (person_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_credits_0 ON movie_credits (movie_id, role_type, sort_order, credit_id)",
+        "CREATE INDEX ix_movie_credits_1 ON movie_credits (person_id, movie_id)"
+      ]
+    },
+    "movie_external_ids": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "external_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "verified_method",
+          "type": "VARCHAR(32)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "verified_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "core_source_slot",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": "CASE WHEN source IN ('douban','tmdb','imdb') THEN source ELSE NULL END",
+          "persisted": false
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_external_ids (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tmovie_id BIGINT NOT NULL, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\texternal_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tverified_method VARCHAR(32) NOT NULL, \n\tverified_at DATETIME(6), \n\tcreated_at DATETIME(6) NOT NULL, \n\tcore_source_slot VARCHAR(16) COLLATE utf8mb4_bin GENERATED ALWAYS AS (CASE WHEN source IN ('douban','tmdb','imdb') THEN source ELSE NULL END) VIRTUAL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_movie_external_ids_0 UNIQUE (source, external_id), \n\tCONSTRAINT uq_movie_external_ids_1 UNIQUE (movie_id, core_source_slot), \n\tCONSTRAINT ck_movie_external_ids_0 CHECK (source IN ('douban','tmdb','imdb','wikidata')), \n\tCONSTRAINT ck_movie_external_ids_1 CHECK (CHAR_LENGTH(external_id)>0), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_external_ids_0 ON movie_external_ids (movie_id, source)"
+      ]
+    },
+    "movie_genres": {
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "genre_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_genres (\n\tmovie_id BIGINT NOT NULL, \n\tgenre_id BIGINT NOT NULL, \n\tPRIMARY KEY (movie_id, genre_id), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT, \n\tFOREIGN KEY(genre_id) REFERENCES genres (genre_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_genres_0 ON movie_genres (genre_id, movie_id)"
+      ]
+    },
+    "movie_source_records": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(32) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_record_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "fetched_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source_updated_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "payload_hash",
+          "type": "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "metadata_json",
+          "type": "JSON",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "ingest_batch_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "license_status",
+          "type": "VARCHAR(24) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_source_records (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tmovie_id BIGINT, \n\tsource VARCHAR(32) COLLATE utf8mb4_bin NOT NULL, \n\tsource_record_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tfetched_at DATETIME(6) NOT NULL, \n\tsource_updated_at DATETIME(6), \n\tpayload_hash CHAR(64) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, \n\tmetadata_json JSON NOT NULL, \n\tingest_batch_id BIGINT NOT NULL, \n\tlicense_status VARCHAR(24) COLLATE utf8mb4_bin NOT NULL, \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_movie_source_records_0 UNIQUE (source, source_record_id), \n\tCONSTRAINT uq_movie_source_records_1 UNIQUE (id, movie_id), \n\tCONSTRAINT ck_movie_source_records_0 CHECK (source IN ('legacy_movies','legacy_movies2','tmdb')), \n\tCONSTRAINT ck_movie_source_records_1 CHECK (license_status IN ('unknown','allowed','restricted')), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT, \n\tFOREIGN KEY(ingest_batch_id) REFERENCES ingest_batches (batch_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_source_records_0 ON movie_source_records (movie_id)",
+        "CREATE INDEX ix_movie_source_records_1 ON movie_source_records (ingest_batch_id)"
+      ]
+    },
+    "person_external_ids": {
+      "columns": [
+        {
+          "name": "id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": true,
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "person_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "external_id",
+          "type": "VARCHAR(128) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "verified_method",
+          "type": "VARCHAR(32)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "verified_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE person_external_ids (\n\tid BIGINT NOT NULL AUTO_INCREMENT, \n\tperson_id BIGINT NOT NULL, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\texternal_id VARCHAR(128) COLLATE utf8mb4_bin NOT NULL, \n\tverified_method VARCHAR(32) NOT NULL, \n\tverified_at DATETIME(6), \n\tPRIMARY KEY (id), \n\tCONSTRAINT uq_person_external_ids_0 UNIQUE (source, external_id), \n\tFOREIGN KEY(person_id) REFERENCES people (person_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_person_external_ids_0 ON person_external_ids (person_id, source)"
+      ]
+    },
+    "movie_ratings_summary": {
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "source",
+          "type": "VARCHAR(16) COLLATE utf8mb4_bin",
+          "nullable": false,
+          "primary_key": true,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "score_value",
+          "type": "NUMERIC(5, 2)",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "score_scale",
+          "type": "SMALLINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "vote_count",
+          "type": "BIGINT",
+          "nullable": true,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "observed_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        },
+        {
+          "name": "selected_source_record_pk",
+          "type": "BIGINT",
+          "nullable": false,
+          "primary_key": false,
+          "autoincrement": "auto",
+          "default": null,
+          "computed": null,
+          "persisted": null
+        }
+      ],
+      "ddl": "\nCREATE TABLE movie_ratings_summary (\n\tmovie_id BIGINT NOT NULL, \n\tsource VARCHAR(16) COLLATE utf8mb4_bin NOT NULL, \n\tscore_value NUMERIC(5, 2), \n\tscore_scale SMALLINT NOT NULL, \n\tvote_count BIGINT, \n\tobserved_at DATETIME(6) NOT NULL, \n\tselected_source_record_pk BIGINT NOT NULL, \n\tPRIMARY KEY (movie_id, source), \n\tCONSTRAINT fk_rating_source_movie FOREIGN KEY(selected_source_record_pk, movie_id) REFERENCES movie_source_records (id, movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT, \n\tCONSTRAINT ck_movie_ratings_summary_0 CHECK (score_scale>0), \n\tCONSTRAINT ck_movie_ratings_summary_1 CHECK (vote_count IS NULL OR vote_count>=0), \n\tCONSTRAINT ck_movie_ratings_summary_2 CHECK (score_value IS NULL OR (score_value>=0 AND score_value<=score_scale)), \n\tCONSTRAINT ck_movie_ratings_summary_3 CHECK (vote_count IS NULL OR vote_count<>0 OR score_value IS NULL), \n\tFOREIGN KEY(movie_id) REFERENCES movies (movie_id) ON DELETE RESTRICT ON UPDATE RESTRICT\n)CHARSET=utf8mb4 ENGINE=InnoDB\n\n",
+      "indexes": [
+        "CREATE INDEX ix_movie_ratings_summary_0 ON movie_ratings_summary (selected_source_record_pk, movie_id)"
+      ]
+    }
+  }
+}

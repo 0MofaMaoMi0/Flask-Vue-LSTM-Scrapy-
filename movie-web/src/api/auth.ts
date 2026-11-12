@@ -1,4 +1,4 @@
-export type User = {id:number;username:string}
+export type User = {id:number;username:string;is_admin?:boolean}
 export class AuthError extends Error { constructor(public status:number,message:string){super(message)} }
 let csrfToken = ''
 let unauthorized:()=>void=()=>{}

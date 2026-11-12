@@ -24,7 +24,9 @@ def normalized(value):
     if not isinstance(value,str): raise ValueError()
     name=unicodedata.normalize('NFKC',value).strip()
     if not 3 <= len(name) <= 32 or not all(c.isalnum() or c in '_-' for c in name): raise ValueError()
-    return name, name.casefold()
+    key=name.casefold()
+    if len(key)>User.__table__.c.username_normalized.type.length:raise ValueError()
+    return name, key
 
 def limiter(action, account=None):
     now=int(time.time()); period=current_app.config['RATE_WINDOW']; window=now//period
@@ -46,7 +48,7 @@ def limiter(action, account=None):
         return response,status
 
 def session_row(db, lock=False):
-    sid=request.cookies.get(COOKIE,'')
+    sid=request.cookies.get(current_app.config.get('AUTH_COOKIE_NAME',COOKIE),'')
     if not 32<=len(sid)<=128:return None
     stmt=select(AuthSession).where(AuthSession.sid_hash==hashed(sid))
     if lock:stmt=stmt.with_for_update()
@@ -66,7 +68,7 @@ def new_session(db,user_id=None):
     db.add(row);return sid,csrf
 
 def set_cookie(response,sid):
-    response.set_cookie(COOKIE,sid,httponly=True,secure=current_app.config['COOKIE_SECURE'],samesite='Lax',path='/api/v1',max_age=current_app.config['ABSOLUTE_SECONDS'])
+    response.set_cookie(current_app.config.get('AUTH_COOKIE_NAME',COOKIE),sid,httponly=True,secure=current_app.config['COOKIE_SECURE'],samesite='Lax',path=current_app.config.get('AUTH_COOKIE_PATH','/api/v1'),max_age=current_app.config['ABSOLUTE_SECONDS'])
 
 def source_ok():
     origin=request.headers.get('Origin')
@@ -74,6 +76,11 @@ def source_ok():
         ref=request.headers.get('Referer','');u=urlsplit(ref)
         origin=f'{u.scheme}://{u.netloc}' if u.scheme and u.netloc else ''
     return origin in current_app.config['ALLOWED_ORIGINS']
+
+def is_admin(user):
+    if user is None:return False
+    admins={str(x).strip().lower() for x in current_app.config.get('ADMIN_USERS',[]) if str(x).strip()}
+    return user.username_normalized in admins
 
 def csrf_ok(row):
     token=request.headers.get('X-CSRF-Token','')
@@ -98,7 +105,7 @@ def me():
         row=session_row(db)
         if not row or row.user_id is None:return reply(40110,'unauthenticated',status=401)
         user=db.get(User,row.user_id)
-        return reply(data={'id':user.id,'username':user.username})
+        return reply(data={'id':user.id,'username':user.username,'is_admin':is_admin(user)})
 
 @bp.post('/register')
 @bp.post('/login')
@@ -131,7 +138,7 @@ def credentials():
         if ph.check_needs_rehash(user.password_hash):user.password_hash=ph.hash(password)
         row.revoked_at=datetime.utcnow()
         sid,_=new_session(db,user.id)
-        result={'user':{'id':user.id,'username':user.username}}
+        result={'user':{'id':user.id,'username':user.username,'is_admin':is_admin(user)}}
     response,status=reply(data=result);set_cookie(response,sid);return response,status
 
 @bp.post('/logout')
@@ -142,4 +149,4 @@ def logout():
         if not csrf_ok(row):return reply(40310,'request verification failed',status=403)
         if not request.is_json or request.get_json(silent=True)!={}:return reply(40010,'empty JSON object required',status=400)
         row.revoked_at=datetime.utcnow()
-    response,status=reply(message='logged out');response.delete_cookie(COOKIE,path='/api/v1',httponly=True,samesite='Lax',secure=current_app.config['COOKIE_SECURE']);return response,status
+    response,status=reply(message='logged out');response.delete_cookie(current_app.config.get('AUTH_COOKIE_NAME',COOKIE),path=current_app.config.get('AUTH_COOKIE_PATH','/api/v1'),httponly=True,samesite='Lax',secure=current_app.config['COOKIE_SECURE']);return response,status

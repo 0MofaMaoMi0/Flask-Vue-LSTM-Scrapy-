@@ -1,10 +1,10 @@
 import os
-import uuid
 from datetime import datetime,timedelta
 from concurrent.futures import ThreadPoolExecutor
 import pytest
 from sqlalchemy import select,update,text
-from app import create_app
+from protected_regression_runner import (guarded_create_app as create_app, new_name, new_ip,
+    require_new_user, require_new_session, require_new_throttle)
 from app.models import User,AuthSession
 from app.auth import hashed,ph,normalized
 ORIGIN='http://127.0.0.1:5174'
@@ -14,14 +14,14 @@ def app():
     return create_app({'TESTING':True,'DATABASE_URL':os.environ['MI2_TEST_DATABASE_URL']})
 @pytest.fixture
 def client(app):
-    c=app.test_client();c.environ_base['REMOTE_ADDR']='test-'+uuid.uuid4().hex
+    c=app.test_client();c.environ_base['REMOTE_ADDR']=new_ip()
     return c
 
 def token(c):return c.get('/api/v1/auth/csrf').get_json()['data']['csrf_token']
 def post(c,action,data,t=None,origin=ORIGIN):
     return c.post('/api/v1/auth/'+action,json=data,headers={'Origin':origin,'X-CSRF-Token':t or token(c)})
 def account(c):
-    name='u'+uuid.uuid4().hex[:20]
+    name=new_name('u')
     assert post(c,'register',{'username':name,'password':PASSWORD}).status_code==201
     return name
 def login(c,name):return post(c,'login',{'username':name,'password':PASSWORD})
@@ -56,7 +56,7 @@ def test_csrf_missing_wrong_and_content_type(client):
 def test_uniform_wrong_credentials(client):
     name=account(client)
     a=post(client,'login',{'username':name,'password':PASSWORD+'wrong'})
-    b=post(client,'login',{'username':'absent'+uuid.uuid4().hex[:10],'password':PASSWORD})
+    b=post(client,'login',{'username':new_name('absent'),'password':PASSWORD})
     assert a.status_code==b.status_code==401 and a.get_json()==b.get_json()
 
 def test_rotation_logout_replay(client,app):
@@ -78,29 +78,31 @@ def test_rotation_logout_replay(client,app):
 def test_expiry_revocation(client,app,field):
     name=account(client);assert login(client,name).status_code==200
     sid=client.get_cookie('mi2_sid',path='/api/v1').value
+    require_new_session(app,sid)
     with app.extensions['auth_db'].begin() as db:
         db.execute(update(AuthSession).where(AuthSession.sid_hash==hashed(sid)).values(**{field:datetime.utcnow()-timedelta(seconds=1)}))
     assert client.get('/api/v1/auth/me').status_code==401
 
 def test_disabled_user(client,app):
     name=account(client);assert login(client,name).status_code==200
+    require_new_user(app,name)
     with app.extensions['auth_db'].begin() as db:db.execute(update(User).where(User.username_normalized==name).values(status='disabled'))
     assert client.get('/api/v1/auth/me').status_code==401
 
 def test_user_isolation(client,app):
     a=account(client);b=account(client);assert login(client,a).status_code==200
     first=client.get('/api/v1/auth/me').get_json()['data']
-    other=app.test_client();other.environ_base['REMOTE_ADDR']='test-'+uuid.uuid4().hex;assert login(other,b).status_code==200
+    other=app.test_client();other.environ_base['REMOTE_ADDR']=new_ip();assert login(other,b).status_code==200
     second=other.get('/api/v1/auth/me').get_json()['data']
     assert first['id']!=second['id']
     assert client.get('/api/v1/auth/me?uid='+str(second['id'])).get_json()['data']==first
 
 def test_rate_limit_shared(app):
-    ip='limit-'+uuid.uuid4().hex;clients=[app.test_client(),create_app({'TESTING':True,'DATABASE_URL':os.environ['MI2_TEST_DATABASE_URL']}).test_client()]
+    name=new_name('missing');ip=new_ip('limit-');clients=[app.test_client(),create_app({'TESTING':True,'DATABASE_URL':os.environ['MI2_TEST_DATABASE_URL']}).test_client()]
     t=[]
     for c in clients:c.environ_base['REMOTE_ADDR']=ip;t.append(token(c))
     for i in range(11):
-        response=post(clients[i%2],'login',{'username':'missinguser','password':PASSWORD},t=t[i%2])
+        response=post(clients[i%2],'login',{'username':name,'password':PASSWORD},t=t[i%2])
     assert response.status_code==429 and int(response.headers['Retry-After'])>0
 
 def test_csrf_creation_rate(client,app):
@@ -117,14 +119,15 @@ def test_wrong_database_refused():
 def test_rehash_support(client,app):
     from argon2 import PasswordHasher
     name=account(client)
+    require_new_user(app,name)
     with app.extensions['auth_db'].begin() as db:db.execute(update(User).where(User.username_normalized==name).values(password_hash=PasswordHasher(time_cost=1,memory_cost=8192,parallelism=1).hash(PASSWORD)))
     assert login(client,name).status_code==200
     with app.extensions['auth_db']() as db:assert not ph.check_needs_rehash(db.scalar(select(User.password_hash).where(User.username_normalized==name)))
 
 def test_concurrent_registration(app):
-    name='race'+uuid.uuid4().hex[:16]
+    name=new_name('race')
     def register(_):
-        c=app.test_client();c.environ_base['REMOTE_ADDR']='race-'+uuid.uuid4().hex
+        c=app.test_client();c.environ_base['REMOTE_ADDR']=new_ip('race-')
         return post(c,'register',{'username':name,'password':PASSWORD}).status_code
     with ThreadPoolExecutor(max_workers=2) as pool:assert sorted(pool.map(register,range(2)))==[201,409]
 
@@ -136,7 +139,7 @@ def test_csrf_and_sid_only_hashes_persisted(client,app):
         assert row and row.sid_hash!=sid and row.csrf_token_hash!=t and row.csrf_token_hash==hashed(t)
 
 def test_unicode_and_space_password(client):
-    name='用户'+uuid.uuid4().hex[:12];password=' unicode 密码 with spaces '
+    name=new_name('用户');password=' unicode 密码 with spaces '
     assert post(client,'register',{'username':name,'password':password}).status_code==201
     assert post(client,'login',{'username':name,'password':password}).status_code==200
 
@@ -156,6 +159,7 @@ def test_throttle_window_rollover(client,app):
     from app.models import Throttle
     assert client.get('/api/v1/auth/csrf').status_code==200
     key=hashed('csrf:ip:'+client.environ_base['REMOTE_ADDR'])
+    require_new_throttle(app,key)
     with app.extensions['auth_db'].begin() as db:db.execute(update(Throttle).where(Throttle.key_hash==key).values(window=int(time.time())//app.config['RATE_WINDOW']-1,count=9999))
     assert client.get('/api/v1/auth/csrf').status_code==200
     with app.extensions['auth_db']() as db:assert db.get(Throttle,key).count==1
@@ -163,7 +167,7 @@ def test_throttle_window_rollover(client,app):
 
 @pytest.mark.parametrize('length,expected',[(5,400),(6,201),(128,201),(129,400)])
 def test_password_length_boundaries(client,length,expected):
-    name='length'+uuid.uuid4().hex[:16]
+    name=new_name('length')
     password='x'*length
     assert post(client,'register',{'username':name,'password':password}).status_code==expected
     if expected==201:assert post(client,'login',{'username':name,'password':password}).status_code==200
