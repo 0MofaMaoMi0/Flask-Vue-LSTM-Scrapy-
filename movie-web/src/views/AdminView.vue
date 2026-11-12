@@ -7,7 +7,7 @@ const router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==
 type Tab='overview'|'catalog'|'users'|'recommend'|'ai'|'health'|'audit'|'settings'
 const tabs:{id:Tab,label:string}[]=[{id:'overview',label:'数据驾驶舱'},{id:'catalog',label:'电影库治理'},{id:'users',label:'用户与行为'},{id:'recommend',label:'推荐效果'},{id:'ai',label:'AI 服务分析'},{id:'health',label:'系统运行'},{id:'audit',label:'操作审计'},{id:'settings',label:'全局设置'}]
 const tab=ref<Tab>('overview'),busy=ref(true),error=ref(''),dashboard=ref<InstanceType<typeof AdminDashboard>>()
-const overview=ref<any>(null),catalog=ref<any[]>([]),users=ref<any[]>([]),events=ref<any[]>([]),health=ref<any>(null)
+const overview=ref<any>(null),catalog=ref<any[]>([]),users=ref<any[]>([]),events=ref<any[]>([]),health=ref<any>(null),feedback=ref<any>(null)
 async function api(path:string){const r=await fetch('/api/admin/'+path,{credentials:'same-origin'});if(r.status===403){router.replace('/home');throw new Error('需要管理员权限。')}if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':'管理数据暂时不可用。');return (await r.json()).data}
 async function loadOverview(){if(overview.value)return;overview.value=await api('overview')}
 async function load(){
@@ -18,6 +18,7 @@ async function load(){
     else if(tab.value==='users')users.value=(await api('users')).items||[]
     else if(tab.value==='audit')events.value=(await api('events')).items||[]
     else if(tab.value==='health')health.value=await api('health')
+    else if(tab.value==='recommend')feedback.value=await api('recommendation-feedback?days=30&k=10')
     else if(tab.value==='ai')await loadOverview()
   }catch(e){error.value=(e as Error).message}finally{busy.value=false}
 }
@@ -64,9 +65,22 @@ function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);re
         <p class="note">只统计已派发的模型调用次数；不读取提示词、响应正文或任何密钥。Token 与费用口径尚未接入，故不展示金额。</p>
       </section>
       <section v-else-if="tab==='recommend'" class="panel">
-        <h2>推荐效果</h2>
-        <p class="empty">暂无可信的离线评测集，因此不展示 precision / recall / NDCG。</p>
-        <p class="note">推荐器本身可用（隔离评测器已存在），但尚未建立“封存的时间切分测试集”；用目录评分冒充准确率会误导，故留空。</p>
+        <h2>推荐效果 <small>过去 30 天 · 曝光与点击真实计数</small></h2>
+        <div v-if="busy" class="empty">正在读取曝光数据…</div>
+        <template v-else-if="feedback">
+          <div class="kpis">
+            <div><span>曝光</span><strong>{{feedback.impressions}}</strong></div>
+            <div><span>点击</span><strong>{{feedback.clicks}}</strong></div>
+            <div><span>CTR</span><strong>{{feedback.ctr==null?'—':(feedback.ctr*100).toFixed(2)+'%'}}</strong></div>
+          </div>
+          <div v-if="feedback.channels.length" class="tablewrap"><table><thead><tr><th>频道</th><th>曝光</th><th>点击</th><th>CTR</th></tr></thead><tbody><tr v-for="c in feedback.channels" :key="c.channel"><td>{{c.channel}}</td><td>{{c.impressions}}</td><td>{{c.clicks}}</td><td>{{c.ctr==null?'—':(c.ctr*100).toFixed(2)+'%'}}</td></tr></tbody></table></div>
+          <p v-else class="empty">过去 30 天还没有曝光记录；访问推荐频道后会自动采集。</p>
+          <h3 class="sub">排序指标 <small>K={{feedback.ranking.k}} · 真值：已看/收藏/评分≥4</small></h3>
+          <p v-if="feedback.ranking.status==='OK'" class="metric-line">Precision {{feedback.ranking.precision_at_k?.toFixed(3)}} · Recall {{feedback.ranking.recall_at_k?.toFixed(3)}} · NDCG {{feedback.ranking.ndcg_at_k?.toFixed(3)}}<span>（{{feedback.ranking.users}} 个有效用户）</span></p>
+          <p v-else class="empty">样本不足，暂不计算排序指标（需要曝光用户同时具备已看/收藏/评分≥4 的真值）。</p>
+          <p class="note">曝光口径为榜单实际渲染条数；点击口径为对应名次的点击事件。CTR 不是推荐准确率。数据保留 180 天。</p>
+        </template>
+        <p v-else class="empty">推荐效果数据暂时不可用。</p>
       </section>
       <section v-else-if="tab==='settings'" class="panel">
         <h2>全局设置</h2>
@@ -112,4 +126,4 @@ tr:hover td{background:#ffffff05}
 code{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:#cfc0ee;background:#241f33;padding:1px 5px;border-radius:4px}
 .admin-shell :focus-visible{outline:2px solid #c4a8ef;outline-offset:3px}
 @media(max-width:1000px){.split{grid-template-columns:1fr}}
-</style>
+.kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 18px}.kpis div{border:1px solid #ffffff10;border-radius:10px;padding:14px 16px;background:#0d0b14}.kpis span{display:block;color:#9b90ad;font-size:11px;margin-bottom:6px}.kpis strong{font-size:24px;font-weight:750;letter-spacing:-.02em}.sub{font-size:13px;margin:22px 0 10px}.sub small{color:#8d859f;font-size:11px;font-weight:400;margin-left:6px}.metric-line{font-size:14px;color:#e8e1f2;margin:0}.metric-line span{color:#948aa6;font-size:12px;margin-left:8px}</style>
