@@ -96,6 +96,10 @@ class AgentService:
                 finally:runtime['finished']=time.monotonic();self.slots.release()
         threading.Thread(target=work,daemon=True,name='mi2-byok-agent').start()
     def run(self,key,user,binding,message,cid,kind,movie_id,runtime):
+        from catalog.tmdb_connection import using
+        with using(getattr(self.reader,'tmdb',None),user,binding):
+            return self._run(key,user,binding,message,cid,kind,movie_id,runtime)
+    def _run(self,key,user,binding,message,cid,kind,movie_id,runtime):
         old,turns=self.conversation(user,binding,cid);cid=cid or secrets.token_urlsafe(32)
         config=self.vault.config(user,binding)
         if config and config['enabled'] and config['verification'] not in ('KEY_REJECTED','MODEL_UNAVAILABLE'):
@@ -220,13 +224,13 @@ class AgentService:
                 if result is None:raise ValueError('No verified final output')
             except Exception as error:
                 if cancel():self.ledger.finish(key,{'error_code':'CANCELLED','cost':self.ledger.cost(key)},'CANCELLED');return
-                if not planned and isinstance(error,(ValueError,TypeError,KeyError)):
+                if not planned and isinstance(error,(ValueError,TypeError,KeyError)) and not isinstance(error,Quota):
                     filters=model_base(old.get('filters'));filters['_needs_clarification']=True;filters['_notes']=['模型条件输出不符合结构要求，请重新说明条件；没有自动重试']
                     local,_,_=self.local(user,message,old,accepted=filters)
                 elif not planned:
                     # Transport failure falls back conservatively, with explicit provenance.
                     local,filters,_=self.local(user,message,old)
-                result=local;result.update(source='FALLBACK');result['failure_code']=('MODEL_CONDITION_REJECTED' if str(error)=='Final movie violates server-enforced conditions' else 'MODEL_OUTPUT_REJECTED' if isinstance(error,(ValueError,TypeError,KeyError)) else error.code if isinstance(error,ProviderError) else 'MODEL_UNAVAILABLE');result['limitations'].append('BUDGET_EXCEEDED' if isinstance(error,Quota) else '模型不可用或输出未通过核验；未重试付费请求')
+                result=local;result.update(source='FALLBACK');result['failure_code']=('BUDGET_EXCEEDED' if isinstance(error,Quota) else 'MODEL_CONDITION_REJECTED' if str(error)=='Final movie violates server-enforced conditions' else 'MODEL_OUTPUT_REJECTED' if isinstance(error,(ValueError,TypeError,KeyError)) else error.code if isinstance(error,ProviderError) else 'MODEL_UNAVAILABLE');result['limitations'].append('BUDGET_EXCEEDED' if isinstance(error,Quota) else '模型不可用或输出未通过核验；未重试付费请求')
                 result['failure_details']=failure_details(stage,error,response)
                 self.vault.verified(user,binding,config['generation'],'KEY_REJECTED' if isinstance(error,ProviderError) and error.code=='KEY_REJECTED' else config['verification'])
         if cancel():self.ledger.finish(key,{'error_code':'CANCELLED','cost':self.ledger.cost(key)},'CANCELLED');return

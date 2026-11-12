@@ -16,6 +16,7 @@ REASONS={
     'Terminal tool must be alone':'TERMINAL_TOOL_BATCHED',
     'Structured intent required before final':'INTENT_MISSING',
     'Plan answer requires no actions':'PLAN_ANSWER_WITH_ACTIONS',
+    'User daily call limit':'DAILY_LIMIT',
 }
 
 def failure_details(stage,error,response=None):
