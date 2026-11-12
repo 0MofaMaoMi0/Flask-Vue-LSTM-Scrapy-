@@ -66,6 +66,8 @@ def create_app(overrides=None):
         install_admin(app)
         from media_api import install as install_media
         install_media(app)
+        from catalog.recommendation_feedback import install as install_feedback
+        install_feedback(app)
     @app.get('/api/v1/health')
     def health(): return jsonify(code=0, message='ok', data={'status':'ok'})
     if app.config.get('M6_ISOLATED') is True:

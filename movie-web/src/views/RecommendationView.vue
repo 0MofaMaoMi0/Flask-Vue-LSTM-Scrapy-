@@ -2,20 +2,21 @@
 import {ref,computed,onMounted,onBeforeUnmount,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import M9Sidebar from '../components/M9Sidebar.vue'
+import {trackImpressions,trackClick} from '../services/recommendationFeedback'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({})
 const keyword=ref(''),genre=ref(''),yearFrom=ref(''),yearTo=ref(''),runtime=ref(''),minVotes=ref(''),localOnly=ref(false),unwatched=ref(false)
 const channel=computed(()=>String(route.query.channel||'daily'))
 const selected=computed(()=>channels.value.find(c=>c.id===channel.value))
-let controller:AbortController|undefined,sequence=0
+let controller:AbortController|undefined,sequence=0,boardRequest=''
 async function get(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});const body=await r.json();if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':'推荐频道暂时无法读取，请重试。');return body.data}
 function sync(){const q=route.query;keyword.value=String(q.keyword||'');genre.value=String(q.genre||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');runtime.value=String(q.runtime_max||'');minVotes.value=String(q.min_votes||'');localOnly.value=q.scope==='local';unwatched.value=q.unwatched==='true'}
 async function load(){sync();controller?.abort();controller=new AbortController();const id=++sequence;loading.value=true;error.value='';data.value=null
- try{const params=new URLSearchParams({channel:channel.value,limit:'36'});for(const key of ['keyword','genre','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]));const result=await get('recommendations?'+params,controller.signal);if(id===sequence)data.value=result}
+ try{const params=new URLSearchParams({channel:channel.value,limit:'36'});for(const key of ['keyword','genre','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]));const result=await get('recommendations?'+params,controller.signal);if(id===sequence){data.value=result;boardRequest=await trackImpressions({channel:channel.value,period:result.period,context:'recommendations',items:result.items})||''}}
  catch(e){if(id===sequence&&!controller.signal.aborted)error.value=(e as Error).message}finally{if(id===sequence)loading.value=false}}
 function change(id:string){router.push({path:'/recommendations',query:{...route.query,channel:id}})}
 function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)load();else router.push(target)}
-function detail(movie:any){router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
+function detail(movie:any){trackClick(boardRequest,(data.value?.items?.indexOf(movie)??-1)+1);router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
 function stamp(value?:string){if(!value)return '未提供';const d=new Date(value);return Number.isNaN(d.getTime())?'未提供':d.toLocaleString('zh-CN',{hour12:false})}
 function money(value:number){return new Intl.NumberFormat('zh-CN',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(value)}
 const onBehavior=()=>load()
@@ -45,7 +46,7 @@ onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-behavio
  <div v-if="!data.items.length" class="state"><h3>{{data.status==='UNAVAILABLE'?'官方榜单尚未就绪':'暂无符合条件的电影'}}</h3><p>可以减少筛选条件；个人频道需要相应的收藏、评分或想看记录。</p><router-link to="/movies">浏览电影并完善偏好</router-link></div>
  <div v-else class="poster-grid"><article v-for="movie in data.items" :key="movie.key" class="movie-card" :data-movie-id="movie.movie_id||''">
   <button v-if="movie.in_catalog" class="board-poster" :aria-label="'查看《'+movie.title+'》详情'" @click="detail(movie)"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">{{movie.source_rank?'#'+movie.source_rank:movie.rank}}</span></button>
-  <a v-else class="board-poster" :href="movie.tmdb_url" target="_blank" rel="noopener noreferrer" :aria-label="'在 TMDB 查看《'+movie.title+'》（新标签页）'"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">#{{movie.source_rank}}</span><span class="external">库外影片 · TMDB</span></a>
+  <a v-else class="board-poster" @click="trackClick(boardRequest,(data.value?.items?.indexOf(movie)??-1)+1)" :href="movie.tmdb_url" target="_blank" rel="noopener noreferrer" :aria-label="'在 TMDB 查看《'+movie.title+'》（新标签页）'"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">#{{movie.source_rank}}</span><span class="external">库外影片 · TMDB</span></a>
   <h3>{{movie.title}}</h3><p class="meta">{{movie.release_year||'年份未提供'}}<template v-if="movie.runtime_minutes"> · {{movie.runtime_minutes}} 分钟</template></p><p class="genre">{{movie.genres?.join(' / ')||'类型未提供'}}</p>
   <p v-if="channel==='revenue'" class="metric">累计 {{money(movie.revenue)}}</p><p v-else-if="movie.tmdb_rating!=null" class="metric">TMDB {{movie.tmdb_rating.toFixed(1)}}<span> · {{movie.vote_count.toLocaleString()}} 票</span></p>
   <p v-if="selected?.public&&movie.tmdb_popularity!=null" class="meta">热度 {{movie.tmdb_popularity.toFixed(1)}}</p><p class="reason">{{movie.reasons?.join('；')}}</p>

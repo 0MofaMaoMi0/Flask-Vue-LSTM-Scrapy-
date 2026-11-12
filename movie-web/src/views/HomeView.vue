@@ -4,9 +4,10 @@ import {useRouter} from 'vue-router'
 import {useAuthStore} from '../stores/auth'
 import M9Sidebar from '../components/M9Sidebar.vue'
 import {movieArtwork as art} from '../services/movieArtwork'
+import {trackImpressions,trackClick} from '../services/recommendationFeedback'
 const RAIL=8
 const router=useRouter(),auth=useAuthStore(),movies=ref<any[]>([]),behavior=ref<Record<string,any>>({}),featuredId=ref(0),loading=ref(true),error=ref(''),logoutError=ref(''),failed=ref<Record<string,boolean>>({}),posterLoaded=ref<Record<string,boolean>>({}),heroLoaded=ref(false),sidebarExpanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
-const personalIds=ref<number[]>([]),popularIds=ref<number[]>([]),catalogTotal=ref(0)
+const personalIds=ref<number[]>([]),popularIds=ref<number[]>([]),catalogTotal=ref(0),homeRequests:Record<string,string>={}
 const channels=computed(()=>[{id:'personal',title:'每日为你推荐',note:'同日稳定 · 根据你的收藏、想看与评分',items:personalIds.value.map(id=>movies.value.find(m=>m.movie_id===id)).filter(Boolean)},{id:'popular',title:'TMDB 热门',note:'官方榜单 · 本地已收录子集',items:popularIds.value.map(id=>movies.value.find(m=>m.movie_id===id)).filter(Boolean)}])
 const rail=computed(()=>channels.value.flatMap(c=>c.items))
 function poster(m:any){return m.poster||art[String(m.movie_id)]?.poster}
@@ -29,8 +30,9 @@ async function load(){loading.value=true;error.value='';try{
   if(state)behavior.value=state.state||{}
   const byId=new Map<number,any>();for(const d of details)if(d)byId.set(d.movie_id,d)
   movies.value=movies.value.map(m=>byId.has(m.movie_id)?{...m,...byId.get(m.movie_id)}:m)
+  for(const c of channels.value){if(c.items.length)homeRequests[c.id]=await trackImpressions({channel:c.id,context:'home',items:c.items})||''}
 }catch(e){if(!controller.signal.aborted)error.value=(e as Error).message}finally{loading.value=false}}
-function detail(id:number){sessionStorage.setItem('mi2_home_selected',String(id));sessionStorage.setItem('mi2_home_position',String(window.scrollY));router.push('/movies?from=home#movie/'+id)}
+function detail(id:number){const c=channels.value.find(x=>x.items.some((m:any)=>m.movie_id===id));if(c)trackClick(homeRequests[c.id],c.items.findIndex((m:any)=>m.movie_id===id)+1);sessionStorage.setItem('mi2_home_selected',String(id));sessionStorage.setItem('mi2_home_position',String(window.scrollY));router.push('/movies?from=home#movie/'+id)}
 function openAI(){window.dispatchEvent(new Event('mi2-open-assistant'))}
 async function logout(){try{await auth.logout();router.replace('/login')}catch{logoutError.value='退出未确认，请重试。'}}
 onMounted(async()=>{await load();requestAnimationFrame(()=>window.scrollTo(0,Number(sessionStorage.getItem('mi2_home_position')||0)))})
