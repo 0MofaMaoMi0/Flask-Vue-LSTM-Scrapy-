@@ -4,6 +4,7 @@ import {useRouter,useRoute} from 'vue-router'
 import M9Sidebar from '../components/M9Sidebar.vue'
 import MovieGlobe from '../components/MovieGlobe.vue'
 import {movieArtwork} from '../services/movieArtwork'
+import {personalRequest} from '../services/personalFeatures'
 import {MOVIE_COUNTRIES} from '../data/movieCountries'
 import {ISO2_TO_ISO3} from '../lib/globe/iso2to3.js'
 import {countryName,flagUrl,flagAlt} from '../lib/globe/countryDisplay.js'
@@ -97,11 +98,24 @@ function genres(m:any){return (m?.genres||[]).map((g:any)=>g.name_zh).join(' / '
 function stateOf(m:any){return behavior.value[String(m.movie_id)]||{}}
 function watchedAt(m:any){const v=stateOf(m).watched_at;if(!v)return '—';const d=new Date(v);return isNaN(d.getTime())?'—':d.toLocaleDateString('zh-CN')}
 function label(m:any){const s=stateOf(m);if(s.watched)return '已看';if(s.want)return '想看';if(s.favorite)return '已收藏';return ''}
+const movieNotes=ref<Record<string,{note:string,version:number}>>({}),editNote=ref(''),notesReady=ref(false)
 const editOpen=ref(false),editMovie=ref<any>(null),editSeen=ref(false),editFav=ref(false),editWant=ref(false),editRating=ref(''),editSaving=ref(false),editError=ref('')
-function openEdit(m:any){const s=behavior.value[String(m.movie_id)]||{};editMovie.value=m;editSeen.value=!!s.watched;editFav.value=!!s.favorite;editWant.value=!!s.want;editRating.value=typeof s.rating==='number'?String(s.rating):'';editError.value='';editOpen.value=true}
-function closeEdit(){if(editSaving.value)return;editOpen.value=false;editMovie.value=null}
+const editLoadingNote=ref(false)
+let editLoadVersion=0
+async function openEdit(m:any){
+  const version=++editLoadVersion,s=behavior.value[String(m.movie_id)]||{}
+  editMovie.value=m;editSeen.value=!!s.watched;editFav.value=!!s.favorite;editWant.value=!!s.want;editRating.value=typeof s.rating==='number'?String(s.rating):''
+  editNote.value='';editError.value='';editOpen.value=true;editLoadingNote.value=true;notesReady.value=false
+  try{
+    const data=await personalRequest('movie-notes')
+    if(version!==editLoadVersion||!editOpen.value)return
+    movieNotes.value=data.items;editNote.value=data.items[String(m.movie_id)]?.note||'';notesReady.value=true
+  }catch(e){if(version===editLoadVersion&&editOpen.value)editError.value='备注读取失败，可关闭后重开；其它记录仍可保存。'}
+  finally{if(version===editLoadVersion)editLoadingNote.value=false}
+}
+function closeEdit(){if(editSaving.value)return;++editLoadVersion;editLoadingNote.value=false;editOpen.value=false;editMovie.value=null}
 async function saveEdit(){
-  const m=editMovie.value;if(!m||editSaving.value)return
+  const m=editMovie.value;if(!m||editSaving.value||editLoadingNote.value)return
   editSaving.value=true;editError.value=''
   try{
     const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});if(!c.ok)throw new Error('登录状态已失效，请重新登录。')
@@ -120,6 +134,8 @@ async function saveEdit(){
       if(!r.ok)throw new Error(r.status===409?'与其它状态冲突，请先撤销冲突项。':'保存未确认，请重试。')
     }
     behavior.value=(await api('behavior')).state
+    const previous=movieNotes.value[String(m.movie_id)]
+    if(notesReady.value&&editNote.value!==(previous?.note||'')){const saved=await personalRequest('movie-notes',{movie_id:m.movie_id,note:editNote.value,version:previous?.version||0});movieNotes.value[String(m.movie_id)]=saved}
     window.dispatchEvent(new Event('mi2-behavior-changed'))
     editOpen.value=false;editMovie.value=null
   }catch(e){editError.value=(e as Error).message}finally{editSaving.value=false}
@@ -132,6 +148,7 @@ async function load(){busy.value=true;error.value='';try{
   const state=await api('behavior')
   movies.value=all
   behavior.value=state.state||{}
+  try{movieNotes.value=(await personalRequest('movie-notes')).items;notesReady.value=true}catch{notesReady.value=false}
   try{
     const cc=await api('production-countries')
     const next:Record<string,string[]>={}
@@ -297,15 +314,15 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
       <div class="r41-head"><div><small>PERSONAL WATCH LOG</small><h2 id="r41Title">编辑观看记录</h2></div><button type="button" class="r41-close" aria-label="关闭" @click="closeEdit">×</button></div>
       <div class="r41-body">
         <p class="r41-film">{{editMovie?.title}}<small>{{editMovie?.release_year}}</small></p>
-        <p class="r41-label">记录行为 <small>可以同时勾选多个，互不冲突</small></p>
+        <p class="r41-label">记录行为 <small>收藏独立保存；已看与想看不能同时开启</small></p>
         <div class="r41-row"><label><input v-model="editSeen" type="checkbox"/>已看</label><label><input v-model="editFav" type="checkbox"/>收藏</label><label><input v-model="editWant" type="checkbox"/>想看</label></div>
         <label class="r41-label" for="r41Rating">个人评分 <small>可不评分；评分不自动代表已看</small></label>
         <select id="r41Rating" v-model="editRating" class="r41-select"><option value="">暂不评分</option><option v-for="v in ['5','4.5','4','3.5','3','2.5','2','1.5','1','0.5']" :key="v" :value="v">{{Number(v).toFixed(1)}}</option></select>
-        <label class="r41-label" for="r41Note">私人备注 <small>备注字段待后端支持，暂不保存</small></label>
-        <textarea id="r41Note" class="r41-note" rows="2" maxlength="200" placeholder="字段尚未入库，暂不可用" disabled></textarea>
+        <label class="r41-label" for="r41Note">私人备注 <small>按账户保存 · 仅自己可见 · 最多200字</small></label>
+        <textarea id="r41Note" class="r41-note" rows="2" maxlength="200" v-model="editNote" :disabled="!notesReady" :placeholder="notesReady?'记录你的观影感受（仅自己可见）':'备注服务暂时不可用'"></textarea>
         <p v-if="editError" class="r41-error" role="alert">{{editError}}</p>
       </div>
-      <div class="r41-foot"><button type="button" class="r41-cancel" :disabled="editSaving" @click="closeEdit">取消</button><button type="button" class="r41-save" :disabled="editSaving" @click="saveEdit">{{editSaving?'正在保存…':'保存记录调整'}}</button></div>
+      <div class="r41-foot"><button type="button" class="r41-cancel" :disabled="editSaving" @click="closeEdit">取消</button><button type="button" class="r41-save" :disabled="editSaving||editLoadingNote" @click="saveEdit">{{editSaving?'正在保存…':'保存记录调整'}}</button></div>
     </div>
   </div>
 </div>

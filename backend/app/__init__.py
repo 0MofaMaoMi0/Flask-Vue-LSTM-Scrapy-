@@ -66,6 +66,8 @@ def create_app(overrides=None):
         install_assistant(app)
         from assistant.account_api import install as install_account
         install_account(app)
+        from assistant.personal_api import install as install_personal
+        install_personal(app)
         from analytics.api import install as install_analytics
         install_analytics(app)
         from admin_api import install as install_admin

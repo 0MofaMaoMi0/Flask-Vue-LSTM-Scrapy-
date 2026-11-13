@@ -99,7 +99,9 @@ class CredentialStore:
             except (VerifyMismatchError,VerificationError):raise CredentialAccessDenied('Current password rejected') from None
             # Erase first. If the later auth commit fails, the account remains usable
             # with no saved keys; it is never closed with surviving live credentials.
-            with self.engine.begin() as c:c.execute(delete(self.table).where(self.table.c.user_id==user))
+            with self.engine.begin() as c:
+                c.execute(delete(self.table).where(self.table.c.user_id==user))
+                for table in getattr(self,'personal_tables',{}).values():c.execute(delete(table).where(table.c.user_id==user))
             auth.execute(update(User).where(User.id==user).values(status='closed',password_hash=ph.hash(secrets.token_urlsafe(32)),updated_at=datetime.utcnow()))
             auth.execute(update(AuthSession).where(AuthSession.user_id==user,AuthSession.revoked_at.is_(None)).values(revoked_at=datetime.utcnow()))
 
