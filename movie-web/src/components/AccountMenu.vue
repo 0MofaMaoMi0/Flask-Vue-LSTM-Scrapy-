@@ -15,6 +15,7 @@ const open=ref(false),signingOut=ref(false),error=ref('')
 const initial=computed(()=>auth.user?.username?.slice(0,1).toUpperCase()||'')
 const roleLabel=computed(()=>auth.user?.is_admin?'管理员':'个人账户')
 const items:{tab:AccountSettingsTab,label:string,icon:string}[]=[
+ {tab:'account',label:'设置',icon:'M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8ZM12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2'},
  {tab:'account',label:'个人资料',icon:'M20 21v-2a7 7 0 0 0-14 0v2M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0Z'},
  {tab:'display',label:'个性化',icon:'M4 6h16M4 12h16M4 18h16M8 3v6M16 9v6M10 15v6'},
  {tab:'ai',label:'AI 与模型连接',icon:'m12 3 2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z'},
@@ -58,7 +59,7 @@ onDeactivated(()=>{open.value=false})
     <div class="account-summary-text"><strong>{{auth.user?.username}}</strong><span>{{roleLabel}}</span></div>
    </div>
    <div class="account-separator" role="separator"/>
-   <VListItem v-for="item in items" :key="item.tab" tag="button" type="button" role="menuitem" :link="true"
+   <VListItem v-for="item in items" :key="item.label" tag="button" type="button" role="menuitem" :link="true"
     class="account-menu-item" :disabled="signingOut" :ripple="false" @click="go(item.tab)">
     <template #prepend><svg aria-hidden="true" viewBox="0 0 24 24"><path :d="item.icon"/></svg></template>
     {{item.label}}
