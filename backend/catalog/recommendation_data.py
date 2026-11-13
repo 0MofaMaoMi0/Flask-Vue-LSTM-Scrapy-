@@ -8,6 +8,7 @@ from weakref import WeakKeyDictionary
 from urllib.parse import quote
 from sqlalchemy import select
 from .models import CatalogBase
+from .media_urls import asset_url
 
 _cache=WeakKeyDictionary()
 _lock=Lock()
@@ -65,9 +66,7 @@ def _load_candidates(engine):
                 byid[mid]['director_ids' if role=='crew' else 'actor_ids'].append(int(pid))
         for row in c.execute(select(assets).join(m,m.c.movie_id==assets.c.movie_id).where(m.c.catalog_status=='active',assets.c.asset_type=='poster').order_by(assets.c.is_primary.desc(),assets.c.asset_id)).mappings():
             if byid[row['movie_id']]['poster']:continue
-            path=row['source_path']
-            if row['source']=='tmdb' and path.startswith('/'):path='https://image.tmdb.org/t/p/w342'+path
-            byid[row['movie_id']]['poster']='/api/media/poster?u='+quote(path,safe='') if path.startswith(('https://','http://')) else path
+            byid[row['movie_id']]['poster']=asset_url(row)
     maximum=max((math.log1p(row['tmdb_popularity']) for row in movies if row['tmdb_popularity'] is not None),default=0)
     for row in movies:
         row['catalog_popularity']=math.log1p(row['tmdb_popularity'])/maximum if maximum and row['tmdb_popularity'] is not None else 0

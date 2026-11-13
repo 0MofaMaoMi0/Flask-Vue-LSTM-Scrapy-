@@ -8,8 +8,8 @@ import {countryName} from '../lib/globe/countryDisplay.js'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 const movie=ref<any>(null),state=ref<any>({}),recommendations=ref<any[]>([]),busy=ref(true),saving=ref(false),error=ref(''),actionError=ref(''),notice=ref(''),rating=ref('4'),posterFailed=ref(false),backdropFailed=ref(false),behaviorReady=ref(false),countries=ref<string[]>([])
 const id=computed(()=>route.hash.slice(7)),art=computed(()=>movieArtwork[id.value])
-const mediaUrl=(p?:string)=>p&&p.startsWith('http')?'/api/media/poster?u='+encodeURIComponent(p):p
-const asset=computed(()=>{const list=movie.value?.assets||[];const pick=(type:string)=>list.find((a:any)=>a.asset_type===type&&a.is_primary)||list.find((a:any)=>a.asset_type===type);return {poster:mediaUrl(pick('poster')?.source_path)||art.value?.poster,backdrop:mediaUrl(pick('backdrop')?.source_path)||art.value?.backdrop}})
+const mediaUrl=(a?:any)=>a?.url||(a?.source_path?.startsWith('http')?'/api/media/poster?u='+encodeURIComponent(a.source_path):undefined)
+const asset=computed(()=>{const list=movie.value?.assets||[];const pick=(type:string)=>list.find((a:any)=>a.asset_type===type&&a.is_primary)||list.find((a:any)=>a.asset_type===type);return {poster:mediaUrl(pick('poster'))||art.value?.poster,backdrop:mediaUrl(pick('backdrop'))||art.value?.backdrop}})
 const photoFailures=ref<Record<string,boolean>>({})
 function photo(c:any){
  const path=c.profile_path
@@ -23,7 +23,7 @@ const missingPhotos=computed(()=>visibleCredits.value.filter(c=>!photo(c)||photo
 
 const tmdbId=computed(()=>((movie.value?.external_ids||[]).find((x:any)=>x.source==='tmdb')||{}).external_id||'')
 const tmdbCastUrl=computed(()=>tmdbId.value?`https://www.themoviedb.org/movie/${tmdbId.value}/cast`:'')
-const posterFallback=computed(()=>mediaUrl((movie.value?.assets||[]).find((a:any)=>a.asset_type==='poster'&&a.source==='tmdb')?.source_path))
+const posterFallback=computed(()=>mediaUrl((movie.value?.assets||[]).find((a:any)=>a.asset_type==='poster'&&a.source==='tmdb')))
 function onPosterError(e:Event){const img=e.target as HTMLImageElement;const fb=posterFallback.value;if(fb&&!img.dataset.fb){img.dataset.fb='1';img.src=fb}else{posterFailed.value=true}}
 function preferredCredits(rows:any[]){const official=rows.filter(c=>c.source==='tmdb');return official.length?official:rows}
 const directors=computed(()=>preferredCredits((movie.value?.credits||[]).filter((c:any)=>c.role_type==='crew'&&c.job==='Director')))

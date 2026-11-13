@@ -6,6 +6,7 @@ from urllib.parse import quote
 from flask import Blueprint,request,jsonify
 from sqlalchemy.sql.selectable import Select
 from . import read_queries as queries
+from .media_urls import asset_url
 
 class InputError(ValueError):
     pass
@@ -62,8 +63,8 @@ def create_read_blueprint(executor=None):
         posters={};fallbacks={}
         if ids:
             for art in execute(queries.movie_posters(ids),max(1,len(ids)*4)):
-                path=art['source_path']
-                url='/api/media/poster?u='+quote(path,safe='') if str(path).startswith(('http://','https://')) else path
+                url=asset_url(art)
+                if not url:continue
                 if art['source']=='tmdb':fallbacks.setdefault(art['movie_id'],url)
                 else:posters.setdefault(art['movie_id'],url)
             for item in items:
@@ -81,6 +82,8 @@ def create_read_blueprint(executor=None):
             maximum=RELATION_LIMIT+1 if name=='credits' else RELATION_LIMIT
             related_rows=execute(builder(movie_id).limit(maximum),maximum)
             data[name]=[dto(x,fields) for x in related_rows[:RELATION_LIMIT]]
+            if name=='assets':
+                for asset in data[name]:asset['url']=asset_url(asset)
             if name=='credits':data['credits_has_more']=len(related_rows)>RELATION_LIMIT
         return reply(data)
     @bp.get('/api/catalog/movies/<int:movie_id>/credits')
