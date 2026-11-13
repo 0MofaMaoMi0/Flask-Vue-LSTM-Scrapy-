@@ -3,45 +3,24 @@
 
 import {ref,onMounted,onBeforeUnmount,onDeactivated,nextTick,computed,watch} from 'vue'
 import {useAuthStore} from '../stores/auth'
-import {useRoute} from 'vue-router'
-import TMDBSettings from './TMDBSettings.vue'
-import AccountClosure from './AccountClosure.vue'
+import {useRoute,useRouter} from 'vue-router'
 import {aiWorkspace} from '../services/aiWorkspace'
-import {isAccountSettingsTab,OPEN_ACCOUNT_SETTINGS} from '../services/accountSettings'
-import {personalRequest,persistAvatar} from '../services/personalFeatures'
+import {isAccountSettingsTab,accountSettingsTarget} from '../services/accountSettings'
+import {CLEAR_ASSISTANT_DISPLAY} from '../services/assistantDisplay'
+import {assistantRequest as request,assistantJson as jsonRequest} from '../services/assistantApi'
+import {personalRequest} from '../services/personalFeatures'
 import {movieArtwork} from '../services/movieArtwork'
 import {assistantMovieTarget} from '../services/movieNavigation'
 const props=defineProps<{surface:'explore'|'floating'}>()
-const settings=ref(false),thread=ref<HTMLElement>()
+const thread=ref<HTMLElement>(),router=useRouter()
 const message=ref(''),busy=ref(false),configBusy=ref(false),error=ref(''),notice=ref(''),result=ref<any>(null),conversation=ref<string|null>(null),status=ref<any>({configured:false,enabled:false}),draft=ref('')
 const composerInput=ref<HTMLTextAreaElement>(),expanded=ref(false)
 function resizeComposer(){const el=composerInput.value;if(!el)return;el.style.setProperty('height','auto','important');const natural=el.scrollHeight,cap=162;const h=expanded.value?Math.max(48,Math.min(natural,cap)):30;el.style.setProperty('height',h+'px','important');el.style.setProperty('overflow-y',expanded.value&&natural>cap?'auto':'hidden','important')}
 function autoGrow(){const el=composerInput.value;if(!el)return;el.style.setProperty('height','auto','important');el.style.setProperty('min-height','0px','important');const natural=el.scrollHeight;el.style.removeProperty('min-height');const must=el.value.length>0&&(el.value.includes('\n')||natural>34);if(must!==expanded.value){expanded.value=must;nextTick(resizeComposer)}else resizeComposer()}
 watch(message,()=>nextTick(autoGrow))
-const apiKey=ref(''),model=ref('deepseek-flash'),output=ref(2048),consent=ref(false),paidConsent=ref(false),cacheEnabled=ref(false)
 const history=ref<{question:string,answer:string,result?:any,feedback?:string|null}[]>([])
 let controller:AbortController|null=null,pending:any=null
-async function request(path:string,method='GET',body?:any,signal?:AbortSignal){
- const headers:Record<string,string>={}
- if(method!=='GET'){
-  const r=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('登录状态已失效，请重新登录。')
-  headers['X-CSRF-Token']=(await r.json()).data.csrf_token;headers['Content-Type']='application/json'
- }
- return fetch('/api/v1/assistant/'+path,{method,headers,credentials:'same-origin',body:body===undefined?undefined:JSON.stringify(body),signal})
-}
-async function jsonRequest(path:string,method='GET',body?:any){
- const r=await request(path,method,body);const b=await r.json();if(!r.ok||b.code!=='OK')throw new Error(r.status===401?'请重新登录。':b.code==='REQUEST_ID_CONFLICT'?'此请求编号已使用，未再次调用模型。':b.code==='KEY_CHECK_FAILED'?'密钥检查失败，请检查模型、Key或服务商网络。':b.code==='INVALID_INPUT'?'配置或输入格式无效，请检查后再试。':'操作未完成：'+b.code)
- return b.data
-}
-async function refreshStatus(){try{status.value=await jsonRequest('status');if(status.value.model){model.value=status.value.model;cacheEnabled.value=!!status.value.cache_enabled}}catch(e){error.value=(e as Error).message}}
-async function saveConfig(){
- if(configBusy.value)return
- configBusy.value=true;error.value='';notice.value=''
- try{await jsonRequest('config','POST',{provider:'deepseek',model:model.value,api_key:apiKey.value,daily_calls:null,max_output_tokens:Number(output.value),enabled:true,consent:consent.value,cache_enabled:cacheEnabled.value});await refreshStatus();broadcast();notice.value='密钥已按账户加密保存到数据库。退出登录或服务重启后保留；保存没有调用模型。'}catch(e){error.value=(e as Error).message}finally{apiKey.value='';configBusy.value=false}
-}
-async function verifyKey(){configBusy.value=true;error.value='';try{await jsonRequest('verify','POST',{});await refreshStatus();broadcast();notice.value='已完成模型列表检查，没有发送生成请求。'}catch(e){error.value=(e as Error).message;await refreshStatus()}finally{configBusy.value=false}}
-async function disconnect(){configBusy.value=true;try{await jsonRequest('disconnect','POST',{});apiKey.value='';await refreshStatus();broadcast();notice.value='连接已停用，数据库中的密钥保留；在途请求将尝试取消，已发送的调用仍可能计费。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
-async function enableSaved(){configBusy.value=true;error.value='';try{await jsonRequest('enable','POST',{});await refreshStatus();broadcast();notice.value='已启用数据库保存的密钥；本操作没有调用模型。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
+async function refreshStatus(){try{status.value=await jsonRequest('status')}catch(e){error.value=(e as Error).message}}
 function consume(event:string,data:any){
  nextTick(()=>{if(thread.value)thread.value.scrollTop=thread.value.scrollHeight})
  if(event==='draft')draft.value=data.text||''
@@ -71,27 +50,25 @@ async function submit(){
  await send('query',{message:text,conversation_id:conversation.value,request_id:same?pending.request_id:crypto.randomUUID()})
 }
 async function explain(id:number){await send('explain',{movie_id:id,request_id:crypto.randomUUID()})}
-async function testConnection(){if(!paidConsent.value||busy.value)return;await send('test',{confirm_paid:true,request_id:crypto.randomUUID()})}
 async function cancel(){
  if(!pending)return
  try{const id=pending.request_id;const data=await jsonRequest('cancel','POST',{request_id:id});if(!data.cancel_requested&&data.state==='DONE'){const completed=await jsonRequest('requests/'+id);consume('result',{...completed,state:'DONE'});notice.value='请求已经完成，未执行取消。'}else{result.value={source:'INTERRUPTED',answer:'已请求取消。已发送的调用可能计费，最终用量可能暂时未知。',cost:data.cost};notice.value='不会自动重发此请求。'}}catch(e){error.value=(e as Error).message}finally{controller?.abort();draft.value=''}
 }
 function reset(){newSession()}
-function clearSensitive(){apiKey.value=''}
+function clearSensitive(){profileOpen.value=false}
 defineExpose({clearSensitive})
 onDeactivated(clearSensitive)
 function sharedStatus(){refreshStatus()}
-function broadcast(){window.dispatchEvent(new Event('mi2-model-status'))}
 function closeTransient(e:Event){const el=e.target as HTMLElement;if(!el?.closest?.('.side-list'))sessionMenu.value='';if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value=''}}
-onMounted(()=>{refreshStatus();window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(OPEN_ACCOUNT_SETTINGS,openRequestedSettings);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
-onBeforeUnmount(()=>{apiKey.value='';controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(OPEN_ACCOUNT_SETTINGS,openRequestedSettings);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
+onMounted(()=>{refreshStatus();window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
+onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
 
 function movieUrl(id:number){return assistantMovieTarget(id,props.surface,settingsRoute.fullPath)}
 async function copyAnswer(text:string){try{await navigator.clipboard.writeText(text);notice.value='已复制回答'}catch{error.value='无法访问剪贴板，请手动复制。'}}
 
 
 const emit=defineEmits<{(e:'close'):void,(e:'toggle-full'):void}>()
-const auth=useAuthStore(),rootElement=ref<HTMLElement>(),sidebarOpen=ref(true),dialogMode=ref('gemini'),settingsTab=ref('ai'),profileOpen=ref(false),shortcutsOpen=ref(false),sessionSearch=ref(''),sessionMenu=ref(''),sharedOpen=ref(false),editingId=ref(''),editTitle=ref('')
+const auth=useAuthStore(),rootElement=ref<HTMLElement>(),sidebarOpen=ref(true),dialogMode=computed(()=>aiWorkspace.dialogMode),profileOpen=ref(false),shortcutsOpen=ref(false),sessionSearch=ref(''),sessionMenu=ref(''),sharedOpen=ref(false),editingId=ref(''),editTitle=ref('')
 const uid=(id:string)=>props.surface+'-'+id
 type SavedSession={id:string,title:string,history:any[],conversation:string|null,message:string,result:any,pending:any}
 const sessions=ref<SavedSession[]>([]),activeSession=ref('')
@@ -111,9 +88,18 @@ function clearSessions(){if(busy.value)return;sessions.value=[];activeSession.va
 function importSession(other:SavedSession){if(busy.value)return;newSession();const s=sessions.value[0]!;s.title='导入 · '+other.title;s.history=clone(other.history);history.value=clone(s.history);hydrateFeedback();conversation.value=null;pending=null;saveSession();sharedOpen.value=false;notice.value='已复制记录；后续提问使用独立的新模型上下文，不修改另一窗口。'}
 watch([history,conversation,message,result],saveSession,{deep:true})
 const settingsRoute=useRoute()
-watch(()=>[settingsRoute.path,settingsRoute.query.settings],()=>{if(props.surface==='explore'&&settingsRoute.path==='/ai'&&isAccountSettingsTab(settingsRoute.query.settings))openSettings(settingsRoute.query.settings)},{immediate:true})
-function openRequestedSettings(e:Event){const tab=(e as CustomEvent).detail;if(props.surface==='explore'&&settingsRoute.path==='/ai'&&isAccountSettingsTab(tab))openSettings(tab)}
-function openSettings(tab='ai'){settingsTab.value=tab;settings.value=true;apiKey.value='';profileOpen.value=false}
+async function openSettings(tab='ai'){
+ if(!isAccountSettingsTab(tab))return
+ profileOpen.value=false
+ await router.push(accountSettingsTarget(tab,settingsRoute.fullPath))
+ if(props.surface==='floating')emit('close')
+}
+function clearRequestedDisplay(e:Event){
+ const detail=(e as CustomEvent).detail
+ if(detail?.surface!==props.surface||detail.owner!==aiWorkspace.owner)return
+ if(busy.value){detail.busy=true;return}
+ clearSessions()
+}
 const feedbackBusy=ref<Record<string,boolean>>({})
 function hydrateFeedback(){for(const turn of history.value){const rid=turn.result?.request_id;if(rid)personalRequest('assistant-feedback?request_id='+encodeURIComponent(rid)).then(r=>turn.feedback=r.reaction).catch(()=>{})}}
 async function feedback(turn:any,value:string){const rid=turn.result?.request_id;if(!rid||feedbackBusy.value[rid])return;feedbackBusy.value[rid]=true;try{const r=await personalRequest('assistant-feedback',{request_id:turn.result.request_id,reaction:turn.feedback===value?null:value});turn.feedback=r.reaction;notice.value='反馈已保存到当前账户，不会改动电影评分或清单。'}catch(e){notice.value=(e as Error).message}finally{delete feedbackBusy.value[rid]}}
@@ -121,26 +107,11 @@ function followup(title:string){message.value='我想进一步了解《'+title+'
 async function movieWant(mid:number){if(busy.value)return;try{const r=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('登录已失效');const token=(await r.json()).data.csrf_token;const b=await fetch('/api/catalog/behavior',{credentials:'same-origin'});if(!b.ok)throw new Error('行为状态不可用');const state=(await b.json()).data.state;const undo=!!state[String(mid)]?.want;const saved=await fetch('/api/catalog/behavior',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({event_id:crypto.randomUUID(),movie_id:mid,kind:'want',action:undo?'undo':'set',value:null,time:new Date().toISOString(),source:'USER_ACTION'})});if(!saved.ok)throw new Error(saved.status===409?'与已看或不感兴趣状态冲突，请在详情页调整。':'保存未确认，请到详情页核对；不会自动重试。');notice.value=undo?'已撤销想看':'已保存想看';window.dispatchEvent(new Event('mi2-behavior-changed'))}catch(e){error.value=(e as Error).message}}
 function sourceLabel(r:any){return r?.source==='LLM'?'AI 生成回答':r?.source==='CACHE'?'AI 缓存回答':r?.source==='MOCK'?'模拟测试':'本地检索 / 降级'}
 function modelLink(url:string){return /^https:\/\/www\.themoviedb\.org\/movie\/\d+(?:[/?#-]|$)/.test(url)}
-const cropOpen=ref(false),cropZoom=ref(3),cropPreview=ref('')
-let cropImage:HTMLImageElement|null=null,cropX=0,cropY=0,cropDrag:{x:number,y:number}|null=null
-function sourceNode<T extends HTMLElement>(id:string){return rootElement.value?.querySelector<T>('[data-source-id="'+id+'"]')}
-async function openCrop(){cropOpen.value=true;cropImage=null;cropZoom.value=3;cropX=0;cropY=0;cropPreview.value='';await nextTick();drawCrop()}
-function chooseAvatarFile(){sourceNode<HTMLInputElement>('cropFileInput')?.click()}
-function resetCrop(){cropZoom.value=3;cropX=0;cropY=0;drawCrop()}
-function cropParams(){if(!cropImage)return null;const scale=Math.max(40/cropImage.naturalWidth,40/cropImage.naturalHeight)*cropZoom.value;const w=cropImage.naturalWidth*scale,h=cropImage.naturalHeight*scale;cropX=Math.max(-(w-40)/2,Math.min((w-40)/2,cropX));cropY=Math.max(-(h-40)/2,Math.min((h-40)/2,cropY));return {w,h,x:(240-w)/2+cropX,y:(240-h)/2+cropY}}
-function drawCrop(){const canvas=sourceNode<HTMLCanvasElement>('cropCanvas'),ctx=canvas?.getContext('2d');if(!ctx)return;ctx.clearRect(0,0,480,480);ctx.save();ctx.scale(2,2);ctx.fillStyle='#191923';ctx.fillRect(0,0,240,240);const p=cropParams();if(cropImage&&p)ctx.drawImage(cropImage,p.x,p.y,p.w,p.h);ctx.fillStyle='#05050ac4';ctx.fillRect(0,0,240,100);ctx.fillRect(0,100,100,40);ctx.fillRect(140,100,100,40);ctx.fillRect(0,140,240,100);ctx.strokeStyle='#c5b5e8';ctx.lineWidth=1.4;ctx.strokeRect(100.7,100.7,38.6,38.6);ctx.restore();if(cropImage&&p){const out=document.createElement('canvas');out.width=128;out.height=128;out.getContext('2d')?.drawImage(cropImage,(p.x-100)*3.2,(p.y-100)*3.2,p.w*3.2,p.h*3.2);cropPreview.value=out.toDataURL('image/png')}}
-function loadAvatar(e:Event){const file=(e.target as HTMLInputElement).files?.[0];if(!file)return;if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>8*1024*1024){error.value='请选择 8MB 以内的 PNG、JPEG 或 WebP';return}const url=URL.createObjectURL(file),img=new Image();img.onload=()=>{URL.revokeObjectURL(url);if(img.naturalWidth*img.naturalHeight>40000000){error.value='图片尺寸过大';return}cropImage=img;resetCrop()};img.onerror=()=>{URL.revokeObjectURL(url);error.value='图片无法读取'};img.src=url}
-function startCrop(e:PointerEvent){cropDrag={x:e.clientX,y:e.clientY};(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)}
-function moveCrop(e:PointerEvent){if(!cropDrag)return;cropX+=e.clientX-cropDrag.x;cropY+=e.clientY-cropDrag.y;cropDrag={x:e.clientX,y:e.clientY};drawCrop()}
-function stopCrop(){cropDrag=null}
-const avatarBusy=ref(false)
-async function applyAvatar(){if(!cropPreview.value||avatarBusy.value)return;avatarBusy.value=true;try{await persistAvatar(cropPreview.value);cropOpen.value=false;notice.value='头像已保存，重新登录后仍可恢复。'}catch(e){notice.value=(e as Error).message}finally{avatarBusy.value=false}}
-async function removeAvatar(){if(avatarBusy.value)return;avatarBusy.value=true;try{await persistAvatar(null);notice.value='已移除保存的头像。'}catch(e){notice.value=(e as Error).message}finally{avatarBusy.value=false}}
 onMounted(()=>newSession())
 
 </script>
 <template><div ref="rootElement" class="prototype-ai mi2-docked-ai" :class="['surface-'+surface,{'pref-large-text':aiWorkspace.large,'pref-reduced-motion':aiWorkspace.reduced}]"><svg style="display:none" xmlns="http://www.w3.org/2000/svg"><symbol :id="uid('i-menu')" data-source-id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></symbol><symbol :id="uid('i-plus')" data-source-id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol><symbol :id="uid('i-max')" data-source-id="i-max" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1v4m13-5h4a1 1 0 0 1 1 1v4M3 16v4a1 1 0 0 0 1 1h4m13-5v4a1 1 0 0 1-1 1h-4"></path></symbol><symbol :id="uid('i-chevron-down')" data-source-id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol><symbol :id="uid('i-min')" data-source-id="i-min" viewBox="0 0 24 24"><path d="M4 9h5V4m11 11h-5v5M9 9 4 4m11 11 5 5"></path></symbol><symbol :id="uid('i-close')" data-source-id="i-close" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"></path></symbol><symbol :id="uid('i-send')" data-source-id="i-send" viewBox="0 0 24 24"><path d="m5 12 14-7-5 14-2-7-7 0z"></path></symbol><symbol :id="uid('i-settings')" data-source-id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"></path></symbol><symbol :id="uid('i-copy')" data-source-id="i-copy" viewBox="0 0 24 24"><rect height="12" rx="2" width="12" x="8" y="8"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></symbol><symbol :id="uid('i-refresh')" data-source-id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.9 9a7 7 0 0 1 11.9-2l2.2 2M4 15l2.2 2a7 7 0 0 0 11.9-2"></path></symbol><symbol :id="uid('i-thumb-up')" data-source-id="i-thumb-up" viewBox="0 0 24 24"><path d="M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4.5-8a3 3 0 0 1 3 3v4h5a2.5 2.5 0 0 1 2.4 3.2l-2 7a2.5 2.5 0 0 1-2.4 1.8H7"></path></symbol><symbol :id="uid('i-thumb-down')" data-source-id="i-thumb-down" viewBox="0 0 24 24"><path d="M7 14V3H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3Zm0 0 4.5 8a3 3 0 0 0 3-3v-4h5a2.5 2.5 0 0 0 2.4-3.2l-2-7A2.5 2.5 0 0 0 17.5 3H7"></path></symbol><symbol :id="uid('i-arrow-up')" data-source-id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5"></path><path d="m6 11 6-6 6 6"></path></symbol><symbol :id="uid('i-moon')" data-source-id="i-moon" viewBox="0 0 24 24"><path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10"></path></symbol><symbol :id="uid('i-search')" data-source-id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></symbol><symbol :id="uid('i-side')" data-source-id="i-side" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"></path></symbol><symbol :id="uid('i-import')" data-source-id="i-import" viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4"></path><path d="M5 19h14"></path></symbol></svg>
-<section :data-dialog-mode="dialogMode" aria-label="MovieInsight AI 电影探索" class="window show full" :class="{'sidebar-open':sidebarOpen}" :id="uid('chatWindow')" data-source-id="chatWindow" role="dialog" v-show="!settings">
+<section :data-dialog-mode="dialogMode" aria-label="MovieInsight AI 电影探索" class="window show full" :class="{'sidebar-open':sidebarOpen}" :id="uid('chatWindow')" data-source-id="chatWindow" role="dialog">
 <header class="window-head"><button v-if="surface==='floating'||!sidebarOpen" @click="sidebarOpen=!sidebarOpen" aria-label="切换会话侧栏" class="icon-btn" :id="uid('sidebarToggle')" data-source-id="sidebarToggle" title="展开会话侧栏"><svg class="ico"><use :href="'#'+uid('i-menu')"></use></svg></button><div class="head-id"><span class="orb-skin mini mark" data-orb=""><img alt="" draggable="false" src="/m9/assistant-orb.png"/><i class="eye left"></i><i class="eye right"></i></span><div><div class="head-title">MovieInsight AI</div></div></div><div class="head-fill"></div><button @click="openSettings('ai')" aria-label="查看 BYOK 连接状态" class="head-status" :id="uid('connectionStatus')" data-source-id="connectionStatus" title="个人模型连接状态"><span class="dot"></span>{{status.cloud_available?status.model+" 已连接":"BYOK 未连接 · 本地兜底"}}</button><div class="head-ops"><button v-if="!sidebarOpen" @click="reset" aria-label="新建对话" class="icon-btn" :id="uid('newTop')" data-source-id="newTop" title="新建对话"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg></button><span class="divider-v"></span><button @click="emit('toggle-full')" aria-label="切换全屏" class="icon-btn" :id="uid('fullToggle')" data-source-id="fullToggle" title="切换全屏" v-if="surface==='floating'"><svg class="ico" :id="uid('fullSvg')" data-source-id="fullSvg"><use :href="'#'+uid('i-max')"></use></svg></button><button @click="emit('close')" aria-label="收起窗口" class="icon-btn" :id="uid('closeChat')" data-source-id="closeChat" title="收起窗口" v-if="surface==='floating'"><svg class="ico"><use :href="'#'+uid('i-close')"></use></svg></button></div></header>
 <div class="window-body"><aside :class="{'closed':!sidebarOpen}" aria-label="会话历史" class="sidebar" :id="uid('sidebar')" data-source-id="sidebar"><div class="side-panel"><div class="side-top"><span class="side-label">对话</span><button @click="sidebarOpen=false" aria-label="收起会话侧栏" class="side-collapse" type="button"><svg class="ico"><use :href="'#'+uid('i-side')"></use></svg></button></div><button @click="reset" class="side-action" :id="uid('newSide')" data-source-id="newSide" type="button"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg><span>新对话</span></button><label class="side-search"><svg class="ico"><use :href="'#'+uid('i-search')"></use></svg><input v-model="sessionSearch" aria-label="搜索对话" placeholder="搜索对话" type="search"/></label><div class="side-list" :id="uid('sessionList')" data-source-id="sessionList" @scroll="sessionMenu=''"><div :class="{active:s.id===activeSession}" :key="s.id" class="side-row" v-for="(s,index) in filteredSessions"><input v-if="editingId===s.id" :data-edit="s.id" v-model="editTitle" aria-label="重命名对话" class="side-rename" @blur="commitRename(s)" @keydown.enter.prevent="commitRename(s)" @keydown.esc.prevent="cancelRename"/><button v-else :disabled="busy" :title="s.title" @click="chooseSession(s.id)" class="side-title" type="button">{{s.title}}</button><button :aria-expanded="sessionMenu===s.id" :aria-label="'管理对话：'+s.title" @click="toggleMenu(s.id,$event)" class="side-more" type="button">⋯</button><div class="side-pop" v-if="sessionMenu===s.id" :style="{top:menuPos.top+'px',left:menuPos.left+'px'}"><button @click="startRename(s)" type="button">重命名</button><button class="danger" @click="deleteSession(s.id)" type="button">删除对话</button></div></div><p v-if="!filteredSessions.length" class="side-empty">没有匹配的对话</p></div><div class="side-import" v-if="otherSessions.length"><button @click="sharedOpen=!sharedOpen" class="side-import-btn" type="button"><svg class="ico"><use :href="'#'+uid('i-import')"></use></svg><span>导入另一窗口的对话</span></button><div class="side-import-tray" v-if="sharedOpen"><p class="side-import-hint">导入为独立记录，不改动原窗口</p><button :disabled="busy" :key="s.id" @click="importSession(s)" class="side-import-row" v-for="s in otherSessions" type="button"><strong>{{s.title}}</strong><span>{{s.history.length}} 条回答</span></button></div></div><section :hidden="!profileOpen" aria-label="个人信息预览" class="profile-panel" :id="uid('profilePanel')" data-source-id="profilePanel">
 <div class="profile-top">
@@ -171,78 +142,11 @@ onMounted(()=>newSession())
 
 
 </main></div></section>
-<section aria-label="MovieInsight 全局设置页面" class="global-settings-page" :id="uid('globalSettingsPage')" data-source-id="globalSettingsPage" v-show="settings">
-<header class="gs-top">
-<button @click="settings=false;apiKey=''" class="gs-return" :id="uid('globalSettingsBack')" data-source-id="globalSettingsBack" type="button">← 返回电影探索</button>
-<div class="gs-brand">MovieInsight <small>偏好与账户 · 全局设置</small></div>
-<span class="gs-tag">个人偏好与模型连接</span>
-</header>
-<div class="gs-shell">
-<nav aria-label="设置分类" class="gs-nav">
-<button :class="{active:settingsTab==='account'}" @click="settingsTab='account'" class="gs-tab" data-gs-tab="account">◉　个人资料</button>
-<button :class="{active:settingsTab==='display'}" @click="settingsTab='display'" class="gs-tab" data-gs-tab="display">◈　外观与布局</button>
-<button :class="{active:settingsTab==='ai'}" @click="settingsTab='ai'" class="gs-tab" data-gs-tab="ai">✧　AI 与 BYOK</button>
-<button :class="{active:settingsTab==='tmdb'}" @click="settingsTab='tmdb'" class="gs-tab" data-gs-tab="tmdb"><svg aria-hidden="true" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 4 16 4 16 0V5M4 12c0 4 16 4 16 0"/></svg>　TMDB 数据连接</button>
-<button :class="{active:settingsTab==='privacy'}" @click="settingsTab='privacy'" class="gs-tab" data-gs-tab="privacy">◇　隐私与数据</button>
-<button :class="{active:settingsTab==='about'}" @click="settingsTab='about'" class="gs-tab" data-gs-tab="about">ⓘ　关于 MovieInsight</button>
-</nav>
-<div class="gs-main">
-<div class="gs-intro"><span class="gs-eyebrow">MOVIEINSIGHT</span><h1>全局设置</h1><p>这里集中管理整个 MovieInsight 的个人资料、外观、AI 服务及数据偏好。与聊天窗口设置分开，避免修改入口散落各处。</p></div>
-<section aria-label="个人资料设置" class="gs-panel" :id="uid('gs-account')" data-source-id="gs-account" v-show="settingsTab==='account'">
-<div class="gs-card"><h2>头像与公开资料</h2><p>默认显示通用占位符，不预设头像。可选本地 PNG、WebP 或 JPG；选区限定在 40×40 的头像框，透明背景原样保留。</p>
-<div class="gs-avatar-row"><span :aria-label="aiWorkspace.avatar?'当前账户头像':'未设置头像'" class="gs-avatar-swatch avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" :id="uid('gsAvatarLarge')" data-source-id="gsAvatarLarge" v-if="aiWorkspace.avatar"/></span><div class="gs-avatar-caption"><strong>当前头像</strong><small>头像尺寸：40×40 px · 透明背景可保留</small><button @click="openCrop" class="gs-cta" :id="uid('editAvatarBtn')" data-source-id="editAvatarBtn" type="button">选择与裁剪头像</button><button @click="removeAvatar" class="gs-cta gs-cta-muted" :id="uid('resetAvatarBtn')" data-source-id="resetAvatarBtn" type="button">恢复占位符</button></div></div>
-<div class="gs-formline"><label :for="uid('gsDisplayName')">显示名称</label><input :value="auth.user?.username" autocomplete="off" class="gs-input" :disabled="true" :id="uid('gsDisplayName')" data-source-id="gsDisplayName" maxlength="24" /></div>
-<div class="gs-actions"><button class="gs-cta" :disabled="true" :id="uid('saveDisplayName')" data-source-id="saveDisplayName" type="button">账户名称由身份系统管理</button></div><div aria-live="polite" class="gs-save-status" :id="uid('accountStatus')" data-source-id="accountStatus">裁剪后保存到当前账户，退出或服务重启后保留；登录名称保持不变。</div>
-</div>
-<div class="gs-card"><h2>个人资料入口</h2><p>当前账户来自服务端登录身份；本页不修改认证机制。</p></div>
-</section>
-<section aria-label="全站外观与布局" class="gs-panel" :id="uid('gs-display')" data-source-id="gs-display" v-show="settingsTab==='display'">
-<div class="gs-card"><h2>外观与布局</h2><p>沿用已确认的深色紫黑视觉，阅读与动效偏好同步到两个 AI 窗口。</p>
-<div class="gs-setting-row"><div><h3>站点色彩</h3><p>V12-A / V13 深色紫黑品牌基线。</p></div><span class="gs-pill">保持原配色</span></div>
-<div class="gs-setting-row"><div><h3>阅读字体</h3><p>影响 AI 消息文字与用户消息的阅读大小。</p></div><select :value="aiWorkspace.large?'large':'normal'" @change="aiWorkspace.large=($event.target as HTMLSelectElement).value==='large'" class="gs-select" :id="uid('gsTextSize')" data-source-id="gsTextSize"><option value="normal">标准</option><option value="large">较大</option></select></div>
-<div class="gs-setting-row"><div><h3>动效偏好</h3><p>降低动画时精灵球与窗口过渡会减少动态效果。</p></div><select :value="aiWorkspace.reduced?'reduce':'normal'" @change="aiWorkspace.reduced=($event.target as HTMLSelectElement).value==='reduce'" class="gs-select" :id="uid('gsMotion')" data-source-id="gsMotion"><option value="normal">标准动画</option><option value="reduce">减少动态效果</option></select></div>
-<div class="gs-setting-row"><div><h3>AI 默认打开方式</h3><p>默认悬浮大窗口；可在设置中改为全屏起始。</p></div><select :value="aiWorkspace.startFull?'fullscreen':'floating'" @change="aiWorkspace.startFull=($event.target as HTMLSelectElement).value==='fullscreen'" class="gs-select" :id="uid('gsStartMode')" data-source-id="gsStartMode"><option value="floating">悬浮窗口（当前默认）</option><option value="fullscreen">全屏工作区</option></select></div>
-<div class="gs-setting-row"><div><h3>电影推荐卡片</h3><p>采用你已选定的 A 横向紧凑卡。</p></div><span class="gs-pill">A · 横向紧凑</span></div><div class="gs-setting-row"><div><h3>对话版式</h3><p>Gemini 阅读式偏长文阅读，MovieInsight 对话式偏即时问答。</p></div><select :value="dialogMode" @change="dialogMode=($event.target as HTMLSelectElement).value" class="gs-select" :id="uid('gsDialogMode')" data-source-id="gsDialogMode"><option value="gemini">Gemini 阅读式</option><option value="native">MovieInsight 对话式</option></select></div>
-</div>
-</section>
-<section aria-label="全站 AI 与 BYOK 设置" class="gs-panel" :id="uid('gs-ai')" data-source-id="gs-ai" v-show="settingsTab==='ai'"><div class="gs-card"><h2>AI 服务与 BYOK</h2><p>密钥默认按账户加密保存到数据库，退出登录和服务重启后保留，注销账户时删除。模型配置共享，对话和草稿互相独立。</p><p v-if="!status.persistent" role="status">当前环境尚未启用数据库凭据服务，暂不能保存新密钥。</p><div class="settings-api"><form @submit.prevent="saveConfig" autocomplete="off">
-<label :for="props.surface+'-model'">DeepSeek 模型</label><select :id="props.surface+'-model'" v-model="model" :disabled="configBusy||busy"><option value="deepseek-flash">DeepSeek Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro（通常费用更高）</option></select>
-<label :for="props.surface+'-key'">API Key（不会回显或保存到浏览器）</label><input :id="props.surface+'-key'" v-model="apiKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="512" required :disabled="configBusy||busy"/>
-<div class="settings-grid"><p class="assistant-note">每日及每轮模型调用次数：不限（按你的设置）</p><label>每次最大输出 Token<input v-model.number="output" type="number" min="256" max="8192" required/></label></div>
-<label class="check"><input v-model="consent" type="checkbox" required/>我同意向所选服务商发送对话和必要的电影/偏好信息；启用后提交智能请求可能产生费用。</label>
-<label class="check"><input v-model="cacheEnabled" type="checkbox"/>允许5分钟内复用相同用户、上下文和电影/偏好版本的回答（默认关闭）</label><button type="submit" :disabled="configBusy||busy||!consent||!apiKey||!status.persistent">保存并启用个人模型</button>
-</form>
-<div class="assistant-controls"><button type="button" :disabled="configBusy||busy||!status.configured" @click="verifyKey">检查 Key 与模型列表</button><button v-if="status.configured&&!status.enabled&&status.persistent" type="button" :disabled="configBusy||busy" @click="enableSaved">启用已保存的密钥</button><button type="button" :disabled="configBusy||!status.enabled" @click="disconnect">停用连接（保留密钥）</button></div>
-<p class="assistant-note">状态：{{status.verification||'DISCONNECTED'}}；今日已派发 {{status.daily_calls_used??0}} / {{status.daily_calls??'不限'}} 次（UTC日）。列表检查不发送生成请求。不设每日或每轮调用次数上限；仍受90秒超时、并发和上下文长度保护。金额未取得可靠账单时显示未知。</p>
-<label class="check"><input v-model="paidConsent" type="checkbox"/>我明确同意发送一次可能计费的模型连接测试。</label><button type="button" :disabled="busy||configBusy||!paidConsent||!status.enabled" @click="testConnection">发送模型测试（可能计费）</button>
-</div></div></section>
-<section aria-label="TMDB 数据连接设置" class="gs-panel" v-if="settings&&settingsTab==='tmdb'"><div class="gs-card"><TMDBSettings :id-prefix="props.surface"/></div></section>
-<section aria-label="隐私与数据设置" class="gs-panel" :id="uid('gs-privacy')" data-source-id="gs-privacy" v-show="settingsTab==='privacy'">
-<div class="gs-card"><h2>隐私与数据</h2><p>可查看当前页面的数据范围与控制方式。</p>
-<div class="gs-setting-row"><div><h3>聊天记录</h3><p>当前登录页面内保留；刷新后不自动恢复记录。</p></div><span class="gs-pill">本地临时</span></div>
-<div class="gs-setting-row"><div><h3>头像图片</h3><p>仅上传裁剪后的头像，按账户保存，可随时移除。</p></div><span class="gs-pill">账户保存</span></div>
-<div class="gs-setting-row"><div><h3>清空此窗口记录</h3><p>只移除此窗口内的显示记录，不删除服务端数据。</p></div><button @click="clearSessions" class="gs-cta gs-cta-muted" :id="uid('clearDemoSessions')" data-source-id="clearDemoSessions" type="button">清空此窗口显示记录</button></div>
-<div aria-live="polite" class="gs-save-status" :id="uid('privacyStatus')" data-source-id="privacyStatus"></div>
-</div>
-</section>
-<AccountClosure v-if="settings&&settingsTab==='privacy'" :id-prefix="props.surface"/>
-<section aria-label="关于 MovieInsight" class="gs-panel" :id="uid('gs-about')" data-source-id="gs-about" v-show="settingsTab==='about'">
-<div class="gs-card"><h2>关于 MovieInsight</h2><p>AI 驱动的电影发现工具。目录、个人行为与助手请求都由服务端校验。</p><div class="gs-divider"></div><p>用户自带模型 Key；电影资料与个人行为由服务端验证。</p><p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p><p><a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer">电影数据来源：The Movie Database（TMDB）</a></p><div class="gs-notice" style="margin-top:16px">当前版本：M9 · 界面已接入真实目录与个人行为数据。</div></div>
-</section>
-</div>
-</div>
-</section>
-<div aria-label="选择头像显示范围" aria-modal="true" class="crop-overlay" :id="uid('avatarCropOverlay')" data-source-id="avatarCropOverlay" role="dialog" v-if="cropOpen">
-<div class="crop-dialog"><div class="crop-head"><div><h2>调整头像显示范围</h2><p>只有中心 40×40 像素的方框是头像选区。可拖动图片调整构图、缩放图片，框外部分不会被选中；PNG、WebP 透明区域不会填底。</p></div><button @click="cropOpen=false" aria-label="取消裁剪" class="crop-close" :id="uid('cropClose')" data-source-id="cropClose" type="button">×</button></div>
-<div class="crop-content"><div class="crop-work"><div @pointercancel="stopCrop" @pointerdown="startCrop" @pointermove="moveCrop" @pointerup="stopCrop" class="crop-viewport" :id="uid('cropViewport')" data-source-id="cropViewport" style="touch-action:none"><canvas height="480" :id="uid('cropCanvas')" data-source-id="cropCanvas" width="480"></canvas></div><span style="font-size:11px;color:#a29aac">中央 40×40 取景框 · 可拖动底图</span></div><div class="crop-preview-block"><span>实际头像尺寸预览</span><span aria-label="头像预览" class="crop-preview avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="cropPreview" alt="" class="user-avatar-img" :id="uid('cropPreview')" data-source-id="cropPreview" v-if="cropPreview"/></span><strong style="font-size:12px;color:#e3dcf3">40 × 40 px · 与侧栏相同</strong><button @click="resetCrop" class="gs-cta gs-cta-muted" :id="uid('cropReset')" data-source-id="cropReset" type="button">恢复居中</button></div></div>
-<div class="crop-controls"><label :for="uid('cropZoom')">缩放图片</label><input @input="drawCrop" :id="uid('cropZoom')" data-source-id="cropZoom" max="8" min="1" step="0.05" type="range" v-model.number="cropZoom" value="3"/></div>
-<div class="crop-actions"><button @click="chooseAvatarFile" class="gs-cta gs-cta-muted" :id="uid('cropChooseFile')" data-source-id="cropChooseFile" type="button">选择本地图片</button><button @click="cropOpen=false" class="gs-cta gs-cta-muted" :id="uid('cropCancel')" data-source-id="cropCancel" type="button">取消</button><button @click="applyAvatar" :disabled="!cropPreview||avatarBusy" class="gs-cta" :id="uid('cropApply')" data-source-id="cropApply" type="button">保存头像</button></div>
-<input @change="loadAvatar" accept="image/png,image/jpeg,image/webp" hidden="" :id="uid('cropFileInput')" data-source-id="cropFileInput" type="file"/>
-</div>
-</div></div></template>
+</div></template>
+<style scoped src="../styles/assistant-surface.css"></style>
 <style scoped>
 
-.prototype-ai{--paper:#0a0b10;--surface:#14141d;--surface-hi:#1c1b28;--line:rgba(211,198,255,.115);--soft:#a6a2b7;--text:#f3f1f9;--purple:#9b7bf2;--glow:#a270ff;--muted:#727084;--button:#6654ca;--focus:#bbaaff;--amber:#e5ad75}*{box-sizing:border-box}.prototype-ai,.prototype-ai{height:100%;margin:0}.prototype-ai{background:var(--paper);color:var(--text);font-family:Inter,'Microsoft Yahei','PingFang SC',system-ui,sans-serif;overflow-x:hidden;font-size:14px}button,textarea,input{font:inherit}button{cursor:pointer}button:focus-visible,textarea:focus-visible{outline:2px solid #bbaaff;outline-offset:2px}button:disabled{opacity:.45;cursor:default}button svg{pointer-events:none}svg.ico{width:19px;height:19px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round;flex:none} .sr-only{position:absolute;width:1px;height:1px;clip:rect(0 0 0 0);overflow:hidden;white-space:nowrap}
+
 .site{min-height:100vh;position:relative;overflow:hidden}.site:before{content:'';position:absolute;inset:-20% -20% 0;z-index:-2;background:radial-gradient(ellipse at 76% 23%,#4e3d63 0%,#29253a 24%,transparent 46%),radial-gradient(ellipse at 54% 60%,#372e4b 0%,transparent 42%),radial-gradient(ellipse at 90% 82%,#473040 0%,transparent 45%),linear-gradient(130deg,#090a10 10%,#191823 65%,#1b1823)}.site:after{content:'';z-index:-1;position:absolute;inset:170px -10% 8%;background:linear-gradient(0deg,#08080d 0%,#0a0b12aa 24%,transparent 73%),radial-gradient(ellipse at 75% 70%,transparent 5%,#090a12bd 78%);pointer-events:none}.site-nav{height:75px;display:flex;align-items:center;gap:30px;padding:0 clamp(22px,5vw,90px);border-bottom:1px solid #ffffff11;position:relative;z-index:1;background:#08091066;backdrop-filter:blur(16px)}.logo{font-family:Georgia,'Noto Serif SC',serif;font-size:23px;font-weight:bold;white-space:nowrap;letter-spacing:-.6px}.logo small{font-size:11px;letter-spacing:3px;display:block;font-family:system-ui;margin-top:3px;color:#b5adcd;font-weight:400}.site-links{display:flex;gap:29px;margin-left:auto}.site-links button{border:0;background:none;color:#b5afbf;padding:8px 0}.site-links button:hover,.site-links button.active{color:white}.site-actions{margin-left:7px;display:flex;gap:10px}.nav-pill{background:#ffffff10;border:1px solid #ffffff20;color:#d5cbe9;padding:9px 13px;border-radius:99px}.nav-pill:hover{background:#ffffff19}.hero{min-height:calc(100vh - 75px);display:flex;align-items:center;padding:74px clamp(25px,8.1vw,145px) 144px;position:relative}.hero-copy{max-width:690px;position:relative;z-index:1}.eyebrow{font-size:11px;letter-spacing:3px;text-transform:uppercase;color:#ceaeef;display:flex;align-items:center;gap:10px}.eyebrow:before{content:'';width:30px;height:1px;background:#e0b4ff}.hero h1{font-weight:500;font-family:Georgia,'Noto Serif SC',serif;font-size:clamp(45px,5.7vw,86px);line-height:1.09;letter-spacing:-3px;margin:24px 0}.hero h1 em{font-style:normal;color:#c9b4ed}.hero p{color:#c5bdcb;max-width:490px;line-height:1.95;font-size:15px}.hero-btns{display:flex;gap:14px;margin-top:32px;flex-wrap:wrap}.primary,.secondary{display:inline-flex;align-items:center;gap:9px;justify-content:center;border-radius:14px;padding:15px 21px;font-weight:600;border:1px solid}.primary{background:linear-gradient(135deg,#7659d9,#5541af);color:#fff;border-color:#a495ee6b;box-shadow:0 10px 30px #261a5180}.primary:hover{background:linear-gradient(135deg,#8770e8,#6250c7)}.secondary{background:#ffffff10;color:#ece5fa;border-color:#ffffff20}.secondary:hover{background:#ffffff1a}.hero-index{position:absolute;bottom:36px;left:clamp(25px,8vw,145px);font-size:11px;letter-spacing:1px;color:#9e92a3}.film-graphic{position:absolute;right:4%;top:15%;width:min(50vw,620px);height:70%;opacity:.63;pointer-events:none;filter:drop-shadow(0 25px 44px #0008)}.film-graphic .arch{position:absolute;inset:8% 12%;border:45px solid #c9a5ca10;border-radius:48% 48% 4% 4%;transform:rotate(12deg)}.film-graphic .disc{position:absolute;top:15%;left:20%;width:60%;aspect-ratio:1;border-radius:50%;border:1px solid #c7aad63b;box-shadow:0 0 0 16px #a99bd112,0 0 0 48px #9f87bd09,0 0 120px #bd7de344;background:radial-gradient(circle at 40% 45%,#beabf055,#66569e11 31%,#10111d 68%)}.film-graphic .disc:after{content:'';position:absolute;inset:26%;border:1px solid #d4c1f047;border-radius:50%;box-shadow:0 0 0 26px #a48be010}.film-graphic .bars{position:absolute;width:72%;height:5px;bottom:14%;left:14%;background:linear-gradient(90deg,transparent,#a796d450,transparent);transform:rotate(-16deg);box-shadow:0 18px 0 #b38bd716,0 -18px 0 #b38bd71c}
 .orb-launcher{position:fixed;right:27px;bottom:26px;width:64px;height:64px;z-index:25;background:none;border:0;border-radius:50%;padding:0;display:grid;place-items:center;transition:transform .21s cubic-bezier(.2,.75,.2,1);outline-offset:6px}.orb-launcher:hover{transform:scale(1.055)}.orb-launcher[hidden]{display:none}.orb-skin{display:block;position:relative;isolation:isolate;width:100%;height:100%;aspect-ratio:1;pointer-events:none;--ex:0px;--ey:0px}.orb-skin img{display:block;width:100%;height:100%;object-fit:contain;position:relative;z-index:2;user-select:none}.orb-skin:before{content:'';position:absolute;z-index:0;inset:-24%;border-radius:50%;background:radial-gradient(circle,rgba(160,103,255,.96) 0%,rgba(145,84,255,.80) 18%,rgba(126,66,248,.52) 34%,rgba(106,48,230,.20) 49%,rgba(88,36,201,.04) 60%,transparent 68%);filter:blur(7px);animation:orbHalo 5.3s ease-in-out infinite;opacity:.86}.orb-skin.mini:before{display:none!important}.orb-skin .eye{position:absolute;z-index:3;top:43.2%;width:7.6%;height:22%;background:#fff;border-radius:9px;box-shadow:0 0 8px #fff8,0 0 14px #b8aaff7d;transform:translate(var(--ex),var(--ey)) scaleY(var(--blink,1));transform-origin:center;transition:transform .15s ease-out}.orb-skin .eye.left{left:32.2%}.orb-skin .eye.right{left:60.8%}.orb-launcher.focusing .orb-skin{animation:focusPulse .38s ease forwards}@keyframes orbHalo{0%,100%{opacity:.53;transform:scale(.97)}50%{opacity:1;transform:scale(1.05)}}@keyframes focusPulse{0%{transform:scale(1)}45%{transform:scale(.91);filter:brightness(1.55)}100%{transform:scale(.88);opacity:.1}}
 .backdrop{position:fixed;inset:0;z-index:29;background:#04050aca;backdrop-filter:blur(8px) saturate(.8);opacity:0;visibility:hidden;transition:opacity .32s ease,visibility .32s}.backdrop.show{opacity:1;visibility:visible}.window{position:fixed;z-index:30;left:50%;top:50%;width:min(1280px,calc(100vw - 60px));height:min(812px,calc(100dvh - 56px));transform:translate(-50%,-48%) scale(.97);opacity:0;visibility:hidden;display:flex;flex-direction:column;border:1px solid #c8b0ee3b;border-radius:25px;overflow:hidden;box-shadow:0 30px 90px #000b,0 0 0 1px #ffffff08;background:linear-gradient(145deg,#13111c 0%,#0b0b11 45%,#090a0e 100%);transition:opacity .27s ease,transform .32s ease,visibility .32s,border-radius .3s,width .3s,height .3s}.window.show{visibility:visible;opacity:1;transform:translate(-50%,-50%) scale(1)}.window.full{width:100vw;height:100dvh;border-radius:0;left:0;top:0;transform:translateY(0) scale(1);border:0}.window-head{flex:none;min-height:74px;display:flex;align-items:center;gap:13px;padding:13px 23px;background:linear-gradient(100deg,#221c37dc,#181426db 46%,#12101bde);border-bottom:1px solid #d4c4fb1c}.icon-btn{display:grid;place-items:center;width:38px;height:38px;border-radius:11px;background:transparent;border:1px solid transparent;color:#bdb7ce}.icon-btn:hover{background:#ffffff12;border-color:#ffffff13;color:#fff}.head-id{display:flex;align-items:center;gap:11px;min-width:0}.mark{height:35px;width:35px;flex:none}.head-title{font-size:14px;line-height:1.2;font-weight:650;letter-spacing:.08px}.head-sub{font-size:11px;color:#a59eb9;margin-top:5px}.head-fill{flex:1}.head-status{display:flex;align-items:center;gap:7px;background:#ffffff09;border:1px solid #ffffff16;color:#b9b2c9;font-size:11px;padding:8px 10px;border-radius:10px;white-space:nowrap}.head-status .dot{width:6px;height:6px;border-radius:50%;background:#deb477;box-shadow:0 0 0 3px #dbb66b18}.head-ops{display:flex;gap:4px}.divider-v{height:24px;width:1px;background:#ffffff20;margin:0 3px}.window-body{flex:1;min-height:0;display:flex;position:relative}.sidebar{width:0;flex:none;overflow:hidden;border-right:0 solid var(--line);background:#111019;transition:width .28s ease;z-index:4}.window.sidebar-open .sidebar{width:246px;border-right-width:1px}.sidebar-inner{width:245px;height:100%;padding:19px 14px;display:flex;flex-direction:column;gap:13px}.side-head{display:flex;align-items:center;justify-content:space-between;margin:0 6px 3px;color:#a8a1b7;font-size:11px;letter-spacing:1px}.side-new{border:1px dashed #8576ba69;border-radius:12px;background:#8b76bf12;color:#d8c9fb;padding:11px 12px;text-align:left;display:flex;align-items:center;gap:9px}.side-new:hover{background:#8b76bf24}.session-list{display:flex;flex-direction:column;gap:5px;overflow:auto}.session{border:1px solid transparent;border-radius:10px;background:none;text-align:left;color:#b7b0c5;padding:10px 11px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}.session:hover{background:#ffffff09}.session.active{background:#6b559329;color:#eee6ff;border-color:#a58bd02f}.side-footer{margin-top:auto;color:#80798b;font-size:11px;line-height:1.6;padding:12px 6px;border-top:1px solid #ffffff14}.side-footer b{color:#c3b9d6;font-weight:500}
@@ -442,102 +346,17 @@ onMounted(()=>newSession())
 }
 .account-avatar{width:38px!important;height:38px!important}
 .profile-avatar-lg{width:52px!important;height:52px!important;border-radius:14px!important}
-.user-avatar-img{display:block;width:100%;height:100%;object-fit:cover}
 .account-identity{gap:10px;padding:5px 7px;border-radius:12px}
 .account-identity:hover{background:#ffffff08}
 .account-settings{color:#cec1e7}
 .profile-edit-link{display:block;width:100%;margin-top:12px;border:1px solid #ffffff24;background:#ffffff0b;color:#e3dafa;border-radius:9px;padding:10px}
 /* Full-page route; settings is a dedicated screen, not a drawer, not a chat modal. */
-.global-settings-page[hidden],.crop-overlay[hidden]{display:none!important}
-.global-settings-page{
- position:fixed;inset:0;z-index:80;overflow:auto;overscroll-behavior:contain;
- background:radial-gradient(ellipse at 80% 5%,#2b203f37,transparent 45%),#090a0f;
- color:#f0edf6;font-family:inherit;
-}
-.gs-top{
- position:sticky;top:0;z-index:4;min-height:70px;display:flex;align-items:center;justify-content:space-between;
- gap:14px;padding:14px clamp(18px,4vw,55px);background:#0b0c12ee;backdrop-filter:blur(15px);
- border-bottom:1px solid #ffffff13;
-}
-.gs-return{display:flex;align-items:center;gap:10px;background:transparent;border:1px solid #ffffff22;border-radius:12px;color:#eee7fa;padding:9px 13px}
-.gs-return:hover{background:#ffffff12}
-.gs-brand{font-size:15px;font-weight:650;letter-spacing:.2px}.gs-brand small{display:block;font-size:11px;color:#938ca5;font-weight:400;margin-top:4px}
-.gs-tag{font-size:11px;color:#a59ab8;background:#ffffff0a;border:1px solid #ffffff14;border-radius:999px;padding:8px 10px}
-.gs-shell{width:min(1140px,100%);display:grid;grid-template-columns:225px minmax(0,1fr);gap:28px;margin:0 auto;padding:38px 24px 84px;align-items:start}
-.gs-nav{position:sticky;top:99px;display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid #ffffff0c;border-radius:17px;background:#12121b88}
-.gs-tab{display:flex;align-items:center;gap:11px;border:1px solid transparent;border-radius:11px;background:transparent;color:#a9a3b6;padding:13px;text-align:left;font-size:13px}
-.gs-tab:hover{background:#ffffff0b;color:#fff}.gs-tab.active{color:#f7f2ff;background:#6655a62b;border-color:#a894d126}
-.gs-main{min-width:0;display:flex;flex-direction:column;gap:18px}
-.gs-intro{padding:7px 0 12px}.gs-eyebrow{font-size:11px;color:#b9a4e6;letter-spacing:2px}
-.gs-intro h1{font-size:32px;font-weight:600;letter-spacing:-.6px;margin:12px 0 8px}.gs-intro p{line-height:1.8;font-size:13px;color:#a5a0b3;max-width:670px}
-.gs-panel[hidden]{display:none!important}.gs-panel{display:flex;flex-direction:column;gap:17px}
-.gs-card{background:#14141d;border:1px solid #ffffff12;border-radius:18px;padding:23px 24px;box-shadow:0 10px 27px #00000016}
-.gs-card h2{font-size:16px;font-weight:620;margin:0 0 7px}.gs-card p{font-size:12px;color:#a9a3b7;line-height:1.8;margin:0}
-.gs-divider{height:1px;background:#ffffff12;margin:20px 0}
-.gs-avatar-row{display:flex;align-items:center;gap:18px;margin-top:18px}
-.gs-avatar-swatch{display:block;width:64px;height:64px;object-fit:cover;border-radius:15px;background:#303036}
-.gs-avatar-caption{display:flex;flex-direction:column;gap:9px;min-width:0}
-.gs-avatar-caption strong{font-size:13px}.gs-avatar-caption small{color:#a09bad;font-size:11px}
-.gs-cta{display:inline-flex;align-items:center;justify-content:center;border:1px solid #9d88d04f;background:#8d6bc42c;border-radius:10px;padding:10px 14px;color:#efe8fc;font-size:12px;cursor:pointer}
-.gs-cta:hover{background:#8d6bc446}.gs-cta-muted{background:#ffffff09;border-color:#ffffff23;color:#cfc8dd}.gs-actions{display:flex;gap:9px;flex-wrap:wrap;margin-top:17px}
-.gs-formline{display:flex;flex-direction:column;gap:8px;margin-top:18px}.gs-formline label{font-size:12px;color:#bfb9cc}
-.gs-input,.gs-select{width:100%;background:#0e0e15;color:#f4efff;border:1px solid #ffffff25;border-radius:11px;padding:12px 13px;max-width:450px;outline-offset:3px}
-.gs-setting-row{display:flex;align-items:center;justify-content:space-between;gap:22px;padding:16px 0;border-bottom:1px solid #ffffff10}
-.gs-setting-row:last-child{border:0;padding-bottom:0}.gs-setting-row h3{font-size:13px;font-weight:550;margin:0 0 5px}.gs-setting-row p{font-size:11px;color:#9790a6;margin:0;max-width:470px}
-.gs-setting-row select{flex:none;max-width:190px;min-width:140px}
-.gs-pill{color:#c9b6ef;background:#6d4f9830;border:1px solid #967bc24a;border-radius:999px;font-size:11px;padding:7px 11px;white-space:nowrap}
-.gs-notice{background:#231d2d;border:1px solid #8365a03e;border-radius:13px;padding:13px 15px;font-size:12px;line-height:1.8;color:#bbb0d3}
-.gs-inline-link{color:#cab7f7;text-decoration:underline;background:none;border:0;cursor:pointer}
-.gs-save-status{min-height:20px;margin-top:9px;color:#bbd9c9;font-size:12px}
 /* avatar crop: fixed-square field of view, square output, move/zoom the image */
-.crop-overlay{position:fixed;inset:0;z-index:90;background:#000b;display:grid;place-items:center;padding:14px;overflow:auto}
-.crop-dialog{width:min(620px,100%);background:#14131d;border:1px solid #9d83d54d;border-radius:22px;box-shadow:0 28px 85px #000b;padding:24px}
-.crop-head{display:flex;align-items:start;justify-content:space-between;gap:20px;margin-bottom:16px}
-.crop-head h2{font-size:18px;margin:0 0 7px}.crop-head p{font-size:12px;color:#a8a0b6;line-height:1.7;margin:0}
-.crop-close{border:0;background:#ffffff10;color:#eee;flex:none;border-radius:9px;width:34px;height:34px;font-size:20px}
-.crop-content{display:flex;gap:28px;align-items:center;justify-content:center;flex-wrap:wrap}
-.crop-work{display:flex;flex-direction:column;align-items:center;gap:11px}
-.crop-viewport{width:240px;height:240px;border-radius:20px;overflow:hidden;background:#272730;cursor:grab;touch-action:none;border:1px solid #ffffff38;box-shadow:0 0 0 5px #6d52b91a;position:relative}
-.crop-viewport.dragging{cursor:grabbing}
-.crop-viewport canvas{width:100%;height:100%;display:block;pointer-events:none}
-.crop-viewport:after{content:'';position:absolute;inset:0;border:2px solid #b6a4e6a6;border-radius:19px;pointer-events:none}
-.crop-preview-block{min-width:150px;display:flex;flex-direction:column;align-items:center;gap:10px;color:#c6bed1;font-size:12px}
-.crop-preview{width:44px;height:44px;object-fit:cover;background:#272730;border-radius:11px}
-.crop-controls{display:flex;flex-direction:column;gap:11px;margin-top:18px}.crop-controls label{font-size:12px;color:#c5bbd2}.crop-controls input[type=range]{width:100%;accent-color:#ac8de7}
-.crop-actions{display:flex;gap:10px;justify-content:flex-end;margin-top:24px;flex-wrap:wrap}
 .prototype-ai.pref-large-text .reply{font-size:17px}.prototype-ai.pref-large-text .bubble{font-size:15px}
 .prototype-ai.pref-reduced-motion .orb-skin:before,.prototype-ai.pref-reduced-motion .orb-launcher.focusing .orb-skin{animation:none!important}
 .prototype-ai.pref-reduced-motion .window,.prototype-ai.pref-reduced-motion .sidebar{transition:none!important}
-@media(max-width:720px){
- .gs-shell{grid-template-columns:1fr;gap:16px;padding:20px 14px 60px}
- .gs-nav{position:static;display:flex;flex-direction:row;overflow-x:auto;border-radius:13px;gap:5px;white-space:nowrap}
- .gs-tab{padding:10px 12px;flex:none}
- .gs-main{gap:12px}.gs-card{padding:19px 17px}.gs-intro h1{font-size:26px}
- .gs-setting-row{align-items:flex-start;flex-direction:column;gap:10px}
- .gs-setting-row select{width:100%;max-width:100%}
- .gs-top{padding:12px 14px}.gs-tag{display:none}
- .crop-dialog{padding:16px}.crop-content{gap:18px}
-}
 
 /* V13.10 R4 · empty avatar placeholder / exactly 40 px slot / preserve transparency */
-.account-avatar.avatar-slot,.profile-avatar-lg.avatar-slot,.gs-avatar-swatch.avatar-slot,.crop-preview.avatar-slot{
-  width:40px!important;height:40px!important;border-radius:11px!important;flex:none!important;
-  position:relative!important;display:grid!important;place-items:center!important;
-  overflow:hidden!important;border:0!important;box-shadow:none!important;
-  background:transparent!important;
-}
-.avatar-slot.is-empty{background:#28272d!important;color:#9c96ae}
-.avatar-slot .avatar-placeholder{width:23px;height:23px;position:relative;z-index:0;display:none}
-.avatar-slot.is-empty .avatar-placeholder{display:block}
-.avatar-slot .user-avatar-img{width:100%!important;height:100%!important;position:absolute;inset:0;display:block;object-fit:contain!important;background:transparent!important;border-radius:inherit!important}
-.avatar-slot img[hidden]{display:none!important}
-.gs-avatar-row{align-items:center}
-.gs-avatar-caption{gap:7px}
-.gs-avatar-caption .gs-cta{align-self:flex-start}
-.crop-preview.avatar-slot{margin:auto}
-.crop-viewport{border-radius:15px;background:#191923;box-shadow:none}
-.crop-viewport:after{display:none}
-.crop-actions button:disabled{opacity:.4;cursor:not-allowed}
 
 /* V13.10 R5 · remove subtitle and update composer controls */
 .head-id > div{display:flex;align-items:center;min-width:0}
@@ -629,17 +448,14 @@ onMounted(()=>newSession())
   transform-origin:center center;
   transition:opacity .27s ease, transform .32s ease, visibility .32s, box-shadow .3s ease;
 }
-.window.show,
-.window.full,
-.window.full.show{
+.window.show,.window.full,.window.full.show{
   left:50%;top:50%;
   transform:translate(-50%,-50%) scale(1);
   transform-origin:center center;
 }
 .window:not(.show){transform:translate(-50%,-48%) scale(.97)}
 /* Remove old width/height tween: the entire panel is transformed from its center by WAAPI. */
-.window.full-motion,
-.window.full-motion.show{
+.window.full-motion,.window.full-motion.show{
   transition:opacity .27s ease, visibility .32s, box-shadow .3s ease;
 }
 @media (max-width:820px){
@@ -893,8 +709,7 @@ form[data-source-id="composerForm"].mi14-compose .mi14-controls button[data-sour
 .cards-head{margin-top:24px}
 .cards-rail{margin-top:5px}
 /* Default: Gemini-like clean plain-text turn with no repeated assistant logo/name. */
-.window[data-dialog-mode="gemini"] .msg.assistant>.avatar,
-.window[data-dialog-mode="gemini"] .msg.assistant .assistant-name{display:none!important}
+.window[data-dialog-mode="gemini"] .msg.assistant>.avatar,.window[data-dialog-mode="gemini"] .msg.assistant .assistant-name{display:none!important}
 .window[data-dialog-mode="gemini"] .msg.assistant .reply-lead{font-weight:450}
 .window[data-dialog-mode="gemini"] .msg.assistant .reply{line-height:1.95}
 .window[data-dialog-mode="gemini"] .msg.assistant .response-actions{margin-left:-4px}
@@ -925,8 +740,7 @@ form[data-source-id="composerForm"].mi14-compose .mi14-controls button[data-sour
 .site-nav{display:none!important}.scope-tag{display:none!important}.prototype-ai{overflow-x:hidden!important}
 
 /* The iframe is cropped to the card itself, so it cannot paint over the old page. */
-.prototype-ai:not(.mi2-docked-ai) .window,.prototype-ai:not(.mi2-docked-ai) .window.show,
-.prototype-ai:not(.mi2-docked-ai) .window.full{
+.prototype-ai:not(.mi2-docked-ai) .window,.prototype-ai:not(.mi2-docked-ai) .window.show,.prototype-ai:not(.mi2-docked-ai) .window.full{
  position:fixed!important;inset:0!important;left:0!important;top:0!important;
  width:100vw!important;height:100dvh!important;max-width:none!important;max-height:none!important;
  transform:none!important;opacity:1!important;visibility:visible!important;
@@ -1024,18 +838,14 @@ form[data-source-id="composerForm"].mi14-compose .mi14-controls button[data-sour
 
 /* Floating-card mode: the host page must remain visible behind the V13 chat card. */
 .prototype-ai:not(.mi2-docked-ai),.prototype-ai{background:transparent!important}
-.prototype-ai:not(.mi2-docked-ai) .backdrop,
-.prototype-ai:not(.mi2-docked-ai) #backdrop{display:none!important;background:transparent!important;backdrop-filter:none!important;opacity:0!important}
+.prototype-ai:not(.mi2-docked-ai) .backdrop,.prototype-ai:not(.mi2-docked-ai) #backdrop{display:none!important;background:transparent!important;backdrop-filter:none!important;opacity:0!important}
 .prototype-ai:not(.mi2-docked-ai) .scope-tag{display:none!important}
 
 .prototype-ai{position:relative;width:100%;height:100%;overflow:hidden;isolation:isolate}
 .prototype-ai .window,.prototype-ai .window.show,.prototype-ai .window.full{position:absolute!important;inset:0!important;left:0!important;top:0!important;width:100%!important;height:100%!important;max-width:none!important;max-height:none!important;min-width:0!important;min-height:0!important;transform:none!important;opacity:1!important;visibility:visible!important;border-radius:0!important;box-shadow:none!important;transition:none!important}
 .prototype-ai.surface-floating .window{background:transparent!important;border:0!important}
-.prototype-ai .global-settings-page{position:absolute!important;inset:0!important;width:100%!important;height:100%!important;min-height:0!important;overflow:auto!important;z-index:40}
-.prototype-ai .crop-overlay{position:absolute!important;inset:0!important}
 .prototype-ai .mi15-stylebar{flex:none}.prototype-ai .mi17-history-search{width:calc(100% - 20px);margin:4px 10px 12px;background:#171420;color:#eee5fa;border:1px solid #ffffff20;border-radius:9px;padding:10px;font:inherit;font-size:12px}
 .prototype-ai .reply-body{white-space:pre-wrap;overflow-wrap:anywhere}.prototype-ai .poster{cursor:pointer}.prototype-ai .poster-uploaded{opacity:1!important;position:absolute;inset:0;width:100%;height:100%;object-fit:cover}.prototype-ai .reply-status{color:#c9b5dd;font-size:11px;line-height:1.8}
-.prototype-ai .settings-api label{display:block;margin:16px 0 8px;font-size:12px;color:#c9bfd5}.prototype-ai .settings-api :is(input:not([type=checkbox]),select){width:100%;max-width:450px;min-width:0;background:#0e0e15;border:1px solid #ffffff25;border-radius:11px;padding:12px;color:#f4efff;font:inherit}.prototype-ai .settings-api .check{display:flex;gap:10px;align-items:start;line-height:1.8}.prototype-ai .settings-api button{border:1px solid #9d88d04f;background:#8d6bc42c;border-radius:10px;padding:10px 14px;color:#efe8fc;font-size:12px}.prototype-ai .settings-api .assistant-controls{display:flex;gap:10px;flex-wrap:wrap;margin:15px 0}.prototype-ai .settings-api .assistant-note{font-size:11px;color:#b0a5c0;line-height:1.9}
 .prototype-ai [hidden]{display:none!important}.prototype-ai button:disabled{opacity:.45;cursor:default}
 
 
@@ -1153,8 +963,6 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
 .compose-footer .key{font-size:12px!important;color:#b8aec9!important}
 .composer-shortcuts button{font-size:13px!important;min-height:36px!important;padding:8px 12px!important}
 .mi17-session-pop,.mi17-history-search{font-size:13px!important}
-.gs-setting-row h3{font-size:14px!important}
-.gs-setting-row p{font-size:12.5px!important}
 @media (max-width:820px){
   .window.sidebar-open .sidebar{width:min(300px,86vw)!important}
   .thread{padding:20px 18px 16px!important}
@@ -1165,5 +973,5 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
 /* mode chip: optical alignment of the chevron with the label */
 .mi14-controls .mode-chip{gap:7px!important}
 .mi14-controls .mode-chip .mode-name{line-height:1!important;display:inline-flex;align-items:center;letter-spacing:.1px}
-.mi14-controls .mode-chip .ico.tiny{width:15px!important;height:15px!important;position:relative;top:-1.5px;opacity:.88!important;stroke-width:1.9!important}
-</style>
+.mi14-controls .mode-chip .ico.tiny{width:15px!important;height:15px!important;position:relative;top:-1.5px;opacity:.88!important;stroke-width:1.9!important}</style>
+<style scoped src="../styles/assistant-avatar.css"></style>

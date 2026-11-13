@@ -2,6 +2,7 @@
 import {ref,shallowRef,computed,onMounted,onBeforeUnmount,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import M9Sidebar from '../components/M9Sidebar.vue'
+import {accountSettingsTarget} from '../services/accountSettings'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
@@ -43,7 +44,7 @@ onBeforeUnmount(()=>{feedback.value?.dispose();controller?.abort();window.remove
  <main class="recommend-main"><header><div><h1>发现下一部好电影</h1><p>从热门话题到个人片单，找到此刻想看的故事。</p></div><router-link to="/home">返回影院首页</router-link></header>
  <nav class="channel-nav" aria-label="推荐频道"><button v-for="c in channels" :key="c.id" :aria-pressed="channel===c.id" :class="{active:channel===c.id}" @click="change(c.id)">{{c.title}}</button></nav>
  <section class="board-heading"><h2>{{selected?.title||'推荐频道'}}</h2><p>{{selected?.description}}</p></section>
- <div class="tmdb-toolbar"><span>{{data?.tmdb_connection?.last_error?'TMDB 在线读取未成功 · 使用缓存':data?.tmdb_connection?.configured&&!data?.tmdb_connection?.enabled?'TMDB 连接已停用 · 使用缓存':data?.tmdb_connection?.enabled?'TMDB 在线连接已启用 · 按需获取':'TMDB 未连接 · 使用现有缓存'}}</span><router-link to="/ai?settings=tmdb">TMDB 数据连接设置</router-link><button v-if="data?.tmdb_connection?.enabled" :disabled="tmdbBusy||loading" @click="updateTMDB">{{tmdbBusy?'正在更新…':selected?.public?'立即更新此热榜':'更新前 '+(data?.tmdb_connection?.max_detail_refresh||6)+' 部影片资料'}}</button></div><p v-if="tmdbNotice" role="status" class="notice">{{tmdbNotice}}</p>
+ <div class="tmdb-toolbar"><span>{{data?.tmdb_connection?.last_error?'TMDB 在线读取未成功 · 使用缓存':data?.tmdb_connection?.configured&&!data?.tmdb_connection?.enabled?'TMDB 连接已停用 · 使用缓存':data?.tmdb_connection?.enabled?'TMDB 在线连接已启用 · 按需获取':'TMDB 未连接 · 使用现有缓存'}}</span><router-link :to="accountSettingsTarget('tmdb',route.fullPath)">TMDB 数据连接设置</router-link><button v-if="data?.tmdb_connection?.enabled" :disabled="tmdbBusy||loading" @click="updateTMDB">{{tmdbBusy?'正在更新…':selected?.public?'立即更新此热榜':'更新前 '+(data?.tmdb_connection?.max_detail_refresh||6)+' 部影片资料'}}</button></div><p v-if="tmdbNotice" role="status" class="notice">{{tmdbNotice}}</p>
  <form class="filters" @submit.prevent="filter">
   <label>电影名称<input v-model="keyword" maxlength="100" placeholder="搜索当前频道"/></label>
   <label>类型<select v-model="genre"><option value="">全部类型</option><option v-for="g in genres" :key="g.genre_id" :value="g.name_zh">{{g.name_zh}}</option></select></label>

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import {ref,onMounted,onBeforeUnmount} from 'vue'
+import {useRoute} from 'vue-router'
+import {accountSettingsTarget} from '../services/accountSettings'
+const route=useRoute()
 const ids=ref(''),jobs=ref<any[]>([]),preview=ref<any>(),confirmed=ref(false),busy=ref(false),error=ref(''),maxMovies=ref(0)
 const abort=new AbortController();let timer:ReturnType<typeof setTimeout>|undefined
 const messages:Record<string,string>={FORBIDDEN:'需要管理员权限。',AUTHENTICATION_REQUIRED:'登录已失效，请重新登录。',REQUEST_VERIFICATION_FAILED:'请求验证已更新，请重新提交。',IDENTITY_CONFLICT:'外部身份与现有电影冲突，已停止。',YEAR_REQUIRES_REVIEW:'年份与现有电影不一致，需要人工核对。',PREVIEW_TARGET_CHANGED:'预检查后数据发生变化，请重新检查。',PREVIEW_EXPIRED:'预检查已过期，请重新检查。',TMDB_NOT_CONNECTED:'请先在全局设置中启用个人 TMDB 连接。',TMDB_DISABLED:'个人 TMDB 连接已停用，请先启用。',CREDIT_REQUIRES_REVIEW:'既有演职员记录与来源不一致，需要人工核对。'}
@@ -25,7 +28,7 @@ onMounted(poll);onBeforeUnmount(()=>{abort.abort();if(timer)clearTimeout(timer)}
 </script>
 <template><section class="import-panel" aria-label="统一数据导入">
  <h2>统一数据导入</h2><p>使用当前管理员已启用的 TMDB 连接。补充电影资料、评分、海报、演员、导演及人物照片，保留旧来源与既有身份。</p>
- <form @submit.prevent="check"><label for="import-ids">TMDB 电影 ID（每批最多 {{maxMovies||'…'}} 部）</label><input id="import-ids" v-model="ids" maxlength="120" placeholder="例如：81, 550" :disabled="busy"/><button type="submit" :disabled="busy||!maxMovies">{{busy?'正在处理…':'预检查'}}</button><router-link to="/ai?settings=tmdb">TMDB 连接设置</router-link></form>
+ <form @submit.prevent="check"><label for="import-ids">TMDB 电影 ID（每批最多 {{maxMovies||'…'}} 部）</label><input id="import-ids" v-model="ids" maxlength="120" placeholder="例如：81, 550" :disabled="busy"/><button type="submit" :disabled="busy||!maxMovies">{{busy?'正在处理…':'预检查'}}</button><router-link :to="accountSettingsTarget('tmdb',route.fullPath)">TMDB 连接设置</router-link></form>
  <p v-if="error" role="alert" class="error">{{error}}</p>
  <div v-if="preview" class="preview"><h3>本次预检查</h3><ul><li v-for="p in preview.plans" :key="p.tmdb_id">{{p.title}}（{{p.year||'年份未知'}}） · TMDB {{p.tmdb_id}} · {{p.action==='append'?'新增电影':'补充已有电影 #'+p.movie_id}} · 演员 {{p.cast}} · 照片 {{p.photos}}</li></ul>
  <template v-if="preview.status==='PREVIEW'"><label class="confirmation"><input v-model="confirmed" type="checkbox"/>确认将以上具体电影导入指定 Ubuntu 隔离电影库；冲突停止，执行前保存受影响数据的备份记录。</label><button :disabled="busy||!confirmed" @click="submit">确认并提交后台导入</button></template><p v-else>任务状态：{{labels[preview.status]||preview.status}}</p></div>

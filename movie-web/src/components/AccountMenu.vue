@@ -7,7 +7,7 @@ import {VMenu} from 'vuetify/components/VMenu'
 import {VList,VListItem} from 'vuetify/components/VList'
 import {useAuthStore} from '../stores/auth'
 import {aiWorkspace} from '../services/aiWorkspace'
-import {accountSettingsTarget,OPEN_ACCOUNT_SETTINGS,type AccountSettingsTab} from '../services/accountSettings'
+import {accountSettingsTarget,type AccountSettingsTab} from '../services/accountSettings'
 
 const props=defineProps<{collapsed:boolean}>()
 const auth=useAuthStore(),route=useRoute(),router=useRouter()
@@ -26,9 +26,7 @@ const items:{tab:AccountSettingsTab,label:string,icon:string}[]=[
 async function go(tab:AccountSettingsTab){
  if(signingOut.value)return
  open.value=false;error.value=''
- await router.push(accountSettingsTarget(tab))
- // Also open on repeated selection of the same URL or a kept-alive AI page.
- window.dispatchEvent(new CustomEvent(OPEN_ACCOUNT_SETTINGS,{detail:tab}))
+ await router.push(accountSettingsTarget(tab,route.fullPath))
 }
 async function logout(){
  if(signingOut.value)return
