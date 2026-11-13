@@ -12,6 +12,9 @@ from .models import CatalogBase
 _cache=WeakKeyDictionary()
 _lock=Lock()
 
+def invalidate(engine):
+    with _lock:_cache.pop(engine,None)
+
 def load_candidates(engine):
     from .tmdb_connection import enrich
     with _lock:
