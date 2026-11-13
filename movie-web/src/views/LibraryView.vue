@@ -15,9 +15,9 @@ const count=computed(()=>[genre.value,yearFrom.value,yearTo.value,state.value].f
 let controller:AbortController|undefined,serial=0
 async function api(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件无效，请检查年份。':'电影库暂时不可用，请重试。');return (await r.json()).data}
 async function load(){controller?.abort();controller=new AbortController();const signal=controller.signal,id=++serial;busy.value=true;error.value='';try{
- const p=new URLSearchParams({limit:String(pageSize),offset:String(offset.value),sort:sort.value});for(const [k,v] of Object.entries({keyword:keyword.value.trim(),genre_id:genre.value,year_from:yearFrom.value,year_to:yearTo.value}))if(v)p.set(k,v)
+ const p=new URLSearchParams({limit:String(pageSize),offset:String(offset.value),sort:sort.value});for(const [k,v] of Object.entries({keyword:keyword.value.trim(),genre_id:genre.value,year_from:yearFrom.value,year_to:yearTo.value,state:state.value}))if(v)p.set(k,v)
  const [data,g,b]=await Promise.all([api('movies?'+p,signal),api('genres',signal),api('behavior',signal)])
- const rows=await Promise.all(data.items.map(async(m:any)=>({...m,...await api('movies/'+m.movie_id,signal)})))
+ const rows=data.items
  if(id===serial){items.value=rows;genres.value=g.items;behavior.value=b.state;hasMore.value=data.items.length===pageSize}
  }catch(e){if(!signal.aborted&&id===serial){error.value=(e as Error).message;items.value=[]}}finally{if(id===serial)busy.value=false}}
 function sync(){const q=route.query;keyword.value=String(q.q||'');genre.value=String(q.genre||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');sort.value=['updated','release','id'].includes(String(q.sort))?String(q.sort):'updated';mode.value=q.view==='list'?'list':'grid';state.value=['favorite','want','watched'].includes(String(q.state))?String(q.state):'';offset.value=Math.max(0,Number(q.offset)||0);if(!route.hash.startsWith('#movie/')&&route.hash!=='#behavior')load()}
@@ -34,7 +34,9 @@ function posterError(e:Event,m:any){const img=e.target as HTMLImageElement;if(m.
 function detail(id:number){sessionStorage.setItem('mi2_library_scroll',String(scrollY));router.push({path:'/movies',query:{...route.query,from:'library'},hash:'#movie/'+id})}
 async function act(id:number,kind:string){if(pending.value[id])return;pending.value[id]=true;notice.value='';try{const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});if(!c.ok)throw new Error('登录已失效，请重新登录。');const token=(await c.json()).data.csrf_token;const undo=!!behavior.value[id]?.[kind];const r=await fetch('/api/catalog/behavior',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({event_id:crypto.randomUUID(),movie_id:id,kind,action:undo?'undo':'set',value:null,time:new Date().toISOString(),source:'USER_ACTION'})});if(!r.ok)throw new Error(r.status===409?'行为状态冲突，请到详情页调整。':'保存未确认，请刷新状态后重试。');behavior.value=(await api('behavior')).state;notice.value='已保存';window.dispatchEvent(new Event('mi2-behavior-changed'))}catch(e){notice.value=(e as Error).message}finally{pending.value[id]=false}}
 watch(busy,async value=>{if(!value&&!route.hash){await nextTick();const saved=sessionStorage.getItem('mi2_library_scroll');if(saved){window.scrollTo(0,Number(saved));sessionStorage.removeItem('mi2_library_scroll')}}})
-onBeforeUnmount(()=>controller?.abort())
+const onBehavior=()=>{if(state.value&&!route.hash)load();else api('behavior').then(b=>behavior.value=b.state).catch(()=>{notice.value='个人状态刷新失败，请重试。'})}
+window.addEventListener('mi2-behavior-changed',onBehavior)
+onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior)})
 </script>
 <template>
 <MovieDetailView v-if="route.hash.startsWith('#movie/')"/><MyMoviesView v-else-if="route.hash==='#behavior'"/><div v-else class="library-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="expanded=$event"/><main class="page">

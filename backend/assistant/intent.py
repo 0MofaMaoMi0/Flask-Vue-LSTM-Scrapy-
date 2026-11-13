@@ -146,7 +146,10 @@ def parse(message,previous=None,*,max_length=500):
     intent='search'
     if '推荐' not in text and ('清单' in text or '打过分' in text or ('我的' in text and any(k in text for k in ('评分','收藏','想看','已看','不感兴趣')))):
         intent='behavior';f['behavior']='rating' if '打过分' in text or '评分' in text else 'not_interested' if '不感兴趣' in text else 'favorite' if '收藏' in text else 'watched' if '已看' in text else 'want'
-    elif '推荐' in text:intent='recommend';f.pop('behavior',None)
+    elif '推荐' in text:
+        intent='recommend';f.pop('behavior',None)
+        # Explicit offline source scope only; model intent remains authoritative in BYOK.
+        if re.search(r'(?:从|在)(?:我的)?想看清单(?:中|里)?',text) and not re.search(r'(?:不要|别|排除|不从).*想看清单',text):f['behavior']='want'
     if '换一批' in text:f['rotate']=True
     last_year=max((m.start() for m in re.finditer(Y,text)),default=-1)
     for pattern,keys in [(r'不限年份|年份不限|取消年份(?:限制|条件)?',('year_from','year_to','years_any','year_ranges_any','excluded_year_ranges')),(r'(?:取消|撤销|去掉)(?:年份)?上限',('year_to',)),(r'(?:取消|撤销|去掉)(?:年份)?下限',('year_from',))]:

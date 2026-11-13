@@ -60,7 +60,11 @@ def install_m6_business(app):
     from .api_read import create_read_blueprint
     def executor(statement):
         with engine.connect() as connection:return list(connection.execute(statement).mappings())
-    app.register_blueprint(create_read_blueprint(executor))
+    def personal_ids(kind):
+        user=identity()
+        if user is None:raise PermissionError('Authentication required')
+        return [int(mid) for mid,state in repository.snapshot(user).items() if state.get(kind)]
+    app.register_blueprint(create_read_blueprint(executor,personal_ids))
     repository=MySQLBehaviorRepository(engine,app.config)
     app.extensions['m6_behavior']=repository
     bp=Blueprint('m6_business',__name__)

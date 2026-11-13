@@ -25,7 +25,7 @@ def value(v):
 
 def dto(row,fields):return {k:value(row[k]) for k in fields if k in row}
 
-def create_read_blueprint(executor=None):
+def create_read_blueprint(executor=None,personal_ids=None):
     bp=Blueprint('catalog_read',__name__)
     def reply(data=None,status=200,code='OK'):
         return jsonify({'code':code,'data':data}),status
@@ -47,6 +47,7 @@ def create_read_blueprint(executor=None):
     def guarded(fn):
         def call(*a,**kw):
             try:return fn(*a,**kw)
+            except PermissionError:return reply(status=401,code='AUTHENTICATION_REQUIRED')
             except InputError:return reply(status=400,code='INVALID_INPUT')
             except LookupError:return reply(status=503,code='UNAVAILABLE')
             except Exception:return reply(status=500,code='INTERNAL_ERROR')
@@ -54,9 +55,13 @@ def create_read_blueprint(executor=None):
     @bp.get('/api/catalog/movies')
     @guarded
     def movies():
-        a=arguments(('keyword','year_from','year_to','genre_id','sort','limit','offset'))
+        a=arguments(('keyword','year_from','year_to','genre_id','sort','limit','offset','state'))
         limit=integer(a,'limit',20);offset=integer(a,'offset',0)
-        stmt=build(queries.movie_list,keyword=a.get('keyword'),year_from=integer(a,'year_from'),year_to=integer(a,'year_to'),genre_id=integer(a,'genre_id'),sort=a.get('sort','updated'),limit=limit,offset=offset)
+        scope=None
+        if 'state' in a:
+            if a['state'] not in ('favorite','want','watched') or not callable(personal_ids):raise InputError('Personal filter')
+            scope=personal_ids(a['state'])
+        stmt=build(queries.movie_list,movie_ids=scope,keyword=a.get('keyword'),year_from=integer(a,'year_from'),year_to=integer(a,'year_to'),genre_id=integer(a,'genre_id'),sort=a.get('sort','updated'),limit=limit,offset=offset)
         rows=execute(stmt,limit)
         items=[dto(x,MOVIE_FIELDS) for x in rows if x.get('catalog_status')=='active']
         ids=[i['movie_id'] for i in items]
@@ -70,6 +75,12 @@ def create_read_blueprint(executor=None):
             for item in items:
                 item['poster']=posters.get(item['movie_id']) or fallbacks.get(item['movie_id'])
                 item['poster_fallback']=fallbacks.get(item['movie_id']) if posters.get(item['movie_id']) else None
+        genre_map={};rating_map={}
+        if ids:
+            for row in execute(queries.movie_list_genres(ids),len(ids)*RELATION_LIMIT):genre_map.setdefault(row['movie_id'],[]).append(dto(row,RELATED['genres'][1]))
+            for row in execute(queries.movie_list_ratings(ids),len(ids)*RELATION_LIMIT):rating_map.setdefault(row['movie_id'],[]).append(dto(row,RELATED['ratings'][1]))
+        for item in items:
+            item['genres']=genre_map.get(item['movie_id'],[]);item['ratings']=rating_map.get(item['movie_id'],[])
         return reply({'items':items,'limit':limit,'offset':offset})
     @bp.get('/api/catalog/movies/<int:movie_id>')
     @guarded

@@ -81,7 +81,7 @@ def verify_final(content,observed,reader,user,filters=None,behavior_query=False)
         for mid in ids:
             state={} if behavior_query else behavior.get(str(mid),{})
             if not matches(visible[mid],filters,state):raise ValueError('Final movie violates server-enforced conditions')
-    items=[dict(facts(visible[mid]),in_catalog=True,verification='LOCAL_DATABASE',reasons=['详见AI生成解释']) for mid in ids]
+    items=[dict(facts(visible[mid]),poster=visible[mid].get('poster'),in_catalog=True,verification='LOCAL_DATABASE',reasons=['详见AI生成解释']) for mid in ids]
     if type(external) is not list or len(external)>5:raise ValueError('Discovery limit')
     discoveries=[]
     for item in external:

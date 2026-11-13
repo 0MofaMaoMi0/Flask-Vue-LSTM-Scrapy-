@@ -127,10 +127,11 @@ async function saveEdit(){
 function open(m:any){router.push({path:'/movies',query:{from:'behavior',view:tab.value},hash:'#movie/'+m.movie_id})}
 async function api(path:string){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:controller.signal});if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':'个人片库暂时不可用，请重试。');return (await r.json()).data}
 async function load(){busy.value=true;error.value='';try{
-  const [listRes,state]=await Promise.all([api('movies?limit=100&sort=id'),api('behavior')])
-  movies.value=listRes.items||[]
+  const all:any[]=[];let offset=0
+  while(true){const page=await api('movies?limit=100&sort=id&offset='+offset);all.push(...page.items);if(page.items.length<page.limit)break;offset+=page.limit}
+  const state=await api('behavior')
+  movies.value=all
   behavior.value=state.state||{}
-  fillGenres()
   try{
     const cc=await api('production-countries')
     const next:Record<string,string[]>={}
@@ -141,15 +142,11 @@ async function load(){busy.value=true;error.value='';try{
     if(Object.keys(next).length)countryMap.value=next
   }catch{}
 }catch(e){if(!controller.signal.aborted)error.value=(e as Error).message}finally{busy.value=false}}
-async function fillGenres(){
-  const queue=movies.value.map(m=>m.movie_id)
-  const worker=async()=>{while(queue.length){const id=queue.shift();if(id===undefined)return;try{const d=await api('movies/'+id);const i=movies.value.findIndex(x=>x.movie_id===id);if(i>=0&&d?.genres)movies.value[i]={...movies.value[i],genres:d.genres}}catch{}}}
-  await Promise.all(Array.from({length:6},worker))
-}
 function closeFiltersOnOutside(e:PointerEvent){if(filterOpen.value&&!(e.target as HTMLElement)?.closest?.('.g-rank'))filterOpen.value=false}
 function closeFiltersOnEscape(e:KeyboardEvent){if(e.key!=='Escape')return;filterOpen.value=false;if(editOpen.value)closeEdit()}
-onMounted(()=>{load();document.addEventListener('pointerdown',closeFiltersOnOutside);document.addEventListener('keydown',closeFiltersOnEscape)})
-onBeforeUnmount(()=>{controller.abort();document.removeEventListener('pointerdown',closeFiltersOnOutside);document.removeEventListener('keydown',closeFiltersOnEscape)})
+const refreshBehavior=()=>api('behavior').then(b=>behavior.value=b.state||{}).catch(()=>{error.value='个人状态刷新失败，请重试。'})
+onMounted(()=>{load();window.addEventListener('mi2-behavior-changed',refreshBehavior);document.addEventListener('pointerdown',closeFiltersOnOutside);document.addEventListener('keydown',closeFiltersOnEscape)})
+onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior-changed',refreshBehavior);document.removeEventListener('pointerdown',closeFiltersOnOutside);document.removeEventListener('keydown',closeFiltersOnEscape)})
 </script>
 <template>
 <div class="my-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}">

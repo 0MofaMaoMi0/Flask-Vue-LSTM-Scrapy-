@@ -68,7 +68,7 @@ class AgentService:
         if filters.get('_needs_clarification') or filters.get('_local_uncertain') or filters.get('_uncertain_genre'):
             result.update(answer='当前条件存在歧义或矛盾，请先确认年份或类型范围。',items=[])
         return result,filters,rows
-    def _facts(self,m):return {k:m.get(k) for k in ('movie_id','title','release_year','genres','runtime_minutes','original_language')}
+    def _facts(self,m):return {k:m.get(k) for k in ('movie_id','title','release_year','genres','runtime_minutes','original_language','poster')}
     def launch(self,key,user,binding,message,cid,kind='query',movie_id=None):
         if not self.slots.acquire(False):
             self.ledger.finish(key,{'error_code':'RATE_LIMITED'},'REJECTED');return

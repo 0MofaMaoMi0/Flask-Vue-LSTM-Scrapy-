@@ -13,6 +13,8 @@ class CatalogReader:
         movies,state,truncated=self.snapshot(user)
         allowed=[m for m in movies if matches(m,filters,{} if intent=='behavior' else state.get(str(m['movie_id']),{})) and m['movie_id'] not in exclude and (not keyword or keyword.casefold() in (m.get('title','')+' '+(m.get('original_title') or '')).casefold())]
         if intent=='behavior':allowed=[m for m in allowed if state.get(str(m['movie_id']),{}).get(filters.get('behavior','want'))]
+        if intent=='recommend' and filters.get('behavior')=='want':
+            allowed=[m for m in allowed if state.get(str(m['movie_id']),{}).get('want')]
         if intent=='recommend':
             ranking=recommend(allowed,state,profile_movies=movies,limit=10,baseline_field='catalog_popularity',mode='M7_LOCAL',cold_start_reason='目录冷启动推荐')
             byid={m['movie_id']:m for m in allowed};allowed=[dict(byid[r['movie_id']],local_reasons=r['reasons']) for r in ranking['items'] if r['movie_id'] in byid]
@@ -34,7 +36,12 @@ class CatalogReader:
             grouped={}
             if rows:
                 for row in c.execute(select(links.c.movie_id,g.c.name_zh).join(g,g.c.genre_id==links.c.genre_id).where(links.c.movie_id.in_(ids))):grouped.setdefault(row.movie_id,[]).append(row.name_zh)
-            for row in rows:row['genres']=grouped.get(row['movie_id'],[])
+            from catalog.media_urls import asset_url
+            a=md.tables['movie_assets'];posters={}
+            for asset in c.execute(select(a).where(a.c.movie_id.in_(ids),a.c.asset_type=='poster').order_by(a.c.is_primary.desc(),a.c.asset_id)).mappings():
+                url=asset_url(asset)
+                if url:posters.setdefault(asset['movie_id'],url)
+            for row in rows:row.update(genres=grouped.get(row['movie_id'],[]),poster=posters.get(row['movie_id']))
             return rows
     def live_movie(self,user,movie_id):
         from catalog.tmdb_connection import current,TMDBError

@@ -22,7 +22,7 @@ def active_movie(movie_id):
     m=T['movies']
     return (m.c.movie_id==positive(movie_id,'movie id')) & (m.c.catalog_status=='active')
 
-def movie_list(*, keyword=None, year_from=None, year_to=None, genre_id=None, sort='updated', limit=20, offset=0):
+def movie_list(*, keyword=None, year_from=None, year_to=None, genre_id=None, sort='updated', limit=20, offset=0, movie_ids=None):
     if type(limit) is not int or not 1<=limit<=MAX_LIMIT or type(offset) is not int or not 0<=offset<=MAX_OFFSET:
         raise ValueError('Pagination bounds exceeded')
     if sort not in SORTS:raise ValueError('Invalid sort')
@@ -38,6 +38,9 @@ def movie_list(*, keyword=None, year_from=None, year_to=None, genre_id=None, sor
     if year_to is not None:q=q.where(m.c.release_year<=year_to)
     if genre_id is not None:
         g=T['movie_genres'];q=q.where(exists(select(1).select_from(g).where(g.c.movie_id==m.c.movie_id,g.c.genre_id==positive(genre_id,'genre id'))))
+    if movie_ids is not None:
+        if type(movie_ids) is not list or any(type(i) is not int or i<1 for i in movie_ids):raise ValueError('Movie scope')
+        q=q.where(m.c.movie_id.in_(movie_ids))
     order={'updated':(m.c.updated_at.desc(),m.c.movie_id.desc()),'release':(m.c.release_date.desc(),m.c.movie_id.desc()),'id':(m.c.movie_id.asc(),)}
     return q.order_by(*order[sort]).limit(limit).offset(offset)
 
@@ -80,3 +83,12 @@ def movie_credits(movie_id):
             .select_from(cr.join(p,p.c.person_id==cr.c.person_id).outerjoin(pa,(pa.c.person_id==p.c.person_id)&(pa.c.is_primary==True)))
             .where(cr.c.movie_id==movie_id)
             .order_by(cr.c.role_type.desc(),cr.c.sort_order,cr.c.credit_id))
+
+
+def movie_list_genres(ids):
+    g=T['genres'];links=T['movie_genres']
+    return select(links.c.movie_id,g.c.genre_id,g.c.name_zh,g.c.name_en).join(g,g.c.genre_id==links.c.genre_id).where(links.c.movie_id.in_(ids)).order_by(links.c.movie_id,g.c.genre_id)
+
+def movie_list_ratings(ids):
+    r=T['movie_ratings_summary']
+    return select(r).where(r.c.movie_id.in_(ids)).order_by(r.c.movie_id,r.c.source)
