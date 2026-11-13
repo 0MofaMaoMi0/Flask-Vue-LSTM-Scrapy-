@@ -5,27 +5,31 @@ import M9Sidebar from '../components/M9Sidebar.vue'
 import AdminDashboard from '../components/dashboard/AdminDashboard.vue'
 import AdminImports from '../components/AdminImports.vue'
 import AdminQuality from '../components/AdminQuality.vue'
+import AdminAIAnalysis from '../components/AdminAIAnalysis.vue'
+import AdminImportAudit from '../components/AdminImportAudit.vue'
 const router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 type Tab='overview'|'catalog'|'users'|'recommend'|'ai'|'health'|'audit'|'settings'
 const tabs:{id:Tab,label:string}[]=[{id:'overview',label:'数据驾驶舱'},{id:'catalog',label:'电影库治理'},{id:'users',label:'用户与行为'},{id:'recommend',label:'推荐效果'},{id:'ai',label:'AI 服务分析'},{id:'health',label:'系统运行'},{id:'audit',label:'操作审计'},{id:'settings',label:'全局设置'}]
 const tab=ref<Tab>('overview'),busy=ref(true),error=ref(''),dashboard=ref<InstanceType<typeof AdminDashboard>>()
-const overview=ref<any>(null),catalog=ref<any[]>([]),users=ref<any[]>([]),events=ref<any[]>([]),health=ref<any>(null),feedback=ref<any>(null)
+const aiReport=ref<InstanceType<typeof AdminAIAnalysis>>(),importAudit=ref<InstanceType<typeof AdminImportAudit>>()
+const catalog=ref<any[]>([]),users=ref<any[]>([]),events=ref<any[]>([]),health=ref<any>(null),feedback=ref<any>(null)
+const eventsError=ref('')
+async function loadEvents(){eventsError.value='';try{events.value=(await api('events')).items||[]}catch(e){eventsError.value=(e as Error).message}}
 async function api(path:string){const r=await fetch('/api/admin/'+path,{credentials:'same-origin'});if(r.status===403){router.replace('/home');throw new Error('需要管理员权限。')}if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':'管理数据暂时不可用。');return (await r.json()).data}
-async function loadOverview(){if(overview.value)return;overview.value=await api('overview')}
 async function load(){
   busy.value=true;error.value=''
   try{
     if(tab.value==='overview')return
     else if(tab.value==='catalog')catalog.value=(await api('catalog')).items||[]
     else if(tab.value==='users')users.value=(await api('users')).items||[]
-    else if(tab.value==='audit')events.value=(await api('events')).items||[]
+    else if(tab.value==='audit')await loadEvents()
     else if(tab.value==='health')health.value=await api('health')
     else if(tab.value==='recommend')feedback.value=await api('recommendation-feedback?days=30&k=10')
-    else if(tab.value==='ai')await loadOverview()
+    else if(tab.value==='ai')return
   }catch(e){error.value=(e as Error).message}finally{busy.value=false}
 }
 onMounted(load);watch(tab,load)
-function refresh(){if(tab.value==='overview'){dashboard.value?.refresh();return}overview.value=null;load()}
+function refresh(){if(tab.value==='overview'){dashboard.value?.refresh();return}if(tab.value==='ai'){aiReport.value?.refresh();return}if(tab.value==='audit'){importAudit.value?.refresh();loadEvents();return}load()}
 function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);return isNaN(d.getTime())?'—':d.toLocaleString('zh-CN',{hour12:false})}
 </script>
 <template>
@@ -51,8 +55,9 @@ function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);re
         </tbody></table></div>
       </section>
       <section v-else-if="tab==='audit'" class="panel">
-        <h2>操作审计 <small>最近 {{events.length}} 条行为事件</small></h2>
-        <div class="tablewrap"><table><thead><tr><th>时间</th><th>账号</th><th>影片</th><th>行为</th><th>动作</th></tr></thead><tbody>
+        <AdminImportAudit ref="importAudit"/><h2>用户行为审计 <small>最近 {{events.length}} 条行为事件</small></h2>
+        <p v-if="eventsError" class="admin-state error" role="alert">{{eventsError}}</p>
+        <div v-else class="tablewrap"><table><thead><tr><th>时间</th><th>账号</th><th>影片</th><th>行为</th><th>动作</th></tr></thead><tbody>
           <tr v-for="(e,i) in events" :key="i"><td>{{when(e.at)}}</td><td>{{e.user}}</td><td>{{e.title}}</td><td>{{e.kind||'—'}}</td><td>{{e.action||'—'}}</td></tr>
         </tbody></table></div>
         <p class="note">只展示事件类型与对象，不返回事件载荷、评分明细或任何私人内容。</p>
@@ -62,9 +67,7 @@ function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);re
         <div class="rows"><div><span>数据库时间</span><b>{{when(health.db_time)}}</b></div><div><span>影片总数</span><b>{{health.movies}}</b></div><div><span>M7 助手库</span><b>{{health.m7_configured?'已配置':'未配置'}}</b></div><div><span>当前管理员</span><b>{{health.admin}}</b></div><div><span>目录 schema</span><b>{{health.config?.schema||'—'}}</b></div><div><span>行为 schema</span><b>{{health.config?.activity_schema||'—'}}</b></div></div>
       </section>
       <section v-else-if="tab==='ai'" class="panel">
-        <h2>AI 服务分析</h2>
-        <div class="kpis"><article><small>近 30 天调用</small><strong>{{overview?.ai?.available?overview.ai.calls_30d:'—'}}</strong></article><article><small>服务状态</small><strong>{{overview?.ai?.available?'已接入 M7':'未配置'}}</strong></article></div>
-        <p class="note">只统计已派发的模型调用次数；不读取提示词、响应正文或任何密钥。Token 与费用口径尚未接入，故不展示金额。</p>
+        <AdminAIAnalysis ref="aiReport"/>
       </section>
       <section v-else-if="tab==='recommend'" class="panel">
         <h2>推荐效果 <small>过去 30 天 · 曝光与点击真实计数</small></h2>

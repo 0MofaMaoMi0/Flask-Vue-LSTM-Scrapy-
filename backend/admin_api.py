@@ -81,6 +81,27 @@ def install(app):
             'as_of': datetime.utcnow().isoformat() + 'Z',
         })
 
+    @bp.get('/ai-usage')
+    def ai_usage_report():
+        from admin_dashboard import parse_days,window_for
+        from analytics.admin_reporting import ai_usage
+        try:
+            days=parse_days(request.args);start,end=window_for(days)
+            data=ai_usage(app,start,end)
+            return reply(dict(data,window=dict(days=days,start=start.isoformat()+'Z',end=end.isoformat()+'Z',timezone='UTC')))
+        except ValueError:return jsonify(code='INVALID_INPUT',data=None),400
+        except SQLAlchemyError:return jsonify(code='DATA_UNAVAILABLE',data=None),503
+
+    @bp.get('/import-audit')
+    def import_audit_report():
+        from admin_dashboard import window_for
+        from analytics.admin_reporting import audit_args,import_audit
+        try:
+            days,page,size,status=audit_args(request.args);start,end=window_for(days)
+            return reply(dict(import_audit(app,start,end,page,size,status),window=dict(days=days,start=start.isoformat()+'Z',end=end.isoformat()+'Z',timezone='UTC')))
+        except ValueError:return jsonify(code='INVALID_INPUT',data=None),400
+        except (SQLAlchemyError,OSError):return jsonify(code='DATA_UNAVAILABLE',data=None),503
+
     @bp.get('/catalog')
     def catalog():
         md = CatalogBase.metadata
