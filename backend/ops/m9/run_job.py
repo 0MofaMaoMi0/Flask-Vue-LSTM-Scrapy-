@@ -35,6 +35,19 @@ def main():
         except ValueError:pass
     if result.returncode:raise RuntimeError('Job failed')
 if __name__=='__main__':
-    try:main()
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]))
+    from ops.m9.operations_status import append_event,probe_allowed,finish_probe
+    from ops.m9.recovery import maintenance
+    job=sys.argv[1] if len(sys.argv)==2 else ''
+    try:
+        if os.geteuid()!=0 or job not in JOBS:raise ValueError('Fixed root job required')
+        if not probe_allowed(job):raise ValueError('Expired or repeated cron probe')
+        with maintenance():
+            append_event(job,'STARTED')
+            try:
+                main();append_event(job,'SUCCEEDED')
+            except Exception as e:
+                append_event(job,'FAILED',error_type=type(e).__name__);raise
+            finally:finish_probe(job)
     except Exception as e:
         print(json.dumps(dict(job_ok=False,error_type=type(e).__name__,secrets_printed=False)));sys.exit(1)

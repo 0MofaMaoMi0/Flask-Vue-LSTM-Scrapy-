@@ -213,89 +213,13 @@ def stage_real_source():
 
 
 def create_backup():
-    from datetime import datetime, timezone
-    destination=state/'backups'/datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
-    destination.mkdir(parents=True,mode=0o700)
-    run(['/usr/bin/systemctl','stop','movieinsight-m6'])
-    try:
-        manifest={}
-        schemas=[cfg['schema'],cfg['activity_schema']]
-        if profile=='real':
-            from m7_reliability import discover
-            schemas.append(discover(sql))
-        for schema in schemas:
-            path=destination/(schema+'.sql')
-            with path.open('x',encoding='utf-8') as handle:
-                path.chmod(0o600)
-                process=subprocess.run(['/usr/bin/mysqldump','--protocol=socket','--single-transaction','--skip-add-drop-table','--no-tablespaces',schema],stdout=handle,stderr=subprocess.PIPE)
-            if process.returncode:raise RuntimeError('Backup failed; partial files retained')
-            names=sql("SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema='"+schema+"' ORDER BY TABLE_NAME;").splitlines()
-            tables={}
-            for name in names:
-                count=sql('SELECT COUNT(*) FROM `'+schema+'`.`'+name+'`;')
-                checksum=sql('CHECKSUM TABLE `'+schema+'`.`'+name+'`;').split('\t')[-1]
-                if checksum=='NULL':raise RuntimeError('Unavailable backup checksum')
-                tables[name]={'rows':count,'checksum':checksum}
-                if schema.startswith('mi2_m7_'):
-                    from m7_reliability import fingerprint
-                    tables[name].update(fingerprint(sql,schema,name))
-            manifest[schema]={'sha256':hashlib.sha256(path.read_bytes()).hexdigest(),'bytes':path.stat().st_size,'tables':tables}
-        if profile=='real':
-            from m7_reliability import semantic_summary
-            manifest[schemas[-1]]['semantic_summary']=semantic_summary(sql,schemas[-1])
-        (destination/'manifest.json').write_text(json.dumps(manifest,indent=2))
-        (state/'latest-backup').write_text(str(destination))
-        print(json.dumps({'backup_created':True,'schemas':list(manifest),'backup_id':destination.name}))
-    finally:run(['/usr/bin/systemctl','start','movieinsight-m6'])
+    # M9 recovery v2 delegated; fixed root-owned release, no caller paths.
+    print(run([str(venv/"bin/python"), "-B", str(current/"ops/m9/recovery.py"), "backup"]))
 
 
 def test_restore():
-    import re
-    destination=Path((state/'latest-backup').read_text())
-    if destination.parent!=state/'backups' or destination.is_symlink():raise RuntimeError('Unexpected backup path')
-    manifest=json.loads((destination/'manifest.json').read_text())
-    schemas=[cfg['schema'],cfg['activity_schema']]
-    if profile=='real':
-        from m7_reliability import discover
-        schemas.append(discover(sql))
-    if set(manifest)!=set(schemas):raise RuntimeError('Backup schema coverage mismatch; preserve older backup')
-    targets={schema:('mi2_m7_restore_' if schema.startswith('mi2_m7_') else 'mi2_m6_restore_')+destination.name.lower()+'_'+str(i) for i,schema in enumerate(schemas)}
-    for target in targets.values():
-        if sql("SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name='"+target+"';")!='0':raise RuntimeError('Restore target exists')
-    for target in targets.values():sql('CREATE DATABASE `'+target+'` CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci;')
-    results=[]
-    for schema in schemas:
-        path=destination/(schema+'.sql')
-        if hashlib.sha256(path.read_bytes()).hexdigest()!=manifest[schema]['sha256']:raise RuntimeError('Backup hash mismatch')
-        lines=path.read_text(encoding='utf-8').splitlines(keepends=True)
-        for i,line in enumerate(lines):
-            # Rewrite only FK DDL identifiers. INSERT payload strings, default
-            # values and comments are not searched/replaced.
-            if re.match(r'^\s*(?:CONSTRAINT\s+`[^`]+`\s+)?FOREIGN KEY\b',line):
-                for old,new in targets.items():line=line.replace('REFERENCES `'+old+'`.','REFERENCES `'+new+'`.')
-                lines[i]=line
-        process=subprocess.run(['/usr/bin/mysql','--protocol=socket',targets[schema]],input=''.join(lines),capture_output=True,text=True)
-        if process.returncode:raise RuntimeError('Restore failed; target retained')
-        for name,expected in manifest[schema]['tables'].items():
-            count=sql('SELECT COUNT(*) FROM `'+targets[schema]+'`.`'+name+'`;')
-            checksum=sql('CHECKSUM TABLE `'+targets[schema]+'`.`'+name+'`;').split('\t')[-1]
-            if count!=expected['rows'] or checksum!=expected['checksum']:raise RuntimeError('Restored snapshot content mismatch')
-        if schema.startswith('mi2_m7_'):
-            from m7_reliability import fingerprint,semantic_summary
-            for name,expected in manifest[schema]['tables'].items():
-                actual=fingerprint(sql,targets[schema],name)
-                if any(actual[k]!=expected[k] for k in actual):raise RuntimeError('M7 structural/content digest mismatch')
-            if semantic_summary(sql,targets[schema])!=manifest[schema]['semantic_summary']:raise RuntimeError('M7 ledger summary mismatch')
-        results.append({'restored_schema':targets[schema],'tables':len(manifest[schema]['tables']),'row_counts_and_checksums_match':True})
-    quoted=','.join("'"+name+"'" for name in targets.values())
-    outside=sql('SELECT COUNT(*) FROM information_schema.referential_constraints WHERE constraint_schema IN ('+quoted+') AND unique_constraint_schema NOT IN ('+quoted+');')
-    if outside!='0':raise RuntimeError('Restored FK still depends on original schema')
-    probes=[]
-    for source,target in targets.items():
-        if source.startswith('mi2_m7_'):
-            from m7_reliability import mock_restore_probe
-            probes.append(json.loads(run([str(venv/'bin/python'),'-B',str(Path(__file__).with_name('m7_reliability.py')),target])))
-    print(json.dumps({'m7_mock_probes':probes,'m7_structure_and_content_verified':bool(probes),'restore_test_passed':True,'external_fk_dependencies':0,'results':results}))
+    # M9 recovery v2 delegated; fixed root-owned release, no caller paths.
+    print(run([str(venv/"bin/python"), "-B", str(current/"ops/m9/recovery.py"), "restore-test"]))
 
 
 identity()
