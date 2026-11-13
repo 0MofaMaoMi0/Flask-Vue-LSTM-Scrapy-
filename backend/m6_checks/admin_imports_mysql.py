@@ -59,6 +59,21 @@ def main():
     check('crash_reconciles_committed_receipt',jobs.get(job['job_id'],1)['result']['reconciled'])
     check('readback_receipt_source_hashes',importer.receipt(key)['source_hashes']==first['source_hashes'])
     check('real_catalog_not_targeted',engine.url.database==SCHEMA)
+    facts=dict(payload,entries=[],metadata_only=True,revenue=200000,budget=100000,vote_average=8.5,vote_count=120)
+    fact_key=str(uuid.uuid4());fact_result=importer.apply(fact_key,[facts],journal.append,importer.preview([facts]))
+    with engine.connect() as c:
+        r=CatalogBase.metadata.tables['movie_ratings_summary']
+        rating=c.execute(select(r.c.score_value,r.c.vote_count).where(r.c.movie_id==first['items'][0]['movie_id'],r.c.source=='tmdb')).one()
+    check('metadata_facts_real_mysql',float(rating[0])==8.5 and rating[1]==120)
+    check('metadata_no_credits_or_assets_mutation',not any(name in fact_result['items'][0]['inserted'] for name in ('movie_credits','movie_assets','people','movie_genres')))
+    unknown=dict(facts,vote_average=0,vote_count=0,revenue=0)
+    importer.apply(str(uuid.uuid4()),[unknown],journal.append,importer.preview([unknown]))
+    with engine.connect() as c:
+        rating=c.execute(select(r.c.score_value,r.c.vote_count).where(r.c.movie_id==first['items'][0]['movie_id'],r.c.source=='tmdb')).one()
+    check('unknown_upstream_preserves_prior_verified_rating',float(rating[0])==8.5 and rating[1]==120)
+    from catalog.data_quality import verify_run
+    verified=verify_run(engine,dict(items=[dict(status='SUCCEEDED',import_job_id=fact_key,movie_id=first['items'][0]['movie_id'],result=fact_result)]))
+    check('independent_frozen_schema_and_source_hash_readback',verified['status']=='PASS' and verified['verified']==1 and verified['frozen_schema']['columns']==128)
     print(json.dumps(dict(all_pass=True,checks=checks,model_dispatches=0)))
 if __name__=='__main__':
     try:main()

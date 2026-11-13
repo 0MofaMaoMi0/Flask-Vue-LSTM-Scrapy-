@@ -49,6 +49,51 @@ def install(app):
         return reply(code='IMPORT_UNAVAILABLE',status=503)
     @bp.get('')
     def listing():return reply(dict(items=jobs.list(g.import_owner),max_movies=MAX_MOVIES,kind='tmdb_catalog'))
+    @bp.get('/quality')
+    def quality():
+        from .data_quality import inventory
+        return reply(inventory(engine))
+    def quality_runs():
+        from .quality_runs import QualityRuns
+        if 'quality_runs' not in app.extensions:
+            app.extensions['quality_runs']=QualityRuns(jobs.folder/'.quality-runs',jobs,app.extensions['tmdb_connection'])
+        return app.extensions['quality_runs']
+    @bp.get('/quality/runs')
+    def latest_quality():return reply(quality_runs().latest(g.import_owner))
+    @bp.get('/quality/runs/verify')
+    def verify_quality():
+        from .data_quality import verify_run
+        run=quality_runs().latest(g.import_owner);result=verify_run(engine,run)
+        import json,os,stat
+        backups=[]
+        for item in (run or {}).get('items',[]):
+            if item.get('status')!='SUCCEEDED':continue
+            path=jobs.folder/(item['import_job_id']+'.before')
+            ok=False
+            try:
+                if not path.is_symlink() and (os.name=='nt' or not stat.S_IMODE(path.stat().st_mode)&0o077):
+                    doc=json.loads(path.read_text(encoding='utf-8'))
+                    ok=doc.get('job_id')==item['import_job_id'] and any(r.get('movie_id')==item['movie_id'] for r in doc.get('before',{}).get('movies',[]))
+            except (OSError,ValueError):pass
+            if not ok:backups.append(dict(movie_id=item['movie_id'],code='BEFORE_IMAGE_UNAVAILABLE'))
+        result['backup_issues']=backups
+        if backups:result['status']='REVIEW_REQUIRED'
+        return reply(result)
+    @bp.post('/quality/runs/cancel')
+    def cancel_quality():body(set());return reply(quality_runs().cancel(g.import_owner))
+    @bp.post('/quality/runs/resume')
+    def resume_quality():
+        data=body({'job_id','confirm'})
+        if data.get('confirm') is not True:raise ValueError('Confirmation')
+        return reply(quality_runs().resume(data.get('job_id'),g.import_owner,g.import_binding),status=202)
+    @bp.post('/quality/runs')
+    def start_quality():
+        from .data_quality import inventory
+        data=body({'scope_digest','confirm'})
+        if data.get('confirm') is not True:raise ValueError('Confirmation')
+        report=inventory(engine)
+        if data.get('scope_digest')!=report['scope_digest']:raise ImportRejected('QUALITY_SCOPE_CHANGED')
+        return reply(quality_runs().start(g.import_owner,g.import_binding,report['scope'],report['scope_digest']),status=202)
     @bp.post('/preview')
     def preview():
         data=body({'kind','tmdb_ids'})

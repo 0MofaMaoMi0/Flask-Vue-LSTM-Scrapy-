@@ -29,8 +29,11 @@ def valid_number(value,maximum=None):
 
 def features(row,payload,stamp,source):
     heat=payload.get('popularity');score=payload.get('vote_average');votes=payload.get('vote_count');revenue=payload.get('revenue')
+    prior_revenue=row.get('revenue');prior_date=row.get('revenue_as_of') or row.get('feature_as_of');prior_source=row.get('revenue_source') or row.get('feature_source')
     row.update(tmdb_popularity=float(heat) if valid_number(heat) else None,tmdb_rating=float(score) if valid_number(score,10) and type(votes) is int and votes>0 else None,vote_count=votes if type(votes) is int and votes>=0 else None,revenue=int(revenue) if valid_number(revenue) and revenue>0 else None,popularity_observed_at=stamp,feature_source=source,feature_as_of=stamp)
-    if 'revenue' in payload:row['revenue_as_of']=stamp
+    if 'revenue' in payload:row.update(revenue_as_of=stamp,revenue_source=source if row['revenue'] is not None else None)
+    if row['revenue'] is None and valid_number(prior_revenue) and prior_revenue>0:
+        row.update(revenue=prior_revenue,revenue_as_of=prior_date,revenue_source=prior_source)
 
 def _load_candidates(engine):
     t=CatalogBase.metadata.tables
@@ -46,10 +49,15 @@ def _load_candidates(engine):
             if mid in byid:byid[mid]['tmdb_id']=tid
         seen=set()
         for mid,payload,observed in c.execute(select(sources.c.movie_id,sources.c.metadata_json,sources.c.fetched_at).join(m,m.c.movie_id==sources.c.movie_id).where(m.c.catalog_status=='active',sources.c.source=='tmdb').order_by(sources.c.fetched_at.desc(),sources.c.id.desc())):
-            if mid in seen:continue
-            seen.add(mid)
             if not isinstance(payload,dict) or not mappings.get(mid) or str(payload.get('id'))!=str(mappings[mid]):continue
-            features(byid[mid],payload,observed.isoformat()+'Z' if observed else None,'TMDB_DATABASE_SNAPSHOT')
+            stamp=observed.isoformat()+'Z' if observed else None
+            if mid not in seen:
+                seen.add(mid)
+                features(byid[mid],payload,stamp,'TMDB_DATABASE_SNAPSHOT')
+            # An incomplete newer capture must not erase a known cumulative
+            # revenue. Preserve its actual observation date, not today's date.
+            elif byid[mid]['revenue'] is None and valid_number(payload.get('revenue')) and payload['revenue']>0:
+                byid[mid].update(revenue=int(payload['revenue']),revenue_as_of=stamp,revenue_source='TMDB_HISTORICAL_DATABASE_SNAPSHOT')
         archive=Path(__file__).with_name('data')/'archived_features.json'
         if archive.is_file():
             doc=json.loads(archive.read_text(encoding='utf-8'))

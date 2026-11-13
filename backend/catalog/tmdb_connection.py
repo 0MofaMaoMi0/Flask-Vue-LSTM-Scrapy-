@@ -101,7 +101,7 @@ class TMDBConnection:
         if not e or not e['enabled'] or e['generation']!=generation:raise TMDBError('DISCONNECTED')
         return e
     def _failed(self,user,binding,generation,error):
-        if error.code in ('COOLDOWN','DISCONNECTED','NOT_CONNECTED'):return
+        if error.code in ('COOLDOWN','DISCONNECTED','NOT_CONNECTED','NOT_FOUND'):return
         with self._lock:
             e=self._entries.get((user,binding))
             if e and e['generation']==generation:
@@ -144,7 +144,7 @@ class TMDBConnection:
             if token:headers['Authorization']='Bearer '+token
             req=urllib.request.Request('https://'+host+'/3/'+path+'?'+urllib.parse.urlencode(params),headers=headers)
             try:
-                with urllib.request.build_opener(NoRedirect,urllib.request.ProxyHandler({})).open(req,timeout=5) as response:raw=response.read(1500001)
+                with urllib.request.build_opener(NoRedirect,urllib.request.ProxyHandler({})).open(req,timeout=10) as response:raw=response.read(1500001)
                 if len(raw)>1500000:raise TMDBError('INVALID_UPSTREAM')
                 try:
                     value=json.loads(raw)
@@ -266,14 +266,13 @@ class TMDBConnection:
         for m in movies:
             for payload,observed in sorted(facts.get(str(m.get('tmdb_id')),[]),key=lambda record:datetime.fromisoformat(record[1])):
                 # A newer heat-only list must not re-date or discard known revenue.
-                old=m.get('feature_as_of');revenue=m.get('revenue');revenue_as_of=m.get('revenue_as_of') or old
+                old=m.get('feature_as_of');revenue_as_of=m.get('revenue_as_of') or old
                 try:older=not old or datetime.fromisoformat(old)<=datetime.fromisoformat(observed)
                 except ValueError:older=True
                 if older:
                     features(m,payload,observed,'TMDB_ONLINE_CACHE')
-                    if 'revenue' not in payload:m.update(revenue=revenue,revenue_as_of=revenue_as_of)
-                elif 'revenue' in payload and (not revenue_as_of or datetime.fromisoformat(revenue_as_of)<=datetime.fromisoformat(observed)):
-                    value=payload.get('revenue');m.update(revenue=int(value) if valid_number(value) and value>0 else None,revenue_as_of=observed)
+                elif valid_number(payload.get('revenue')) and payload['revenue']>0 and (not revenue_as_of or datetime.fromisoformat(revenue_as_of)<=datetime.fromisoformat(observed)):
+                    m.update(revenue=int(payload['revenue']),revenue_as_of=observed,revenue_source='TMDB_ONLINE_CACHE')
         import math
         maximum=max((math.log1p(m['tmdb_popularity']) for m in movies if m.get('tmdb_popularity') is not None),default=0)
         for m in movies:m['catalog_popularity']=math.log1p(m['tmdb_popularity'])/maximum if maximum and m.get('tmdb_popularity') is not None else 0

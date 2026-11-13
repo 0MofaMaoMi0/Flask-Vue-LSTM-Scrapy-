@@ -36,6 +36,9 @@ def validate(payload):
     evidence=dict(license_ref=LICENSE,http_status='200',validated=True,sha256=hashlib.sha256(encoded).hexdigest(),acquired_utc=datetime.now(timezone.utc).isoformat(),url=f'https://api.themoviedb.org/3/movie/{tid}?language=zh-CN')
     row=adapt(encoded,evidence)
     if raw.get('adult') is not False:raise ImportRejected('ADULT_OR_NON_MOVIE')
+    for name in ('revenue','budget'):
+        if raw.get(name) is not None and (type(raw[name]) is not int or not 0<=raw[name]<=9223372036854775807):raise ImportRejected('INVALID_FINANCIAL_FACT')
+    if payload.get('metadata_only') is not None and (payload['metadata_only'] is not True or payload['entries']):raise ImportRejected('INVALID_METADATA_SCOPE')
     for name in ('poster_path','backdrop_path'):
         if raw.get(name) and not PHOTO.fullmatch(raw[name]):raise ImportRejected('INVALID_ASSET')
     seen={}
@@ -57,10 +60,15 @@ class CatalogImporter:
     def plan(self,c,payload):
         row=validate(payload);ext=self.t['movie_external_ids'];m=self.t['movies']
         mid=c.scalar(select(ext.c.movie_id).where(ext.c.source=='tmdb',ext.c.external_id==str(payload['id'])))
+        if payload.get('metadata_only') and not mid:raise ImportRejected('METADATA_REQUIRES_EXISTING_IDENTITY')
         if mid:
             old=c.execute(select(m).where(m.c.movie_id==mid)).mappings().one()
             if old['catalog_status']!='active':raise ImportRejected('MOVIE_NOT_ACTIVE')
             if old['release_year'] and row['release_year'] and old['release_year']!=row['release_year']:raise ImportRejected('YEAR_REQUIRES_REVIEW')
+            if payload.get('metadata_only'):
+                if not old['release_year'] or not row['release_year']:raise ImportRejected('YEAR_REQUIRES_REVIEW')
+                def folded(value):return ''.join(ch for ch in (value or '').casefold() if ch.isalnum())
+                if not ({folded(old['title']),folded(old['original_title'])}-{''}) & ({folded(row['title']),folded(row['original_title'])}-{''}):raise ImportRejected('TITLE_REQUIRES_REVIEW')
         for source,eid in row['external_ids'].items():
             owner=c.scalar(select(ext.c.movie_id).where(ext.c.source==source,ext.c.external_id==eid))
             if owner and owner!=mid:raise ImportRejected('IDENTITY_CONFLICT')
@@ -94,9 +102,10 @@ class CatalogImporter:
                 if expected_plans is not None and plans!=expected_plans:raise ImportRejected('PREVIEW_TARGET_CHANGED')
                 # Rollback journal contains only affected catalog rows, not auth data.
                 before={};mids=[p['movie_id'] for p in plans if p['movie_id']]
-                for name in ('movies','movie_external_ids','movie_source_records','movie_ratings_summary','movie_genres','movie_credits','movie_assets'):
+                names=('movies','movie_external_ids','movie_source_records','movie_ratings_summary') if all(p.get('metadata_only') for p in payloads) else ('movies','movie_external_ids','movie_source_records','movie_ratings_summary','movie_genres','movie_credits','movie_assets')
+                for name in names:
                     t=self.t[name];before[name]=[dict(r) for r in c.execute(select(t).where(t.c.movie_id.in_(mids))).mappings()] if mids else []
-                pids={r['person_id'] for r in before['movie_credits']}
+                pids={r['person_id'] for r in before.get('movie_credits',[])}
                 for name in ('people','person_external_ids'):
                     t=self.t[name];before[name]=[dict(r) for r in c.execute(select(t).where(t.c.person_id.in_(pids))).mappings()] if pids else []
                 before['person_assets']=[dict(r) for r in c.execute(select(_PERSON_ASSETS).where(_PERSON_ASSETS.c.person_id.in_(pids))).mappings()] if pids else []
@@ -140,18 +149,22 @@ class CatalogImporter:
             table=t['movie_external_ids']
             if not c.scalar(select(table.c.id).where(table.c.movie_id==mid,table.c.source==source)):
                 put('movie_external_ids',movie_id=mid,source=source,external_id=eid,verified_method='tmdb_api',verified_at=now,created_at=now)
-        for genre in p.get('genres') or []:
+        for genre in ([] if p.get('metadata_only') else p.get('genres') or []):
             table=t['genres'];gid=c.scalar(select(table.c.genre_id).where(table.c.tmdb_genre_id==str(genre['id'])))
             if not gid:gid=put('genres',name_zh=genre['name'],name_en=None,tmdb_genre_id=str(genre['id']))
             table=t['movie_genres']
             if not c.scalar(select(table.c.genre_id).where(table.c.movie_id==mid,table.c.genre_id==gid)):put('movie_genres',movie_id=mid,genre_id=gid)
         for fact in row['rating_facts']:
             table=t['movie_ratings_summary'];where=(table.c.movie_id==mid)&(table.c.source=='tmdb')
+            old=c.execute(select(table.c.score_value,table.c.vote_count).where(where)).first()
+            if p.get('metadata_only') and old and old[0] is not None and (fact['score_value'] is None or not fact['vote_count']):
+                counts['ratings_preserved_unknown_upstream']=1
+                continue
             values=dict(score_value=Decimal(fact['score_value']) if fact['score_value'] is not None else None,score_scale=10,vote_count=fact['vote_count'],observed_at=now,selected_source_record_pk=record)
             if c.scalar(select(table.c.movie_id).where(where)):
                 c.execute(update(table).where(where).values(**values));counts['ratings_updated']=counts.get('ratings_updated',0)+1
             else:put('movie_ratings_summary',movie_id=mid,source='tmdb',**values)
-        for kind in ('poster','backdrop'):
+        for kind in (() if p.get('metadata_only') else ('poster','backdrop')):
             path=p.get(kind+'_path');table=t['movie_assets']
             if path and not c.scalar(select(table.c.asset_id).where(table.c.movie_id==mid,table.c.asset_type==kind,table.c.source=='tmdb',table.c.source_path==path)):
                 primary=c.scalar(select(table.c.asset_id).where(table.c.movie_id==mid,table.c.asset_type==kind,table.c.is_primary==True))

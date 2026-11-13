@@ -4,6 +4,7 @@ import {useRouter} from 'vue-router'
 import M9Sidebar from '../components/M9Sidebar.vue'
 import AdminDashboard from '../components/dashboard/AdminDashboard.vue'
 import AdminImports from '../components/AdminImports.vue'
+import AdminQuality from '../components/AdminQuality.vue'
 const router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 type Tab='overview'|'catalog'|'users'|'recommend'|'ai'|'health'|'audit'|'settings'
 const tabs:{id:Tab,label:string}[]=[{id:'overview',label:'数据驾驶舱'},{id:'catalog',label:'电影库治理'},{id:'users',label:'用户与行为'},{id:'recommend',label:'推荐效果'},{id:'ai',label:'AI 服务分析'},{id:'health',label:'系统运行'},{id:'audit',label:'操作审计'},{id:'settings',label:'全局设置'}]
@@ -38,7 +39,7 @@ function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);re
     <template v-else>
       <AdminDashboard v-if="tab==='overview'" ref="dashboard"/>
       <section v-else-if="tab==='catalog'" class="panel">
-        <AdminImports/><h2>电影库治理 <small>{{catalog.length}} 部在架影片</small></h2>
+        <AdminQuality/><AdminImports/><h2>电影库治理 <small>{{catalog.length}} 部在架影片</small></h2>
         <div class="tablewrap"><table><thead><tr><th>影片</th><th>年份</th><th>评分</th><th>类型</th><th>制作国家</th><th>演职员</th><th>媒体</th></tr></thead><tbody>
           <tr v-for="m in catalog" :key="m.movie_id"><td>{{m.title}}</td><td>{{m.year||'—'}}</td><td>{{m.rating??'—'}}</td><td>{{m.genres.join(' / ')||'—'}}</td><td>{{m.countries.join(' / ')||'—'}}</td><td>{{m.credits}}</td><td>{{m.assets}}</td></tr>
         </tbody></table></div>
