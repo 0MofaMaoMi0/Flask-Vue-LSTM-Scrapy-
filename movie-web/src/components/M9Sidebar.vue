@@ -2,7 +2,7 @@
 import {ref,onMounted,onBeforeUnmount,computed,watch} from 'vue'
 import {useRoute} from 'vue-router'
 import {useAuthStore} from '../stores/auth'
-import {aiWorkspace} from '../services/aiWorkspace'
+import AccountMenu from './AccountMenu.vue'
 const route=useRoute()
 function active(to:string){if(to==='/movies')return route.path==='/movies'&&!route.hash;if(to.includes('#behavior'))return route.path==='/movies'&&route.hash==='#behavior';return route.path===to}
 const auth=useAuthStore(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
@@ -29,7 +29,7 @@ const subItems=[
 </script>
 <template><div class="sidebar-scope" :class="{'is-collapsed':!expanded}"><aside class="sidebar" aria-label="主导航"><div class="sidebar-head"><router-link to="/home" class="sidebar-brand" aria-label="MovieInsight 首页"><strong>Movie<span>Insight</span></strong><small>AI POWERED MOVIE DISCOVERY</small></router-link><button class="sidebar-toggle" :aria-expanded="expanded" :aria-label="expanded?'收起导航':'展开导航'" @click="toggle"><svg width="22" height="22" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg></button></div><div class="sidebar-content"><nav class="primary-nav"><router-link v-for="item in links" :key="item.to" :to="item.to" class="nav-item" active-class="route-match" :class="{'is-active':active(item.to)}" :title="item.label" :aria-label="item.label"><span class="nav-icon"><svg viewBox="0 0 24 24"><path :d="item.icon"/></svg></span><span class="item-label">{{item.label}}</span></router-link></nav>
 <div v-if="onMovies" class="route-context"><div class="route-context-title"><span>我的电影</span><span class="context-tag">个人空间</span></div><nav class="context-nav" aria-label="我的电影子导航"><router-link v-for="s in subItems" :key="s.label" :to="{path:'/movies',hash:'#behavior',query:{view:s.view}}" class="sub-item" :class="{'is-active':view===s.view}" :aria-current="view===s.view?'page':undefined" :title="s.label" :aria-label="s.label"><span class="nav-icon"><svg viewBox="0 0 24 24"><path :d="s.icon"/></svg></span><span class="item-label">{{s.label}}</span><span v-if="s.count&&counts[s.count]" class="sub-count">{{counts[s.count]}}</span></router-link></nav></div>
-</div><div class="sidebar-footer"><div class="footer-item" :title="auth.user?.username"><span class="nav-icon profile"><img v-if="aiWorkspace.avatar" :src="aiWorkspace.avatar" alt="个人头像" style="width:100%;height:100%;object-fit:cover;border-radius:50%"/><template v-else>{{auth.user?.username?.slice(0,1).toUpperCase()}}</template></span><span class="item-label">{{auth.user?.username}}</span></div></div></aside></div></template>
+</div><div class="sidebar-footer"><AccountMenu :collapsed="!expanded"/></div></aside></div></template>
 <style scoped>
 /* P7.3 sidebar and P8.4 palette copied from the supplied shell. */
 .sidebar{position:fixed;inset:0 auto 0 0;width:var(--expanded);height:100vh;display:flex;flex-direction:column;z-index:30;overflow:hidden;background:linear-gradient(180deg,#151526 0%,#131323 55%,#11111d 100%);border-right:1px solid rgba(203,166,255,.09);box-shadow:8px 0 34px rgba(0,0,0,.18);transition:width .25s ease}

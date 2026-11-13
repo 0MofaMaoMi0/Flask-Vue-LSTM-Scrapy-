@@ -7,6 +7,7 @@ import {useRoute} from 'vue-router'
 import TMDBSettings from './TMDBSettings.vue'
 import AccountClosure from './AccountClosure.vue'
 import {aiWorkspace} from '../services/aiWorkspace'
+import {isAccountSettingsTab,OPEN_ACCOUNT_SETTINGS} from '../services/accountSettings'
 import {personalRequest,persistAvatar} from '../services/personalFeatures'
 import {movieArtwork} from '../services/movieArtwork'
 import {assistantMovieTarget} from '../services/movieNavigation'
@@ -82,8 +83,8 @@ onDeactivated(clearSensitive)
 function sharedStatus(){refreshStatus()}
 function broadcast(){window.dispatchEvent(new Event('mi2-model-status'))}
 function closeTransient(e:Event){const el=e.target as HTMLElement;if(!el?.closest?.('.side-list'))sessionMenu.value='';if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value=''}}
-onMounted(()=>{refreshStatus();window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
-onBeforeUnmount(()=>{apiKey.value='';controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
+onMounted(()=>{refreshStatus();window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(OPEN_ACCOUNT_SETTINGS,openRequestedSettings);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
+onBeforeUnmount(()=>{apiKey.value='';controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(OPEN_ACCOUNT_SETTINGS,openRequestedSettings);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
 
 function movieUrl(id:number){return assistantMovieTarget(id,props.surface,settingsRoute.fullPath)}
 async function copyAnswer(text:string){try{await navigator.clipboard.writeText(text);notice.value='已复制回答'}catch{error.value='无法访问剪贴板，请手动复制。'}}
@@ -110,7 +111,8 @@ function clearSessions(){if(busy.value)return;sessions.value=[];activeSession.va
 function importSession(other:SavedSession){if(busy.value)return;newSession();const s=sessions.value[0]!;s.title='导入 · '+other.title;s.history=clone(other.history);history.value=clone(s.history);hydrateFeedback();conversation.value=null;pending=null;saveSession();sharedOpen.value=false;notice.value='已复制记录；后续提问使用独立的新模型上下文，不修改另一窗口。'}
 watch([history,conversation,message,result],saveSession,{deep:true})
 const settingsRoute=useRoute()
-watch(()=>[settingsRoute.path,settingsRoute.query.settings],()=>{if(props.surface==='explore'&&settingsRoute.path==='/ai'&&settingsRoute.query.settings==='tmdb')openSettings('tmdb')},{immediate:true})
+watch(()=>[settingsRoute.path,settingsRoute.query.settings],()=>{if(props.surface==='explore'&&settingsRoute.path==='/ai'&&isAccountSettingsTab(settingsRoute.query.settings))openSettings(settingsRoute.query.settings)},{immediate:true})
+function openRequestedSettings(e:Event){const tab=(e as CustomEvent).detail;if(props.surface==='explore'&&settingsRoute.path==='/ai'&&isAccountSettingsTab(tab))openSettings(tab)}
 function openSettings(tab='ai'){settingsTab.value=tab;settings.value=true;apiKey.value='';profileOpen.value=false}
 const feedbackBusy=ref<Record<string,boolean>>({})
 function hydrateFeedback(){for(const turn of history.value){const rid=turn.result?.request_id;if(rid)personalRequest('assistant-feedback?request_id='+encodeURIComponent(rid)).then(r=>turn.feedback=r.reaction).catch(()=>{})}}

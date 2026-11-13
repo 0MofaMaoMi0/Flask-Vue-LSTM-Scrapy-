@@ -12,6 +12,10 @@ export const useAuthStore=defineStore('auth',{
    this.ready=true
   },
   async signedIn(){await refreshCsrf();this.user=await call<User>('me');await loadPersonalProfile(this.user.id).catch(()=>{});this.ready=true},
-  async logout(){try{await refreshCsrf();await call('logout','POST',{})}finally{this.user=null;this.ready=false;clearCsrf()}}
+  async logout(){
+   try{await refreshCsrf();await call('logout','POST',{})}
+   catch(e){if(!(e instanceof AuthError&&e.status===401))throw e}
+   this.user=null;this.ready=false;clearCsrf()
+  }
  }
 })
