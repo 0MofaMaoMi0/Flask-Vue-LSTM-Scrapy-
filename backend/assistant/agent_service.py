@@ -257,3 +257,6 @@ class AgentService:
     def cancel_binding(self,binding):
         with self.lock:keys=[k for k,r in self.runtime.items() if r['binding']==binding and 'finished' not in r]
         for key in keys:self.cancel(key)
+    def cancel_account(self,user):
+        with self.lock:keys=[k for k,r in self.runtime.items() if r['user']==user and 'finished' not in r]
+        for key in keys:self.cancel(key)

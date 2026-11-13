@@ -6,7 +6,7 @@ class TMDBVerifier:
     def verify(self,title,year=None):
         from catalog.tmdb_connection import current,TMDBError
         context=current()
-        if context and context[0].status(context[1],context[2])['configured']:
+        if context and context[0].status(context[1],context[2])['enabled']:
             service,user,binding=context
             try:
                 tid=service.search(user,binding,title,year)

@@ -75,10 +75,10 @@ function when(v:string|null|undefined){if(!v)return '—';const d=new Date(v);re
           </div>
           <div v-if="feedback.channels.length" class="tablewrap"><table><thead><tr><th>频道</th><th>曝光</th><th>点击</th><th>CTR</th></tr></thead><tbody><tr v-for="c in feedback.channels" :key="c.channel"><td>{{c.channel}}</td><td>{{c.impressions}}</td><td>{{c.clicks}}</td><td>{{c.ctr==null?'—':(c.ctr*100).toFixed(2)+'%'}}</td></tr></tbody></table></div>
           <p v-else class="empty">过去 30 天还没有曝光记录；访问推荐频道后会自动采集。</p>
-          <h3 class="sub">排序指标 <small>K={{feedback.ranking.k}} · 真值：已看/收藏/评分≥4</small></h3>
-          <p v-if="feedback.ranking.status==='OK'" class="metric-line">Precision {{feedback.ranking.precision_at_k?.toFixed(3)}} · Recall {{feedback.ranking.recall_at_k?.toFixed(3)}} · NDCG {{feedback.ranking.ndcg_at_k?.toFixed(3)}}<span>（{{feedback.ranking.users}} 个有效用户）</span></p>
+          <h3 class="sub">排序指标 <small>K={{feedback.ranking.k}} · 当前偏好重合度（非转化归因）</small></h3>
+          <p v-if="feedback.ranking.status==='OK'" class="metric-line">Precision {{feedback.ranking.precision_at_k?.toFixed(3)}} · Recall {{feedback.ranking.recall_at_k?.toFixed(3)}} · NDCG {{feedback.ranking.ndcg_at_k?.toFixed(3)}}<span>（{{feedback.ranking.users}} 个用户 / {{feedback.ranking.batches}} 次榜单）</span></p>
           <p v-else class="empty">样本不足，暂不计算排序指标（需要曝光用户同时具备已看/收藏/评分≥4 的真值）。</p>
-          <p class="note">曝光口径为榜单实际渲染条数；点击口径为对应名次的点击事件。CTR 不是推荐准确率。数据保留 180 天。</p>
+          <p class="note">仅统计新口径：卡片至少50%进入视口持续1秒，或用户主动点击。CTR 按同批曝光归属去重点击；排序指标逐榜单计算并包含零命中，不代表推荐带来的转化。数据保留 180 天。</p>
         </template>
         <p v-else class="empty">推荐效果数据暂时不可用。</p>
       </section>

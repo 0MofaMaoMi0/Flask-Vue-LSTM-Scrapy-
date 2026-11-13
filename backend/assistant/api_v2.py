@@ -17,7 +17,7 @@ def install(app):
     if sys.platform.startswith('linux'):
         import resource
         resource.setrlimit(resource.RLIMIT_CORE,(0,0))
-    engine=connect_store(url,app.config['M6_SERVER_UUID']);md=tables();vault=Vault();ledger=Ledger(engine,md)
+    engine=app.extensions.get('m7_engine') or connect_store(url,app.config['M6_SERVER_UUID']);md=tables();vault=Vault(store=app.extensions.get('credential_store'));ledger=Ledger(engine,md)
     service=AgentService(engine,md,CatalogReader(app.extensions['auth_engine'],app.extensions['m6_behavior'],app.extensions.get('tmdb_connection'),Path(app.config['MEDIA_CACHE_DIR'])/'.private-recommendations'),vault,ledger,app.config.get('M7_TEST_PROVIDER_FACTORY') if app.config.get('TESTING') else None)
     app.extensions.update(m7_engine=engine,m7_vault=vault,m7_agent=service,m7_ledger=ledger)
     bp=Blueprint('assistant_v2',__name__,url_prefix='/api/v1/assistant')
@@ -56,7 +56,7 @@ def install(app):
         from sqlalchemy import select
         user,binding=who();config=vault.status(user,binding);budget=md.tables['budgets']
         with engine.connect() as c:used=c.execute(select(budget.c.calls).where(budget.c.id=='byok:'+datetime.utcnow().date().isoformat()+':'+str(user))).scalar_one_or_none() or 0
-        return reply(dict(config,daily_calls_used=used,daily_calls_remaining=max(0,config['daily_calls']-used) if config['daily_calls'] is not None else None,local_available=True,cloud_available=config['configured'] and config['enabled'] and config['verification'] not in ('KEY_REJECTED','MODEL_UNAVAILABLE'),degraded=not config['enabled'],reason='BYOK_CONNECTED_UNVERIFIED' if config['enabled'] else 'BYOK_NOT_CONNECTED',models=list(MODELS),billing='USER_PROVIDER_ACCOUNT',server_mode='SINGLE_PROCESS_EPHEMERAL_CUSTODY'))
+        return reply(dict(config,daily_calls_used=used,daily_calls_remaining=max(0,config['daily_calls']-used) if config['daily_calls'] is not None else None,local_available=True,cloud_available=config['configured'] and config['enabled'] and config['verification'] not in ('KEY_REJECTED','MODEL_UNAVAILABLE'),degraded=not config['enabled'],reason='BYOK_CONNECTED_UNVERIFIED' if config['enabled'] else 'BYOK_NOT_CONNECTED',models=list(MODELS),billing='USER_PROVIDER_ACCOUNT',server_mode='ACCOUNT_ENCRYPTED_DATABASE' if vault.store else 'SINGLE_PROCESS_EPHEMERAL_CUSTODY'))
     @bp.post('/config')
     def configure():
         user,binding=who()
@@ -65,7 +65,14 @@ def install(app):
     @bp.delete('/config')
     @bp.post('/disconnect')
     def disconnect():
-        user,binding=who();vault.disconnect(user,binding);service.cancel_user(user,binding);return reply({'configured':False,'enabled':False})
+        user,binding=who();vault.disconnect(user,binding);service.cancel_account(user) if vault.store else service.cancel_user(user,binding);return reply(vault.status(user,binding))
+    @bp.post('/enable')
+    def enable_saved():
+        user,binding=who()
+        try:
+            if body(set()):raise ValueError()
+            return reply(vault.enable(user,binding))
+        except ValueError:return reply(code='BYOK_NOT_CONNECTED',status=400)
     @bp.post('/verify')
     def verify():
         user,binding=who()

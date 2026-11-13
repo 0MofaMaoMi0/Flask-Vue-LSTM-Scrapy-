@@ -42,12 +42,12 @@ class CatalogReader:
         rows=self.get_movies([movie_id]);context=current()
         if not rows or not context:return rows
         service,owner,binding=context
-        if owner!=user or not service.status(user,binding)['configured']:return rows
+        if owner!=user or not service.status(user,binding)['enabled']:return rows
         mapped=next((m for m in load_candidates(self.engine) if m['movie_id']==movie_id),None)
         if not mapped or not str(mapped.get('tmdb_id') or '').isdecimal():return rows
         try:
             doc=service.detail(user,binding,int(mapped['tmdb_id']));enriched=service.enrich([mapped])[0]
-            for k in ('tmdb_id','tmdb_rating','vote_count','revenue','tmdb_popularity','feature_source','feature_as_of'):rows[0][k]=enriched.get(k)
+            for k in ('tmdb_id','tmdb_rating','vote_count','revenue','revenue_as_of','tmdb_popularity','feature_source','feature_as_of'):rows[0][k]=enriched.get(k)
             rows[0]['tmdb_details']=dict(doc['movie'],source_as_of=doc['captured_at'],identity='TMDB_ID_NOT_INTERNAL_ID')
         except TMDBError:rows[0]['tmdb_status']='CACHE_OR_LOCAL_FALLBACK'
         return rows

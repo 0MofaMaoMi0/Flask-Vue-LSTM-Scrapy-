@@ -1,13 +1,14 @@
-"""Authenticated/CSRF-protected TMDB connection controls; no database writes."""
+"""Authenticated/CSRF-protected TMDB controls; credentials persist, movie data remains read-only."""
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from flask import Blueprint,request,jsonify,g
 from app.auth import session_row,csrf_ok
 from .tmdb_connection import TMDBConnection,TMDBError,BOARD_PATHS,MAX_DETAIL_REFRESH
+from assistant.credential_store import CredentialError,CredentialAccessDenied
 
 def install(app):
-    service=TMDBConnection(Path(app.config['MEDIA_CACHE_DIR'])/'.private-tmdb',transport=app.config.get('TMDB_TEST_TRANSPORT') if app.config.get('TESTING') else None)
+    service=TMDBConnection(Path(app.config['MEDIA_CACHE_DIR'])/'.private-tmdb',transport=app.config.get('TMDB_TEST_TRANSPORT') if app.config.get('TESTING') else None,store=app.extensions.get('credential_store'))
     app.extensions['tmdb_connection']=service
     bp=Blueprint('tmdb_connection',__name__,url_prefix='/api/v1/tmdb')
     def reply(data=None,code='OK',status=200):return jsonify(code=code,data=data),status
@@ -27,7 +28,11 @@ def install(app):
     @bp.errorhandler(TMDBError)
     def unavailable(error):
         code=error.code
-        return reply(dict(service.status(g.tmdb_user,g.tmdb_binding),retry_after=error.retry_after),code='TMDB_'+code,status=429 if code in ('RATE_LIMITED','COOLDOWN','CHECK_THROTTLED') else 400 if code in ('NOT_CONNECTED','KEY_REJECTED','DISCONNECTED') else 503)
+        return reply(dict(service.status(g.tmdb_user,g.tmdb_binding),retry_after=error.retry_after),code='TMDB_'+code,status=429 if code in ('RATE_LIMITED','COOLDOWN','CHECK_THROTTLED') else 400 if code in ('NOT_CONNECTED','KEY_REJECTED','DISCONNECTED','DISABLED') else 503)
+    @bp.errorhandler(CredentialAccessDenied)
+    def access_denied(error):return reply(code='AUTHENTICATION_REQUIRED',status=401)
+    @bp.errorhandler(CredentialError)
+    def credentials_unavailable(error):return reply(code='CREDENTIALS_UNAVAILABLE',status=503)
     @bp.errorhandler(ValueError)
     def invalid(error):return reply(code='INVALID_INPUT',status=400)
     @bp.errorhandler(Exception)
@@ -46,13 +51,18 @@ def install(app):
     @bp.post('/disconnect')
     def disconnect():
         body(set());service.disconnect(g.tmdb_user,g.tmdb_binding);return reply(service.status(g.tmdb_user,g.tmdb_binding))
+    @bp.post('/enable')
+    def enable_saved():
+        body(set());return reply(service.enable(g.tmdb_user,g.tmdb_binding))
     @bp.post('/refresh')
     def refresh():
         b=body({'channel','movie_ids'});channel=b.get('channel');ids=b.get('movie_ids',[])
         if channel is not None and (type(channel) is not str or channel not in BOARD_PATHS):raise ValueError()
         if type(ids) is not list or len(ids)>MAX_DETAIL_REFRESH or len(set(i for i in ids if type(i) is int))!=len(ids) or any(type(i) is not int or i<1 for i in ids):raise ValueError()
         user,binding=g.tmdb_user,g.tmdb_binding
-        if not service.status(user,binding)['configured']:raise TMDBError('NOT_CONNECTED')
+        state=service.status(user,binding)
+        if not state['configured']:raise TMDBError('NOT_CONNECTED')
+        if not state['enabled']:raise TMDBError('DISABLED')
         results=[]
         if ids:
             from .recommendation_data import load_candidates

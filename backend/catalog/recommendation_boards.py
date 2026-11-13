@@ -61,11 +61,16 @@ def persisted_order(folder,user,channel,period,filters,ordered):
 def public_snapshot(channel,*,online=True):
     from .tmdb_connection import current
     context=current()
+    from .board_snapshots import read
+    scheduled=read(channel)
     if context:
         service,user,binding=context
         latest=service.snapshot(channel,user if online else None,binding)
-        if latest:return latest
-    path=Path(os.environ.get('MI2_TMDB_BOARD_DIR') or DATA)/(channel+'.json')
+        if latest:
+            if scheduled and datetime.fromisoformat(scheduled['captured_at'])>datetime.fromisoformat(latest['captured_at']):return scheduled
+            return latest
+    if scheduled:return scheduled
+    path=DATA/(channel+'.json')
     if not path.is_file():return None
     try:
         doc=json.loads(path.read_text(encoding='utf-8'))

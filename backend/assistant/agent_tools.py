@@ -4,7 +4,7 @@ from .tools import validate_filters,facts
 from .conditions import merge_for_tool,hard_conditions
 class AgentTools:
     def __init__(self,reader,user,initial=(),conditions=None):self.reader=reader;self.user=user;self.calls=0;self.conditions=conditions or {};self.model_hints=[];self.observed={m['movie_id']:self.dto(m) for m in initial}
-    def dto(self,m):return dict(facts(m),overview=str(m.get('overview') or '')[:1200],local_reasons=m.get('local_reasons',[]),tmdb_popularity=m.get('tmdb_popularity'),popularity_observed_at=m.get('popularity_observed_at'),**{k:m[k] for k in ('tmdb_id','tmdb_rating','vote_count','revenue','feature_source','feature_as_of','tmdb_details','tmdb_status') if k in m})
+    def dto(self,m):return dict(facts(m),overview=str(m.get('overview') or '')[:1200],local_reasons=m.get('local_reasons',[]),tmdb_popularity=m.get('tmdb_popularity'),popularity_observed_at=m.get('popularity_observed_at'),**{k:m[k] for k in ('tmdb_id','tmdb_rating','vote_count','revenue','revenue_as_of','feature_source','feature_as_of','tmdb_details','tmdb_status') if k in m})
     def execute(self,name,args):
         if type(args) is not dict:raise ValueError('Tool arguments')
         self.calls+=1

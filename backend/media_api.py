@@ -22,10 +22,6 @@ TIMEOUT = 15
 
 
 def install(app):
-    import traceback
-    @app.errorhandler(Exception)
-    def _debug_errors(error):
-        return Response(traceback.format_exc(), status=500, mimetype='text/plain')
     bp = Blueprint('media_api', __name__, url_prefix='/api/media')
     cache_root = Path(app.config.get('MEDIA_CACHE_DIR', '/tmp/mi2-media'))
 
@@ -44,8 +40,7 @@ def install(app):
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
-            import traceback
-            return Response(traceback.format_exc(), status=500, mimetype='text/plain')
+            return jsonify(code='MEDIA_CACHE_UNAVAILABLE',data=None),503
         req = urllib.request.Request(raw, headers={
             'User-Agent': 'MovieInsight/1.0 (poster cache)',
             'Referer': ('https://movie.douban.com/' if (parsed.hostname or '').endswith('doubanio.com') else 'https://www.themoviedb.org/'),
@@ -67,7 +62,6 @@ def install(app):
             target.write_bytes(data)
             return Response(data, mimetype=ctype, headers={'Cache-Control':'public, max-age=86400'})
         except Exception:
-            import traceback
-            return Response(traceback.format_exc(), status=500, mimetype='text/plain')
+            return jsonify(code='MEDIA_CACHE_UNAVAILABLE',data=None),503
 
     app.register_blueprint(bp)

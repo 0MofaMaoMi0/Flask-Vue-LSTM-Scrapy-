@@ -5,6 +5,7 @@ import {ref,onMounted,onBeforeUnmount,onDeactivated,nextTick,computed,watch} fro
 import {useAuthStore} from '../stores/auth'
 import {useRoute} from 'vue-router'
 import TMDBSettings from './TMDBSettings.vue'
+import AccountClosure from './AccountClosure.vue'
 import {aiWorkspace} from '../services/aiWorkspace'
 import {movieArtwork} from '../services/movieArtwork'
 const props=defineProps<{surface:'explore'|'floating'}>()
@@ -33,10 +34,11 @@ async function refreshStatus(){try{status.value=await jsonRequest('status');if(s
 async function saveConfig(){
  if(configBusy.value)return
  configBusy.value=true;error.value='';notice.value=''
- try{await jsonRequest('config','POST',{provider:'deepseek',model:model.value,api_key:apiKey.value,daily_calls:null,max_output_tokens:Number(output.value),enabled:true,consent:consent.value,cache_enabled:cacheEnabled.value});await refreshStatus();broadcast();notice.value='已短期连接。保存没有调用模型；接下来的智能对话将使用你的服务商账户。'}catch(e){error.value=(e as Error).message}finally{apiKey.value='';configBusy.value=false}
+ try{await jsonRequest('config','POST',{provider:'deepseek',model:model.value,api_key:apiKey.value,daily_calls:null,max_output_tokens:Number(output.value),enabled:true,consent:consent.value,cache_enabled:cacheEnabled.value});await refreshStatus();broadcast();notice.value='密钥已按账户加密保存到数据库。退出登录或服务重启后保留；保存没有调用模型。'}catch(e){error.value=(e as Error).message}finally{apiKey.value='';configBusy.value=false}
 }
 async function verifyKey(){configBusy.value=true;error.value='';try{await jsonRequest('verify','POST',{});await refreshStatus();broadcast();notice.value='已完成模型列表检查，没有发送生成请求。'}catch(e){error.value=(e as Error).message;await refreshStatus()}finally{configBusy.value=false}}
-async function disconnect(){configBusy.value=true;try{await jsonRequest('disconnect','POST',{});apiKey.value='';await refreshStatus();broadcast();notice.value='已断开并移除短期托管密钥；在途请求将尝试取消，已发送的调用仍可能计费。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
+async function disconnect(){configBusy.value=true;try{await jsonRequest('disconnect','POST',{});apiKey.value='';await refreshStatus();broadcast();notice.value='连接已停用，数据库中的密钥保留；在途请求将尝试取消，已发送的调用仍可能计费。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
+async function enableSaved(){configBusy.value=true;error.value='';try{await jsonRequest('enable','POST',{});await refreshStatus();broadcast();notice.value='已启用数据库保存的密钥；本操作没有调用模型。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
 function consume(event:string,data:any){
  nextTick(()=>{if(thread.value)thread.value.scrollTop=thread.value.scrollHeight})
  if(event==='draft')draft.value=data.text||''
@@ -195,14 +197,14 @@ onMounted(()=>newSession())
 <div class="gs-setting-row"><div><h3>电影推荐卡片</h3><p>采用你已选定的 A 横向紧凑卡。</p></div><span class="gs-pill">A · 横向紧凑</span></div><div class="gs-setting-row"><div><h3>对话版式</h3><p>Gemini 阅读式偏长文阅读，MovieInsight 对话式偏即时问答。</p></div><select :value="dialogMode" @change="dialogMode=($event.target as HTMLSelectElement).value" class="gs-select" :id="uid('gsDialogMode')" data-source-id="gsDialogMode"><option value="gemini">Gemini 阅读式</option><option value="native">MovieInsight 对话式</option></select></div>
 </div>
 </section>
-<section aria-label="全站 AI 与 BYOK 设置" class="gs-panel" :id="uid('gs-ai')" data-source-id="gs-ai" v-show="settingsTab==='ai'"><div class="gs-card"><h2>AI 服务与 BYOK</h2><p>模型配置共享到两个窗口；对话和草稿互相独立。</p><div class="settings-api"><form @submit.prevent="saveConfig" autocomplete="off">
+<section aria-label="全站 AI 与 BYOK 设置" class="gs-panel" :id="uid('gs-ai')" data-source-id="gs-ai" v-show="settingsTab==='ai'"><div class="gs-card"><h2>AI 服务与 BYOK</h2><p>密钥默认按账户加密保存到数据库，退出登录和服务重启后保留，注销账户时删除。模型配置共享，对话和草稿互相独立。</p><p v-if="!status.persistent" role="status">当前环境尚未启用数据库凭据服务，暂不能保存新密钥。</p><div class="settings-api"><form @submit.prevent="saveConfig" autocomplete="off">
 <label :for="props.surface+'-model'">DeepSeek 模型</label><select :id="props.surface+'-model'" v-model="model" :disabled="configBusy||busy"><option value="deepseek-flash">DeepSeek Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro（通常费用更高）</option></select>
 <label :for="props.surface+'-key'">API Key（不会回显或保存到浏览器）</label><input :id="props.surface+'-key'" v-model="apiKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="512" required :disabled="configBusy||busy"/>
 <div class="settings-grid"><p class="assistant-note">每日及每轮模型调用次数：不限（按你的设置）</p><label>每次最大输出 Token<input v-model.number="output" type="number" min="256" max="8192" required/></label></div>
 <label class="check"><input v-model="consent" type="checkbox" required/>我同意向所选服务商发送对话和必要的电影/偏好信息；启用后提交智能请求可能产生费用。</label>
-<label class="check"><input v-model="cacheEnabled" type="checkbox"/>允许5分钟内复用相同用户、上下文和电影/偏好版本的回答（默认关闭）</label><button type="submit" :disabled="configBusy||busy||!consent||!apiKey">保存并启用个人模型</button>
+<label class="check"><input v-model="cacheEnabled" type="checkbox"/>允许5分钟内复用相同用户、上下文和电影/偏好版本的回答（默认关闭）</label><button type="submit" :disabled="configBusy||busy||!consent||!apiKey||!status.persistent">保存并启用个人模型</button>
 </form>
-<div class="assistant-controls"><button type="button" :disabled="configBusy||busy||!status.configured" @click="verifyKey">检查 Key 与模型列表</button><button type="button" :disabled="configBusy||!status.configured" @click="disconnect">断开连接并移除 Key</button></div>
+<div class="assistant-controls"><button type="button" :disabled="configBusy||busy||!status.configured" @click="verifyKey">检查 Key 与模型列表</button><button v-if="status.configured&&!status.enabled&&status.persistent" type="button" :disabled="configBusy||busy" @click="enableSaved">启用已保存的密钥</button><button type="button" :disabled="configBusy||!status.enabled" @click="disconnect">停用连接（保留密钥）</button></div>
 <p class="assistant-note">状态：{{status.verification||'DISCONNECTED'}}；今日已派发 {{status.daily_calls_used??0}} / {{status.daily_calls??'不限'}} 次（UTC日）。列表检查不发送生成请求。不设每日或每轮调用次数上限；仍受90秒超时、并发和上下文长度保护。金额未取得可靠账单时显示未知。</p>
 <label class="check"><input v-model="paidConsent" type="checkbox"/>我明确同意发送一次可能计费的模型连接测试。</label><button type="button" :disabled="busy||configBusy||!paidConsent||!status.enabled" @click="testConnection">发送模型测试（可能计费）</button>
 </div></div></section>
@@ -215,6 +217,7 @@ onMounted(()=>newSession())
 <div aria-live="polite" class="gs-save-status" :id="uid('privacyStatus')" data-source-id="privacyStatus"></div>
 </div>
 </section>
+<AccountClosure v-if="settings&&settingsTab==='privacy'" :id-prefix="props.surface"/>
 <section aria-label="关于 MovieInsight" class="gs-panel" :id="uid('gs-about')" data-source-id="gs-about" v-show="settingsTab==='about'">
 <div class="gs-card"><h2>关于 MovieInsight</h2><p>AI 驱动的电影发现工具。目录、个人行为与助手请求都由服务端校验。</p><div class="gs-divider"></div><p>用户自带模型 Key；电影资料与个人行为由服务端验证。</p><p>This product uses the TMDB API but is not endorsed or certified by TMDB.</p><p><a href="https://www.themoviedb.org" target="_blank" rel="noopener noreferrer">电影数据来源：The Movie Database（TMDB）</a></p><div class="gs-notice" style="margin-top:16px">当前版本：M9 · 界面已接入真实目录与个人行为数据。</div></div>
 </section>

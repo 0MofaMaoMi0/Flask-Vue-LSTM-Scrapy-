@@ -1,4 +1,4 @@
-"""Session-bound TMDB read access. No SQL, platform credential, or user-data forwarding."""
+"""Session-authorized TMDB reads with account-encrypted credentials and public-data caching."""
 import contextvars,hashlib,json,os,re,secrets,threading,time,urllib.request,urllib.error,urllib.parse
 from contextlib import contextmanager
 from datetime import datetime,timezone
@@ -34,8 +34,8 @@ def request_binding(app):
 class TMDBConnection:
     _preferred_host=None
     _preferred_until=0
-    def __init__(self,folder,*,ttl=7200,capacity=64,transport=None):
-        self.folder=Path(folder);self.ttl=ttl;self.capacity=capacity;self._cipher=AESGCM(os.urandom(32))
+    def __init__(self,folder,*,ttl=7200,capacity=64,transport=None,store=None):
+        self.folder=Path(folder);self.ttl=ttl;self.capacity=capacity;self._cipher=AESGCM(os.urandom(32));self.store=store
         self._entries={};self._lock=threading.RLock();self._resource_locks={};self._boards={};self._details={};self._transport=transport
         self._network_lock=threading.Lock();self._next_request=0;self._slots=threading.BoundedSemaphore(2)
         self._genres=None
@@ -56,27 +56,49 @@ class TMDBConnection:
         if type(token) is not str:raise ValueError('Token')
         if token.startswith('Bearer '):token=token[7:]
         if not re.fullmatch(r'[A-Za-z0-9_.-]{20,2048}',token):raise ValueError('Token')
+        generation=self.store.save(user,binding,'tmdb',dict(access_token=token,enabled=True)) if self.store else secrets.token_hex(16)
         with self._lock:
             self._prune();key=(user,binding)
-            if key not in self._entries and len(self._entries)>=self.capacity:raise TMDBError('CUSTODY_CAPACITY')
+            if key not in self._entries and len(self._entries)>=self.capacity:
+                if not self.store:raise TMDBError('CUSTODY_CAPACITY')
+                self._entries.pop(next(iter(self._entries)),None)
             nonce=os.urandom(12)
-            self._entries[key]=dict(nonce=nonce,secret=self._cipher.encrypt(nonce,token.encode(),f'{user}:{binding}'.encode()),generation=secrets.token_hex(16),expires=time.monotonic()+self.ttl,verification='UNVERIFIED',last_error=None,last_success_at=None,last_checked_at=None,cooldown=0,last_verify=0)
+            self._entries[key]=dict(nonce=nonce,secret=self._cipher.encrypt(nonce,token.encode(),f'{user}:{binding}'.encode()),generation=generation,expires=time.monotonic()+self.ttl,verification='UNVERIFIED',last_error=None,last_success_at=None,last_checked_at=None,cooldown=0,last_verify=0,enabled=True)
         return self.status(user,binding)
     def _entry(self,user,binding):
-        with self._lock:self._prune();return self._entries.get((user,binding))
+        with self._lock:
+            self._prune();index=(user,binding);e=self._entries.get(index)
+            if self.store:
+                record=self.store.load(user,binding,'tmdb')
+                if not record:self._entries.pop(index,None);return None
+                if not e or e['generation']!=record['generation']:
+                    p=record['payload'];nonce=os.urandom(12)
+                    if len(self._entries)>=self.capacity:self._entries.pop(next(iter(self._entries)),None)
+                    e=dict(nonce=nonce,secret=self._cipher.encrypt(nonce,p['access_token'].encode(),f'{user}:{binding}'.encode()),generation=record['generation'],expires=time.monotonic()+self.ttl,verification=record['verification'],last_error=None,last_success_at=None,last_checked_at=None,cooldown=0,last_verify=0,enabled=p['enabled']);self._entries[index]=e
+                else:e['verification']=record['verification']
+            return e
     def status(self,user,binding):
         with self._lock:
             e=self._entry(user,binding)
-            return dict(configured=bool(e),verification=e['verification'] if e else 'DISCONNECTED',last_error=e['last_error'] if e else None,last_success_at=e['last_success_at'] if e else None,last_checked_at=e['last_checked_at'] if e else None,expires_in_seconds=max(0,int(e['expires']-time.monotonic())) if e else 0,retry_after=max(0,int(e['cooldown']-time.monotonic())+1) if e else 0,persistent=False,custody='ENCRYPTED_PROCESS_MEMORY',board_cache_seconds=BOARD_TTL,detail_cache_seconds=DETAIL_TTL,max_detail_refresh=MAX_DETAIL_REFRESH)
+            return dict(configured=bool(e),enabled=bool(e and e['enabled']),verification=('DISABLED' if not e['enabled'] else e['verification']) if e else 'DISCONNECTED',last_error=e['last_error'] if e else None,last_success_at=e['last_success_at'] if e else None,last_checked_at=e['last_checked_at'] if e else None,expires_in_seconds=None if self.store else max(0,int(e['expires']-time.monotonic())) if e else 0,retry_after=max(0,int(e['cooldown']-time.monotonic())+1) if e else 0,persistent=bool(self.store),custody='ENCRYPTED_DATABASE' if self.store else 'ENCRYPTED_PROCESS_MEMORY',board_cache_seconds=BOARD_TTL,detail_cache_seconds=DETAIL_TTL,max_detail_refresh=MAX_DETAIL_REFRESH)
     def disconnect(self,user,binding):
+        if self.store:self.store.enabled(user,binding,'tmdb',False)
         with self._lock:self._entries.pop((user,binding),None)
+    def enable(self,user,binding):
+        if not self.store:raise ValueError('No persisted configuration')
+        self.store.enabled(user,binding,'tmdb',True)
+        return self.status(user,binding)
+    def clear_user(self,user):
+        with self._lock:
+            for key in list(self._entries):
+                if key[0]==user:del self._entries[key]
     def disconnect_binding(self,binding):
         with self._lock:
             for key in list(self._entries):
                 if key[1]==binding:del self._entries[key]
     def _check_generation(self,user,binding,generation):
         e=self._entry(user,binding)
-        if not e or e['generation']!=generation:raise TMDBError('DISCONNECTED')
+        if not e or not e['enabled'] or e['generation']!=generation:raise TMDBError('DISCONNECTED')
         return e
     def _failed(self,user,binding,generation,error):
         if error.code in ('COOLDOWN','DISCONNECTED','NOT_CONNECTED'):return
@@ -85,9 +107,11 @@ class TMDBConnection:
             if e and e['generation']==generation:
                 e.update(last_error=error.code,last_checked_at=stamp(),cooldown=time.monotonic()+max(30,error.retry_after))
                 if error.code=='KEY_REJECTED':e['verification']='KEY_REJECTED'
+        if self.store and error.code=='KEY_REJECTED':self.store.verified(user,binding,'tmdb',generation,'KEY_REJECTED')
     def _get(self,user,binding,path,params=None):
         e=self._entry(user,binding)
         if not e:raise TMDBError('NOT_CONNECTED')
+        if not e['enabled']:raise TMDBError('DISABLED')
         if e['verification']=='KEY_REJECTED':raise TMDBError('KEY_REJECTED')
         if e['cooldown']>time.monotonic():raise TMDBError('COOLDOWN',max(1,int(e['cooldown']-time.monotonic())))
         generation=e['generation'];token=self._cipher.decrypt(e['nonce'],e['secret'],f'{user}:{binding}'.encode()).decode()
@@ -102,6 +126,7 @@ class TMDBConnection:
             if type(data) is not dict:raise TMDBError('INVALID_UPSTREAM')
             with self._lock:
                 e=self._check_generation(user,binding,generation);e.update(verification='VERIFIED',last_error=None,last_checked_at=stamp(),last_success_at=stamp())
+            if self.store:self.store.verified(user,binding,'tmdb',generation,'VERIFIED')
             return data
         except TMDBError as error:
             self._failed(user,binding,generation,error)
@@ -115,7 +140,9 @@ class TMDBConnection:
             hosts.remove(TMDBConnection._preferred_host);hosts.insert(0,TMDBConnection._preferred_host)
         for index,host in enumerate(hosts):
             if alive:alive()
-            req=urllib.request.Request('https://'+host+'/3/'+path+'?'+urllib.parse.urlencode(params),headers={'Authorization':'Bearer '+token,'Accept':'application/json'})
+            headers={'Accept':'application/json'}
+            if token:headers['Authorization']='Bearer '+token
+            req=urllib.request.Request('https://'+host+'/3/'+path+'?'+urllib.parse.urlencode(params),headers=headers)
             try:
                 with urllib.request.build_opener(NoRedirect,urllib.request.ProxyHandler({})).open(req,timeout=5) as response:raw=response.read(1500001)
                 if len(raw)>1500000:raise TMDBError('INVALID_UPSTREAM')
@@ -175,7 +202,9 @@ class TMDBConnection:
             doc=self._boards.get(channel) or self._read(self.folder/'boards'/(channel+'.json'))
             if doc and (doc.get('schema')!=1 or doc.get('channel')!=channel or type(doc.get('items')) is not list or age(doc)==float('inf')):doc=None
             if doc:self._boards[channel]=doc
-            if user is None or not self._entry(user,binding):return doc
+            if user is None:return doc
+            entry=self._entry(user,binding)
+            if not entry or not entry['enabled']:return doc
             if doc and age(doc)<(60 if force else BOARD_TTL):return doc
             e=self._entry(user,binding);generation=e['generation']
             try:

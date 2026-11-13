@@ -175,65 +175,60 @@ def install(app):
             end = datetime.utcnow()
             start = end - timedelta(days=days)
             with engine.connect() as c:
-                imp_rows = c.execute(select(imp.c.user_id, imp.c.channel, imp.c.movie_id, imp.c.position)
-                                     .where(imp.c.shown_at >= start, imp.c.shown_at < end)).all()
-                click_rows = c.execute(select(clicks.c.user_id, clicks.c.channel, clicks.c.movie_id)
-                                       .where(clicks.c.clicked_at >= start, clicks.c.clicked_at < end)).all()
-            imp_by_channel, click_by_channel = {}, {}
-            for _, channel, _, _ in imp_rows:
-                imp_by_channel[channel] = imp_by_channel.get(channel, 0) + 1
-            for _, channel, _ in click_rows:
-                click_by_channel[channel] = click_by_channel.get(channel, 0) + 1
-            channels = []
-            for channel in sorted(set(imp_by_channel) | set(click_by_channel)):
-                i = imp_by_channel.get(channel, 0)
-                clicks_n = click_by_channel.get(channel, 0)
-                channels.append({'channel': channel, 'impressions': i, 'clicks': clicks_n,
-                                 'ctr': round(clicks_n / i, 6) if i else None})
-            # ranking metrics: board order = best (smallest) position per movie
-            by_user = {}
-            for uid, channel, movie_id, position in imp_rows:
-                if movie_id is None:
-                    continue
-                key = (uid, channel)
-                entry = by_user.setdefault(key, {})
-                entry[movie_id] = min(position, entry.get(movie_id, position))
-            user_ids = {uid for uid, _ in by_user}
-            positive = {}
-            if user_ids:
-                with engine.connect() as c:
-                    for uid, movie_id, state in c.execute(select(states.c.user_id, states.c.movie_id, states.c.state)
-                                                          .where(states.c.user_id.in_(user_ids))):
-                        s = state or {}
-                        if s.get('watched') or s.get('favorite') or (isinstance(s.get('rating'), (int, float)) and s['rating'] >= 4):
-                            positive.setdefault(uid, set()).add(movie_id)
-            precisions, recalls, ndcgs = [], [], []
-            for (uid, _channel), ranking in by_user.items():
-                ranked = [mid for mid, _ in sorted(ranking.items(), key=lambda x: (x[1], x[0]))][:k]
-                relevant = positive.get(uid, set()) & set(ranking)
-                if not relevant:
-                    continue
-                hits = len([m for m in ranked if m in relevant])
-                precisions.append(hits / k)
-                recalls.append(hits / len(relevant))
-                dcg = sum(1 / math.log2(i + 2) for i, m in enumerate(ranked) if m in relevant)
-                idcg = sum(1 / math.log2(i + 2) for i in range(min(len(relevant), k)))
-                ndcgs.append(dcg / idcg if idcg else 0)
-            ranking = {
-                'k': k,
-                'users': len(precisions),
-                'precision_at_k': round(sum(precisions) / len(precisions), 6) if precisions else None,
-                'recall_at_k': round(sum(recalls) / len(recalls), 6) if recalls else None,
-                'ndcg_at_k': round(sum(ndcgs) / len(ndcgs), 6) if ndcgs else None,
-                'status': 'OK' if precisions else 'INSUFFICIENT_DATA',
-                'ground_truth': '本地已看/收藏/评分>=4（评估时点快照）',
-            }
-            return reply({'window': {'from': start.isoformat() + 'Z', 'to': end.isoformat() + 'Z', 'days': days},
-                          'impressions': len(imp_rows), 'clicks': len(click_rows),
-                          'ctr': round(len(click_rows) / len(imp_rows), 6) if imp_rows else None,
-                          'channels': channels, 'ranking': ranking,
-                          'definition_version': 'feedback-v1', 'as_of': end.isoformat() + 'Z'})
+                imp_rows = c.execute(select(imp.c.user_id, imp.c.channel, imp.c.movie_id,
+                    imp.c.position, imp.c.request_id, imp.c.period, imp.c.board_version,
+                    imp.c.context, imp.c.shown_at).where(imp.c.shown_at >= start,
+                    imp.c.shown_at < end, imp.c.board_version == 'visible-v2')).all()
+                click_rows = c.execute(select(clicks.c.user_id, clicks.c.request_id,
+                    clicks.c.position, clicks.c.clicked_at).where(clicks.c.clicked_at >= start,
+                    clicks.c.clicked_at < end)).all()
+                user_ids = {r[0] for r in imp_rows}
+                state_rows = c.execute(select(states.c.user_id, states.c.movie_id,
+                    states.c.state).where(states.c.user_id.in_(user_ids))).all() if user_ids else []
+            result = evaluate(imp_rows, click_rows, state_rows, k)
+            return reply(dict(result, window={'from': start.isoformat() + 'Z',
+                'to': end.isoformat() + 'Z', 'days': days},
+                definition_version='feedback-v2-visible-cohort', as_of=end.isoformat() + 'Z'))
         except ValueError:
             return reply(status=400, code='INVALID_INPUT')
 
     app.register_blueprint(bp)
+
+
+def evaluate(impressions, clicks, states, k):
+    """Visible exposure cohort; ranking per real request, descriptive state overlap.
+
+    These metrics are not causal attribution: the existing state table has no
+    historic event snapshot. Zero-hit requests remain in the denominator.
+    """
+    cohort = {(r[0], r[4], r[3]): r for r in impressions}
+    clicked = {tuple(r[:3]) for r in clicks if tuple(r[:3]) in cohort
+               and r[3] >= cohort[tuple(r[:3])][8]}
+    counts, boards, positive = {}, {}, {}
+    for uid, mid, state in states:
+        state = state or {}
+        if state.get('watched') or state.get('favorite') or (
+            type(state.get('rating')) in (int, float) and state['rating'] >= 4):
+            positive.setdefault(uid, set()).add(mid)
+    for key, r in cohort.items():
+        uid, channel, mid, position, req, period, version, context, _ = r
+        c = counts.setdefault(channel, [0, 0]); c[0] += 1; c[1] += key in clicked
+        if mid is not None:
+            boards.setdefault((uid, req, channel, period, version, context), []).append((position, mid))
+    values = []
+    for key, entries in boards.items():
+        relevant = positive.get(key[0], set())
+        ranked = [(pos, mid) for pos, mid in sorted(entries) if pos <= k]
+        hits = sum(mid in relevant for _, mid in ranked)
+        dcg = sum(1 / math.log2(pos + 1) for pos, mid in ranked if mid in relevant)
+        ideal = sum(1 / math.log2(i + 2) for i in range(min(k, len(relevant))))
+        values.append((hits / k, hits / len(relevant) if relevant else 0, dcg / ideal if ideal else 0))
+    ranking = dict(k=k, users=len({key[0] for key in boards}), batches=len(boards),
+        status='OK' if values else 'INSUFFICIENT_DATA',
+        ground_truth='当前全库已看/收藏/评分≥4；按可见榜单批次计算，包含零命中；非转化归因')
+    for i, name in enumerate(('precision_at_k', 'recall_at_k', 'ndcg_at_k')):
+        ranking[name] = round(sum(v[i] for v in values) / len(values), 6) if values else None
+    return dict(impressions=len(cohort), clicks=len(clicked),
+        ctr=round(len(clicked) / len(cohort), 6) if cohort else None,
+        channels=[dict(channel=ch, impressions=n, clicks=c, ctr=round(c/n, 6))
+                  for ch, (n, c) in sorted(counts.items())], ranking=ranking)

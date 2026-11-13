@@ -1,20 +1,21 @@
 <script setup lang="ts">
-import {ref,computed,onMounted,onBeforeUnmount,watch} from 'vue'
+import {ref,shallowRef,computed,onMounted,onBeforeUnmount,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
 import M9Sidebar from '../components/M9Sidebar.vue'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
-import {trackImpressions,trackClick} from '../services/recommendationFeedback'
+import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({})
 const tmdbBusy=ref(false),tmdbNotice=ref('')
 const keyword=ref(''),genre=ref(''),yearFrom=ref(''),yearTo=ref(''),runtime=ref(''),minVotes=ref(''),localOnly=ref(false),unwatched=ref(false)
 const channel=computed(()=>String(route.query.channel||'daily'))
 const selected=computed(()=>channels.value.find(c=>c.id===channel.value))
-let controller:AbortController|undefined,sequence=0,boardRequest=''
+let controller:AbortController|undefined,sequence=0
+const feedback=shallowRef<ReturnType<typeof createFeedbackBoard>>()
 async function get(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});const body=await r.json();if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':'推荐频道暂时无法读取，请重试。');return body.data}
 function sync(){const q=route.query;keyword.value=String(q.keyword||'');genre.value=String(q.genre||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');runtime.value=String(q.runtime_max||'');minVotes.value=String(q.min_votes||'');localOnly.value=q.scope==='local';unwatched.value=q.unwatched==='true'}
-async function load(){sync();controller?.abort();controller=new AbortController();const id=++sequence;loading.value=true;error.value='';data.value=null
- try{const params=new URLSearchParams({channel:channel.value,limit:'36'});for(const key of ['keyword','genre','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]));const result=await get('recommendations?'+params,controller.signal);if(id===sequence){data.value=result;boardRequest=await trackImpressions({channel:channel.value,period:result.period,context:'recommendations',items:result.items})||''}}
+async function load(){sync();controller?.abort();controller=new AbortController();const id=++sequence;loading.value=true;error.value='';data.value=null;feedback.value?.dispose()
+ try{const params=new URLSearchParams({channel:channel.value,limit:'36'});for(const key of ['keyword','genre','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]));const result=await get('recommendations?'+params,controller.signal);if(id===sequence){data.value=result;feedback.value=createFeedbackBoard({channel:channel.value,period:result.period,context:'recommendations',items:result.items})}}
  catch(e){if(id===sequence&&!controller.signal.aborted)error.value=(e as Error).message}finally{if(id===sequence)loading.value=false}}
 async function updateTMDB(){
  if(tmdbBusy.value||loading.value)return
@@ -29,20 +30,20 @@ async function updateTMDB(){
 }
 function change(id:string){router.push({path:'/recommendations',query:{...route.query,channel:id}})}
 function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)load();else router.push(target)}
-function detail(movie:any){trackClick(boardRequest,(data.value?.items?.indexOf(movie)??-1)+1);router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
+function detail(movie:any){feedback.value?.click((data.value?.items?.indexOf(movie)??-1)+1);router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
 function stamp(value?:string){if(!value)return '未提供';const d=new Date(value);return Number.isNaN(d.getTime())?'未提供':d.toLocaleString('zh-CN',{hour12:false})}
 function money(value:number){return new Intl.NumberFormat('zh-CN',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(value)}
 const onBehavior=()=>load()
 onMounted(async()=>{try{const [c,g]=await Promise.all([get('recommendation-channels'),get('genres')]);channels.value=c.items;genres.value=g.items;await load()}catch(e){error.value=(e as Error).message;loading.value=false}window.addEventListener('mi2-behavior-changed',onBehavior);window.addEventListener('mi2-tmdb-status',onBehavior)})
 watch(()=>route.fullPath,()=>{if(channels.value.length)load()})
-onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
+onBeforeUnmount(()=>{feedback.value?.dispose();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
 </script>
 <template>
  <div class="recommend-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="expanded=$event"/>
  <main class="recommend-main"><header><div><h1>发现下一部好电影</h1><p>从热门话题到个人片单，找到此刻想看的故事。</p></div><router-link to="/home">返回影院首页</router-link></header>
  <nav class="channel-nav" aria-label="推荐频道"><button v-for="c in channels" :key="c.id" :aria-pressed="channel===c.id" :class="{active:channel===c.id}" @click="change(c.id)">{{c.title}}</button></nav>
  <section class="board-heading"><h2>{{selected?.title||'推荐频道'}}</h2><p>{{selected?.description}}</p></section>
- <div class="tmdb-toolbar"><span>{{data?.tmdb_connection?.last_error?'TMDB 在线读取未成功 · 使用缓存':data?.tmdb_connection?.configured?'TMDB 在线连接已启用 · 按需获取':'TMDB 未连接 · 使用现有缓存'}}</span><router-link to="/ai?settings=tmdb">TMDB 数据连接设置</router-link><button v-if="data?.tmdb_connection?.configured" :disabled="tmdbBusy||loading" @click="updateTMDB">{{tmdbBusy?'正在更新…':selected?.public?'立即更新此热榜':'更新前 '+(data?.tmdb_connection?.max_detail_refresh||6)+' 部影片资料'}}</button></div><p v-if="tmdbNotice" role="status" class="notice">{{tmdbNotice}}</p>
+ <div class="tmdb-toolbar"><span>{{data?.tmdb_connection?.last_error?'TMDB 在线读取未成功 · 使用缓存':data?.tmdb_connection?.configured&&!data?.tmdb_connection?.enabled?'TMDB 连接已停用 · 使用缓存':data?.tmdb_connection?.enabled?'TMDB 在线连接已启用 · 按需获取':'TMDB 未连接 · 使用现有缓存'}}</span><router-link to="/ai?settings=tmdb">TMDB 数据连接设置</router-link><button v-if="data?.tmdb_connection?.enabled" :disabled="tmdbBusy||loading" @click="updateTMDB">{{tmdbBusy?'正在更新…':selected?.public?'立即更新此热榜':'更新前 '+(data?.tmdb_connection?.max_detail_refresh||6)+' 部影片资料'}}</button></div><p v-if="tmdbNotice" role="status" class="notice">{{tmdbNotice}}</p>
  <form class="filters" @submit.prevent="filter">
   <label>电影名称<input v-model="keyword" maxlength="100" placeholder="搜索当前频道"/></label>
   <label>类型<select v-model="genre"><option value="">全部类型</option><option v-for="g in genres" :key="g.genre_id" :value="g.name_zh">{{g.name_zh}}</option></select></label>
@@ -58,9 +59,9 @@ onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-behavio
  <template v-else-if="data"><div class="provenance"><span>{{selected?.public?'官方榜单采集':'库内资料更新'}}：{{stamp(data.source_as_of)}}</span><span v-if="data.period">片单周期：{{data.period}} · 北京时间</span><span>{{data.candidate_count||0}} 部符合条件 · 零模型调用</span><button @click="load">重新读取</button></div>
  <p v-if="data.status==='STALE'" class="notice" role="status">当前为缓存榜单，请以采集时间为准。</p><p v-for="note in data.limitations" :key="note" class="notice">{{note}}</p>
  <div v-if="!data.items.length" class="state"><h3>{{data.status==='UNAVAILABLE'?'官方榜单尚未就绪':'暂无符合条件的电影'}}</h3><p>可以减少筛选条件；个人频道需要相应的收藏、评分或想看记录。</p><router-link to="/movies">浏览电影并完善偏好</router-link></div>
- <div v-else class="poster-grid"><article v-for="movie in data.items" :key="movie.key" class="movie-card" :data-movie-id="movie.movie_id||''">
+ <div v-else class="poster-grid"><article v-for="(movie,index) in data.items" :key="sequence+':'+movie.key" v-feedback="{board:feedback,position:Number(index)+1}" class="movie-card" :data-movie-id="movie.movie_id||''">
   <button v-if="movie.in_catalog" class="board-poster" :aria-label="'查看《'+movie.title+'》详情'" @click="detail(movie)"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">{{movie.source_rank?'#'+movie.source_rank:movie.rank}}</span></button>
-  <a v-else class="board-poster" @click="trackClick(boardRequest,(data.value?.items?.indexOf(movie)??-1)+1)" :href="movie.tmdb_url" target="_blank" rel="noopener noreferrer" :aria-label="'在 TMDB 查看《'+movie.title+'》（新标签页）'"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">#{{movie.source_rank}}</span><span class="external">库外影片 · TMDB</span></a>
+  <a v-else class="board-poster" @click="feedback?.click(Number(index)+1)" :href="movie.tmdb_url" target="_blank" rel="noopener noreferrer" :aria-label="'在 TMDB 查看《'+movie.title+'》（新标签页）'"><img v-if="movie.poster&&!failed[movie.key]" :src="movie.poster" :alt="movie.title+'海报'" loading="lazy" @error="failed[movie.key]=true"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="rank">#{{movie.source_rank}}</span><span class="external">库外影片 · TMDB</span></a>
   <h3>{{movie.title}}</h3><p class="meta">{{movie.release_year||'年份未提供'}}<template v-if="movie.runtime_minutes"> · {{movie.runtime_minutes}} 分钟</template></p><p class="genre">{{movie.genres?.join(' / ')||'类型未提供'}}</p>
   <p v-if="channel==='revenue'" class="metric">累计 {{money(movie.revenue)}}<small v-if="movie.revenue_as_of" class="meta"> · 资料 {{new Date(movie.revenue_as_of).toLocaleDateString('zh-CN')}}</small></p><p v-else-if="movie.tmdb_rating!=null" class="metric">TMDB {{movie.tmdb_rating.toFixed(1)}}<span> · {{movie.vote_count.toLocaleString()}} 票</span></p>
   <p v-if="selected?.public&&movie.tmdb_popularity!=null" class="meta">热度 {{movie.tmdb_popularity.toFixed(1)}}</p><p class="reason">{{movie.reasons?.join('；')}}</p>

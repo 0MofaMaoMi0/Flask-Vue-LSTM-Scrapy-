@@ -1,7 +1,7 @@
 """Delete recommendation feedback older than the retention window (default 180 days)."""
-import argparse
+import argparse, json
 from datetime import datetime, timedelta
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from app import create_app
 from catalog.recommendation_feedback import tables
 
@@ -16,5 +16,5 @@ imp, clicks = tables(app.config['M6_ACTIVITY_SCHEMA'])
 cutoff = datetime.utcnow() - timedelta(days=args.days)
 with engine.begin() as c:
     a = c.execute(delete(clicks).where(clicks.c.clicked_at < cutoff)).rowcount
-    b = c.execute(delete(imp).where(imp.c.shown_at < cutoff)).rowcount
-print({'cutoff': cutoff.isoformat() + 'Z', 'clicks_deleted': a, 'impressions_deleted': b})
+    b = c.execute(delete(imp).where(imp.c.shown_at < cutoff, ~select(clicks.c.click_id).where(clicks.c.user_id==imp.c.user_id, clicks.c.request_id==imp.c.request_id, clicks.c.position==imp.c.position).exists())).rowcount
+print(json.dumps({'cutoff': cutoff.isoformat() + 'Z', 'clicks_deleted': a, 'impressions_deleted': b}))

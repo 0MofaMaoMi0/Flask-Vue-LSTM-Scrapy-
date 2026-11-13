@@ -20,10 +20,11 @@ async function refreshStatus(){try{status.value=await jsonRequest('status');if(s
 async function saveConfig(){
  if(configBusy.value)return
  configBusy.value=true;error.value='';notice.value=''
- try{await jsonRequest('config','POST',{provider:'deepseek',model:model.value,api_key:apiKey.value,daily_calls:null,max_output_tokens:Number(output.value),enabled:true,consent:consent.value,cache_enabled:cacheEnabled.value});await refreshStatus();notice.value='已短期连接。保存没有调用模型；接下来的智能对话将使用你的服务商账户。'}catch(e){error.value=(e as Error).message}finally{apiKey.value='';configBusy.value=false}
+ try{await jsonRequest('config','POST',{provider:'deepseek',model:model.value,api_key:apiKey.value,daily_calls:null,max_output_tokens:Number(output.value),enabled:true,consent:consent.value,cache_enabled:cacheEnabled.value});await refreshStatus();notice.value='密钥已按账户加密保存到数据库；保存没有调用模型。'}catch(e){error.value=(e as Error).message}finally{apiKey.value='';configBusy.value=false}
 }
 async function verifyKey(){configBusy.value=true;error.value='';try{await jsonRequest('verify','POST',{});await refreshStatus();notice.value='已完成模型列表检查，没有发送生成请求。'}catch(e){error.value=(e as Error).message;await refreshStatus()}finally{configBusy.value=false}}
-async function disconnect(){configBusy.value=true;try{await jsonRequest('disconnect','POST',{});apiKey.value='';await refreshStatus();notice.value='已断开并移除短期托管密钥；在途请求将尝试取消，已发送的调用仍可能计费。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
+async function disconnect(){configBusy.value=true;try{await jsonRequest('disconnect','POST',{});apiKey.value='';await refreshStatus();notice.value='连接已停用，数据库密钥保留；已发送的调用仍可能计费。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
+async function enableSaved(){configBusy.value=true;try{await jsonRequest('enable','POST',{});await refreshStatus();notice.value='已启用保存的密钥，没有调用模型。'}catch(e){error.value=(e as Error).message}finally{configBusy.value=false}}
 function consume(event:string,data:any){
  if(event==='draft')draft.value=data.text||''
  if(event==='result'){
@@ -66,16 +67,16 @@ onBeforeUnmount(()=>{apiKey.value='';controller?.abort()})
 <button :aria-expanded="open" aria-controls="movie-assistant-panel" @click="open=!open">{{open?'收起电影助手':'打开电影助手'}}</button>
 <div v-if="open" id="movie-assistant-panel" class="assistant-panel">
 <h2>电影助手</h2><p>理解你的观影想法，结合电影库与个人偏好，比较候选并解释推荐。</p>
-<p class="assistant-note" role="status">{{status.cloud_available?'已启用你的 '+status.model+' · 提交对话将调用模型，由你的服务商账户计费':'未连接个人模型 · 当前使用本地兜底'}}<br>密钥仅在当前登录会话中短期托管，30分钟到期或服务重启后需重新连接。</p>
+<p class="assistant-note" role="status">{{status.cloud_available?'已启用你的 '+status.model+' · 提交对话将调用模型，由你的服务商账户计费':'未连接个人模型 · 当前使用本地兜底'}}<br>密钥默认按账户加密保存在数据库；退出登录和服务重启后保留，注销账户时删除。</p>
 <details class="model-settings"><summary>个人模型连接与费用设置</summary>
 <form @submit.prevent="saveConfig" autocomplete="off">
 <label for="byok-model">DeepSeek 模型</label><select id="byok-model" v-model="model" :disabled="configBusy||busy"><option value="deepseek-flash">DeepSeek Flash</option><option value="deepseek-v4-pro">DeepSeek V4 Pro（通常费用更高）</option></select>
 <label for="byok-key">API Key（不会回显或保存到浏览器）</label><input id="byok-key" v-model="apiKey" type="password" autocomplete="off" spellcheck="false" autocapitalize="off" maxlength="512" required :disabled="configBusy||busy"/>
 <div class="settings-grid"><p class="assistant-note">每日及每轮模型调用次数：不限（按你的设置）</p><label>每次最大输出 Token<input v-model.number="output" type="number" min="256" max="8192" required/></label></div>
 <label class="check"><input v-model="consent" type="checkbox" required/>我同意向所选服务商发送对话和必要的电影/偏好信息；启用后提交智能请求可能产生费用。</label>
-<label class="check"><input v-model="cacheEnabled" type="checkbox"/>允许5分钟内复用相同用户、上下文和电影/偏好版本的回答（默认关闭）</label><button type="submit" :disabled="configBusy||busy||!consent||!apiKey">保存并启用个人模型</button>
+<label class="check"><input v-model="cacheEnabled" type="checkbox"/>允许5分钟内复用相同用户、上下文和电影/偏好版本的回答（默认关闭）</label><button type="submit" :disabled="configBusy||busy||!consent||!apiKey||!status.persistent">保存并启用个人模型</button>
 </form>
-<div class="assistant-controls"><button type="button" :disabled="configBusy||busy||!status.configured" @click="verifyKey">检查 Key 与模型列表</button><button type="button" :disabled="configBusy||!status.configured" @click="disconnect">断开连接并移除 Key</button></div>
+<div class="assistant-controls"><button v-if="status.persistent&&status.configured&&!status.enabled" type="button" :disabled="configBusy||busy" @click="enableSaved">启用已保存的密钥</button><button type="button" :disabled="configBusy||busy||!status.configured" @click="verifyKey">检查 Key 与模型列表</button><button type="button" :disabled="configBusy||!status.enabled" @click="disconnect">停用连接（保留密钥）</button></div>
 <p class="assistant-note">状态：{{status.verification||'DISCONNECTED'}}；今日已派发 {{status.daily_calls_used??0}} / {{status.daily_calls??'不限'}} 次（UTC日）。列表检查不发送生成请求。不设每日或每轮调用次数上限；仍受90秒超时、并发和上下文长度保护。金额未取得可靠账单时显示未知。</p>
 <label class="check"><input v-model="paidConsent" type="checkbox"/>我明确同意发送一次可能计费的模型连接测试。</label><button type="button" :disabled="busy||configBusy||!paidConsent||!status.enabled" @click="testConnection">发送模型测试（可能计费）</button>
 </details>

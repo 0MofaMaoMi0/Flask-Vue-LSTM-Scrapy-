@@ -57,11 +57,15 @@ def create_app(overrides=None):
     if app.config.get('M6_ISOLATED') is True:
         from catalog.m6_business import install_m6_business
         install_m6_business(app)
+        app.config.setdefault("M7_DATABASE_URL", os.environ.get("MI2_M7_DATABASE_URL", ""))
+        from assistant.credential_store import install as install_credentials
+        install_credentials(app)
         from catalog.tmdb_api import install as install_tmdb
         install_tmdb(app)
-        app.config.setdefault("M7_DATABASE_URL", os.environ.get("MI2_M7_DATABASE_URL", ""))
         from assistant.api_v2 import install as install_assistant
         install_assistant(app)
+        from assistant.account_api import install as install_account
+        install_account(app)
         from analytics.api import install as install_analytics
         install_analytics(app)
         from admin_api import install as install_admin
@@ -78,6 +82,10 @@ def create_app(overrides=None):
             try:
                 with engine.connect() as connection:
                     verify_m6_connection(connection, app.config)
+                credentials=app.extensions.get('credential_store')
+                if credentials:
+                    from sqlalchemy import select
+                    with credentials.engine.connect() as connection:connection.execute(select(credentials.table.c.user_id).limit(0))
                 return jsonify(code=0, message='ok', data={'status':'ready'})
             except Exception:
                 return jsonify(code=50310, message='database unavailable', data=None), 503
