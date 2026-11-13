@@ -97,4 +97,4 @@
     @media(max-width:400px){.welcome h1.static-welcome{font-size:clamp(29px,8.4vw,39px);}}
     @media(prefers-reduced-motion:reduce){.wall-grid .track{animation:none!important}button.liquid{transition:none!important}button.liquid::before{display:none}}
   
-button:disabled{cursor:wait;opacity:.6}.route-enter-active,.route-leave-active{transition:opacity .72s ease}.route-enter-from,.route-leave-to{opacity:0!important}.route-leave-active{pointer-events:none!important}.home-placeholder{color:var(--ivory);text-align:center;padding:30px}.home-placeholder a{display:block;margin-top:20px}
+button:disabled{cursor:wait;opacity:.6}.home-placeholder{color:var(--ivory);text-align:center;padding:30px}.home-placeholder a{display:block;margin-top:20px}
