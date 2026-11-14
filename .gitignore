@@ -11,6 +11,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# Frontend application sources must remain tracked; lib/ above is for Python.
+!movie-web/src/lib/
+!movie-web/src/lib/**
 lib64/
 parts/
 sdist/
