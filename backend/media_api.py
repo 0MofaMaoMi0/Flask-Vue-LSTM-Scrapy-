@@ -19,6 +19,36 @@ ALLOWED_HOSTS = {
 }
 MAX_BYTES = 8 * 1024 * 1024
 TIMEOUT = 15
+CACHE_HEADERS = {'Cache-Control': 'public, max-age=86400'}
+
+
+def image_content_type(data):
+    """Return the canonical type for a supported image header, or None."""
+    if data.startswith(b'\xff\xd8\xff'):
+        return 'image/jpeg'
+    if data.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if data.startswith((b'GIF87a', b'GIF89a')):
+        return 'image/gif'
+    if len(data) >= 12 and data[:4] == b'RIFF' and data[8:12] == b'WEBP':
+        return 'image/webp'
+    return None
+
+
+def cached_response(target):
+    """Serve an existing cache entry without deleting or rewriting it."""
+    try:
+        if target.stat().st_size > MAX_BYTES:
+            return jsonify(code='TOO_LARGE', data=None), 413
+        data = target.read_bytes()
+    except OSError:
+        return jsonify(code='MEDIA_CACHE_UNAVAILABLE', data=None), 503
+    if len(data) > MAX_BYTES:
+        return jsonify(code='TOO_LARGE', data=None), 413
+    ctype = image_content_type(data)
+    if ctype is None:
+        return jsonify(code='NOT_AN_IMAGE', data=None), 415
+    return Response(data, mimetype=ctype, headers=CACHE_HEADERS)
 
 
 def install(app):
@@ -35,8 +65,8 @@ def install(app):
             return jsonify(code='HOST_NOT_ALLOWED', data=None), 400
         digest = hashlib.sha256(raw.encode('utf-8')).hexdigest()
         target = cache_root / digest[:2] / (digest + '.img')
-        if target.is_file() and target.stat().st_size > 0:
-            return Response(target.read_bytes(), mimetype='image/jpeg', headers={'Cache-Control':'public, max-age=86400'})
+        if target.is_file():
+            return cached_response(target)
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
         except Exception:
@@ -47,21 +77,24 @@ def install(app):
         })
         try:
             with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-                ctype = (response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
-                if not ctype.startswith('image/'):
+                upstream_type = (response.headers.get('Content-Type') or '').split(';')[0].strip().lower()
+                if not upstream_type.startswith('image/'):
                     return jsonify(code='NOT_AN_IMAGE', data=None), 415
                 data = response.read(MAX_BYTES + 1)
         except Exception:
             return jsonify(code='UPSTREAM_UNAVAILABLE', data=None), 502
         if len(data) > MAX_BYTES:
             return jsonify(code='TOO_LARGE', data=None), 413
-        if not (data.startswith(b'\xff\xd8') or data.startswith(b'\x89PNG')
-                or data[:4] == b'RIFF' or data.startswith(b'GIF8')):
+        ctype = image_content_type(data)
+        if ctype is None:
             return jsonify(code='NOT_AN_IMAGE', data=None), 415
         try:
-            target.write_bytes(data)
-            return Response(data, mimetype=ctype, headers={'Cache-Control':'public, max-age=86400'})
+            with open(target, 'xb') as cached:
+                cached.write(data)
+        except FileExistsError:
+            return cached_response(target)
         except Exception:
             return jsonify(code='MEDIA_CACHE_UNAVAILABLE',data=None),503
+        return Response(data, mimetype=ctype, headers=CACHE_HEADERS)
 
     app.register_blueprint(bp)

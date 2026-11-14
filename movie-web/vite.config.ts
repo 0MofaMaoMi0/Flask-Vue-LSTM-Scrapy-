@@ -1,10 +1,11 @@
 import {defineConfig,loadEnv} from 'vite'
 import vue from '@vitejs/plugin-vue'
+import {flagIsosPlugin} from './tools/vite-plugin-flag-isos.mjs'
 
 export default defineConfig(({mode})=>{
   const target=loadEnv(mode,'.','MI2_').MI2_API_TARGET||'http://127.0.0.1:8091'
   return {
-    plugins:[vue()],
+    plugins:[vue(),flagIsosPlugin()],
     // Keep the live app cache separate from temporary SSR/test Vite instances.
     cacheDir:'../.local-cache/movie-web-vite',
     optimizeDeps:{include:['echarts/core','echarts/charts','echarts/components','echarts/renderers']},

@@ -192,17 +192,30 @@ class TMDBConnection:
         try:
             with temp.open('x',encoding='utf-8') as stream:
                 os.chmod(temp,0o600);json.dump(doc,stream,ensure_ascii=False,separators=(',',':'))
-            os.replace(temp,target)
+            # Windows readers may briefly hold the published file; os.replace then
+            # raises PermissionError. Retry the same complete temp, bounded to 3 tries.
+            for attempt in range(3):
+                if attempt==1:time.sleep(0.005)
+                elif attempt==2:time.sleep(0.02)
+                try:
+                    os.replace(temp,target);break
+                except PermissionError:
+                    if attempt==2:raise
         except OSError:raise TMDBError('CACHE_UNAVAILABLE') from None
     def _resource_lock(self,key):
         with self._lock:return self._resource_locks.setdefault(key,threading.Lock())
+    def _cached_snapshot(self,channel):
+        doc=self._boards.get(channel) or self._read(self.folder/'boards'/(channel+'.json'))
+        if doc and (doc.get('schema')!=1 or doc.get('channel')!=channel or type(doc.get('items')) is not list or age(doc)==float('inf')):return None
+        return doc
     def snapshot(self,channel,user=None,binding=None,*,force=False):
         if channel not in BOARD_PATHS:raise ValueError('Channel')
+        # Public readers must not wait behind an in-flight authenticated refresh.
+        # Refreshes publish complete documents by assignment and atomic file replace.
+        if user is None:return self._cached_snapshot(channel)
         with self._resource_lock(channel):
-            doc=self._boards.get(channel) or self._read(self.folder/'boards'/(channel+'.json'))
-            if doc and (doc.get('schema')!=1 or doc.get('channel')!=channel or type(doc.get('items')) is not list or age(doc)==float('inf')):doc=None
+            doc=self._cached_snapshot(channel)
             if doc:self._boards[channel]=doc
-            if user is None:return doc
             entry=self._entry(user,binding)
             if not entry or not entry['enabled']:return doc
             if doc and age(doc)<(60 if force else BOARD_TTL):return doc

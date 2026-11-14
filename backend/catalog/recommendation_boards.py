@@ -119,7 +119,9 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     result['mode']='MYSQL_CATALOG_POPULAR' if channel=='popular' else 'MYSQL_AUTHENTICATED_RECOMMENDATION' if channel=='personal' else 'MYSQL_RECOMMENDATION_CHANNEL'
     ranked=[];reasons={};scores={};source_ranks={};matching_count=None
     if channel in PUBLIC:
-        snapshot=public_snapshot(channel)
+        # Browsing uses published snapshots; explicit TMDB refresh and scheduled
+        # jobs update them without tying a catalog GET to external network work.
+        snapshot=public_snapshot(channel,online=False)
         if snapshot is None:return dict(result,status='UNAVAILABLE',source='TMDB_OFFICIAL_SNAPSHOT',limitations=['尚未取得该频道官方快照，不以其他榜单替代。'])
         captured=datetime.fromisoformat(snapshot['captured_at']);age=(now-captured).total_seconds()
         result.update(source='TMDB_OFFICIAL_SNAPSHOT',source_as_of=snapshot['captured_at'],scope='LOCAL_SUBSET_OF_TMDB_BOARD' if scope=='local' else 'TMDB_BOARD_LOCAL_AND_EXTERNAL',snapshot_id=hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()[:20],status='STALE' if age>21600 else 'OK')

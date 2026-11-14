@@ -10,40 +10,136 @@ const router=useRouter(),auth=useAuthStore(),movies=ref<any[]>([]),behavior=ref<
 const personalIds=ref<number[]>([]),popularIds=ref<number[]>([]),catalogTotal=ref(0),homeBoards:Record<string,ReturnType<typeof createFeedbackBoard>>={}
 const channels=computed(()=>[{id:'personal',title:'每日为你推荐',note:'同日稳定 · 根据你的收藏、想看与评分',items:personalIds.value.map(id=>movies.value.find(m=>m.movie_id===id)).filter(Boolean)},{id:'popular',title:'TMDB 热门',note:'官方榜单 · 本地已收录子集',items:popularIds.value.map(id=>movies.value.find(m=>m.movie_id===id)).filter(Boolean)}])
 const rail=computed(()=>channels.value.flatMap(c=>c.items))
-function poster(m:any){return m.poster||art[String(m.movie_id)]?.poster}
+const posterFailures=ref<Record<string,boolean>>({})
+function poster(m:any){
+  const assets=(m.assets||[]).filter((a:any)=>a.asset_type==='poster').map((a:any)=>{
+    const p=a.source_path
+    return typeof p==='string'&&p.startsWith('/')&&!p.startsWith('//')?'https://image.tmdb.org/t/p/w500'+p:p
+  })
+  const candidates=[m.poster,m.poster_fallback,...assets,art[String(m.movie_id)]?.poster]
+    .filter((p:any):p is string=>typeof p==='string'&&(p.startsWith('/')||/^https?:\/\//.test(p))&&!p.startsWith('//'))
+    .map(p=>/^https?:\/\//.test(p)?'/api/media/poster?u='+encodeURIComponent(p):p)
+  return [...new Set(candidates)].find(p=>!posterFailures.value[m.movie_id+':'+p])
+}
+function posterError(movie:any,event:Event){
+  const src=(event.target as HTMLImageElement).getAttribute('src')
+  if(src)posterFailures.value[movie.movie_id+':'+src]=true
+  posterLoaded.value[movie.movie_id]=false
+}
 function backdrop(m:any){const a=(m.assets||[]).find((x:any)=>x.asset_type==='backdrop'&&x.is_primary)||(m.assets||[]).find((x:any)=>x.asset_type==='backdrop');const p=a?.source_path;if(p?.startsWith('/'))return '/api/media/poster?u='+encodeURIComponent('https://image.tmdb.org/t/p/w1280'+p);return p?.startsWith('http')?'/api/media/poster?u='+encodeURIComponent(p):art[String(m.movie_id)]?.backdrop||poster(m)}
 const film=computed(()=>movies.value.find(m=>m.movie_id===featuredId.value)||movies.value[0])
 const counts=computed(()=>{const c={seen:0,want:0,fav:0};for(const s of Object.values(behavior.value||{}) as any[]){if(s?.watched)c.seen++;if(s?.want)c.want++;if(s?.favorite)c.fav++}return c})
-const controller=new AbortController()
 function mark(movie:any){const s=behavior.value[String(movie.movie_id)];if(!s)return '';if(s.watched)return '已看';if(s.want)return '想看';if(s.favorite)return '已收藏';return ''}
 function genres(movie:any){return (movie?.genres||[]).map((g:any)=>typeof g==='string'?g:g.name_zh).join(' / ')}
-async function api(path:string){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:controller.signal});if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。');return (await r.json()).data}
-async function load(){for(const b of Object.values(homeBoards))b.dispose();loading.value=true;error.value='';try{
-  const [personal,popular]=await Promise.all([api('recommendations?channel=daily&limit='+RAIL),api('recommendations?channel=popular&scope=local&limit='+RAIL)])
-  personalIds.value=personal.items.map((m:any)=>m.movie_id);popularIds.value=popular.items.map((m:any)=>m.movie_id);catalogTotal.value=personal.catalog_total
-  movies.value=[...new Map([...popular.items,...personal.items].map((m:any)=>[m.movie_id,m])).values()]
-  const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
-  featuredId.value=movies.value.find(m=>String(m.movie_id)===saved)?.movie_id||movies.value.find(m=>art[String(m.movie_id)]?.backdrop)?.movie_id||movies.value[0]?.movie_id||0
-  for(const c of channels.value)homeBoards[c.id]=createFeedbackBoard({channel:c.id==='personal'?'daily':c.id,context:'home',items:c.items})
-  loading.value=false
-  const wanted=Array.from(new Set([featuredId.value,...rail.value.map(m=>m!.movie_id)]))
-  const [details,state]=await Promise.all([Promise.all(wanted.map(id=>api('movies/'+id).catch(()=>null))),api('behavior').catch(()=>null)])
-  if(state)behavior.value=state.state||{}
-  const byId=new Map<number,any>();for(const d of details)if(d)byId.set(d.movie_id,d)
-  movies.value=movies.value.map(m=>byId.has(m.movie_id)?{...m,...byId.get(m.movie_id)}:m)
-
-}catch(e){if(!controller.signal.aborted)error.value=(e as Error).message}finally{loading.value=false}}
+const HOME_REQUEST_TIMEOUT_MS=8000
+class HomeRequestError extends Error {
+  status?:number
+  timedOut:boolean
+  constructor(message:string,options:{status?:number;timedOut?:boolean}={}){super(message);this.name='HomeRequestError';this.status=options.status;this.timedOut=options.timedOut===true}
+}
+let loadController:AbortController|undefined
+let loadSequence=0
+const lifeController=new AbortController()
+let raf=0
+let unmounted=false
+const railErrors=ref<Record<string,string>>({})
+const hasRailError=computed(()=>Object.keys(railErrors.value).length>0)
+function isUnauthorized(error:unknown){return error instanceof HomeRequestError&&error.status===401}
+function clearBoards(){for(const b of Object.values(homeBoards))b.dispose();for(const key of Object.keys(homeBoards))delete homeBoards[key]}
+async function api(path:string,signal:AbortSignal=lifeController.signal):Promise<any>{
+  if(signal.aborted)throw new HomeRequestError('请求已取消。')
+  const request=new AbortController()
+  let timedOut=false
+  const timer=setTimeout(()=>{timedOut=true;request.abort()},HOME_REQUEST_TIMEOUT_MS)
+  const onAbort=()=>request.abort()
+  signal.addEventListener('abort',onAbort,{once:true})
+  try{
+    const response=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:request.signal})
+    if(!response.ok)throw new HomeRequestError(response.status===401?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。',{status:response.status})
+    return (await response.json()).data
+  }catch(error){
+    if(timedOut)throw new HomeRequestError('请求超时，请重新加载。',{timedOut:true})
+    if(error instanceof HomeRequestError)throw error
+    if(signal.aborted)throw new HomeRequestError('请求已取消。')
+    throw new HomeRequestError('电影目录暂时不可用，请重试。')
+  }finally{
+    clearTimeout(timer)
+    signal.removeEventListener('abort',onAbort)
+  }
+}
+function railFailure(id:string,error:unknown,otherOk:boolean){
+  const label=id==='personal'?'每日推荐':'TMDB 热门'
+  let message:string
+  if(isUnauthorized(error))message='登录已失效，请重新登录。'
+  else if(error instanceof HomeRequestError&&error.timedOut)message=`${label}读取超时，已停止等待。`
+  else message=`${label}暂时无法读取，请稍后重试。`
+  return otherOk?`${message} 已保留另一条推荐，可重新加载。`:message
+}
+async function load(){
+  const sequence=++loadSequence
+  loadController?.abort()
+  const current=new AbortController()
+  loadController=current
+  clearBoards()
+  error.value=''
+  railErrors.value={}
+  failed.value={}
+  posterFailures.value={}
+  posterLoaded.value={}
+  heroLoaded.value=false
+  loading.value=true
+  try{
+    const [dailyResult,popularResult]=await Promise.allSettled([
+      api('recommendations?channel=daily&limit='+RAIL,current.signal),
+      api('recommendations?channel=popular&scope=local&limit='+RAIL,current.signal),
+    ])
+    if(sequence!==loadSequence||current.signal.aborted)return
+    const daily=dailyResult.status==='fulfilled'?dailyResult.value:null
+    const popular=popularResult.status==='fulfilled'?popularResult.value:null
+    const dailyError=dailyResult.status==='rejected'?dailyResult.reason:null
+    const popularError=popularResult.status==='rejected'?popularResult.reason:null
+    if(isUnauthorized(dailyError)||isUnauthorized(popularError)){error.value='登录已失效，请重新登录。';return}
+    if(!daily&&!popular){error.value='电影目录暂时不可用，请重试。';return}
+    personalIds.value=(daily?.items||[]).map((m:any)=>m.movie_id)
+    popularIds.value=(popular?.items||[]).map((m:any)=>m.movie_id)
+    catalogTotal.value=daily?.catalog_total??popular?.catalog_total??0
+    movies.value=[...new Map([...(popular?.items||[]),...(daily?.items||[])].map((m:any)=>[m.movie_id,m])).values()]
+    const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
+    featuredId.value=movies.value.find(m=>String(m.movie_id)===saved)?.movie_id||movies.value.find(m=>art[String(m.movie_id)]?.backdrop)?.movie_id||movies.value[0]?.movie_id||0
+    const nextErrors:Record<string,string>={}
+    if(dailyError)nextErrors.personal=railFailure('personal',dailyError,!!popular)
+    if(popularError)nextErrors.popular=railFailure('popular',popularError,!!daily)
+    railErrors.value=nextErrors
+    for(const c of channels.value)if(!nextErrors[c.id])homeBoards[c.id]=createFeedbackBoard({channel:c.id==='personal'?'daily':c.id,context:'home',items:c.items})
+    loading.value=false
+    const wanted=Array.from(new Set([featuredId.value,...rail.value.map(m=>m!.movie_id)]))
+    const [details,state]=await Promise.all([Promise.all(wanted.map(id=>api('movies/'+id,current.signal).catch(()=>null))),api('behavior',current.signal).catch(()=>null)])
+    if(sequence!==loadSequence||current.signal.aborted)return
+    if(state)behavior.value=state.state||{}
+    const byId=new Map<number,any>();for(const d of details)if(d)byId.set(d.movie_id,d)
+    movies.value=movies.value.map(m=>byId.has(m.movie_id)?{...m,...byId.get(m.movie_id)}:m)
+  }catch(e){
+    if(sequence!==loadSequence||current.signal.aborted)return
+    error.value=isUnauthorized(e)?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。'
+  }finally{
+    if(sequence===loadSequence){loading.value=false;if(loadController===current)loadController=undefined}
+  }
+}
 function detail(id:number){const c=channels.value.find(x=>x.items.some((m:any)=>m.movie_id===id));if(c)homeBoards[c.id]?.click(c.items.findIndex((m:any)=>m.movie_id===id)+1);sessionStorage.setItem('mi2_home_selected',String(id));sessionStorage.setItem('mi2_home_position',String(window.scrollY));router.push('/movies?from=home#movie/'+id)}
 function openAI(){window.dispatchEvent(new Event('mi2-open-assistant'))}
 async function logout(){try{await auth.logout();router.replace('/login')}catch{logoutError.value='退出未确认，请重试。'}}
-const refreshBehavior=()=>api('behavior').then(b=>behavior.value=b.state||{}).catch(()=>{})
-onMounted(async()=>{window.addEventListener('mi2-behavior-changed',refreshBehavior);await load();requestAnimationFrame(()=>window.scrollTo(0,Number(sessionStorage.getItem('mi2_home_position')||0)))})
-onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior-changed',refreshBehavior);for(const b of Object.values(homeBoards))b.dispose()})
+const refreshBehavior=()=>api('behavior',lifeController.signal).then(b=>behavior.value=b.state||{}).catch(()=>{})
+onMounted(async()=>{window.addEventListener('mi2-behavior-changed',refreshBehavior);await load();if(!unmounted)raf=requestAnimationFrame(()=>window.scrollTo(0,Number(sessionStorage.getItem('mi2_home_position')||0)))})
+onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeController.abort();if(raf)cancelAnimationFrame(raf);window.removeEventListener('mi2-behavior-changed',refreshBehavior);clearBoards()})
 </script>
-<template><div class="cinema-source" :style="{'--navigation-width':sidebarExpanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="sidebarExpanded=$event"/><main class="source-content"><div v-if="loading" class="source-state" role="status">正在载入电影…</div><div v-else-if="error" class="source-state" role="alert"><h1>暂时无法打开影院</h1><p>{{error}}</p><button @click="load">重新加载</button><router-link to="/login">重新登录</router-link></div><div v-else-if="film" class="site" data-version="A"><section class="hero" :class="{loaded:heroLoaded}"><div class="image-fallback">{{failed['hero'+film.movie_id]?'剧照暂时无法显示':'正在载入电影剧照'}}</div><img v-if="backdrop(film)&&!failed['hero'+film.movie_id]" class="backdrop" :src="backdrop(film)" :alt="film.title+'电影背景剧照'" @load="heroLoaded=true" @error="failed['hero'+film.movie_id]=true"/><div class="left-veil"/><div class="top-veil"/><div class="bottom-veil"/><div class="hero-copy"><div class="hero-kicker">FEATURED FILM / 电影精选</div><h1>{{film.title}}</h1><div class="title-en">{{film.original_title}}</div><div class="meta">{{film.release_year}}　·　{{genres(film)||'类型暂未提供'}}</div><p class="synopsis">{{film.overview||'暂无影片简介。'}}</p><div class="hero-actions"><button class="action primary" @click="openAI"><svg viewBox="0 0 24 24"><path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>AI 探索电影</button><button class="action secondary" @click="detail(film.movie_id)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg>了解影片</button></div></div><div class="hero-index">CINEMATIC EXPERIENCE · MOVIEINSIGHT</div></section><section v-for="channel in channels" :key="channel.id" class="library" :data-channel="channel.id"><div class="rail-head"><h2>{{channel.title}}</h2><small>{{channel.note}} · <router-link :to="{path:'/recommendations',query:{channel:channel.id==='personal'?'daily':channel.id}}">全部推荐频道 →</router-link></small></div><div class="filmrow"><article v-for="(movie,index) in channel.items" v-feedback="{board:homeBoards[channel.id],position:index+1}" :key="movie.movie_id" class="filmcard"><button class="poster-shell" :class="{loaded:posterLoaded[movie.movie_id]}" :aria-label="'查看'+movie.title+'详情'" @click="detail(movie.movie_id)"><span class="marker" v-if="mark(movie)">{{mark(movie)}}</span><img v-if="poster(movie)&&!failed['poster'+movie.movie_id]" :src="poster(movie)" :alt="movie.title+'电影海报'" loading="lazy" @load="posterLoaded[movie.movie_id]=true" @error="failed['poster'+movie.movie_id]=true"/><span class="poster-fallback"><span>电影海报</span><strong class="large">{{movie.title}}</strong><span>海报暂未显示</span></span></button><h3 class="film-title">{{movie.title}}</h3><p class="film-meta">{{movie.release_year}} · {{genres(movie)||'类型暂未提供'}}</p><p class="film-reason" v-if="channel.id==='popular'">TMDB 热度 {{movie.tmdb_popularity?.toFixed(1)}}<br>采集于 {{movie.popularity_observed_at?.slice(0,10)||'日期未知'}}</p><p v-else class="film-reason">{{movie.reasons?.join('；')}}</p></article><router-link class="rail-more" to="/movies"><span class="rail-more-arrow">→</span><span>查看全部<br>{{catalogTotal}} 部电影</span></router-link></div><p v-if="!channel.items.length" class="channel-empty">{{channel.id==='popular'?'暂无已验证且符合条件的 TMDB 热度影片。':'暂无符合当前偏好的推荐，试试完善评分或想看清单。'}}</p></section><section class="below"><router-link to="/recommendations" class="action secondary">探索全部推荐频道：热榜、每周精选、高分、票房、相似与想看</router-link><div class="divider"/><div class="below-kicker">THE WORLD OF MOVIES</div><h2>电影不止于观看。</h2><p class="below-lead">从了解一部电影，到与你的 AI 电影助手探讨电影故事，再到收藏、评分与发现喜欢的类型。这里是 MovieInsight 的个人电影空间。</p><div class="features"><router-link to="/ai" class="feature primary-feature"><svg class="feature-icon" viewBox="0 0 24 24"><path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg><div><b>AI 电影探索</b><p>理解自然语言需求，逐步发现合适的电影。需要时由用户自行连接模型 API Key。</p></div></router-link><router-link to="/movies" class="feature"><svg class="feature-icon" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M4 8h16M4 16h16M8 3v18M16 3v18"/></svg><div><b>电影目录</b><p>搜索、筛选、查看可信电影资料及来源。</p></div></router-link><router-link to="/movies#behavior" class="feature"><svg class="feature-icon" viewBox="0 0 24 24"><path d="M20 5c-3-3-6-1-8 1-2-2-5-4-8-1-4 4 1 9 8 15 7-6 12-11 8-15z"/></svg><div><b>我的电影</b><p>管理想看、已看、收藏与个人观影偏好。</p></div></router-link></div><footer class="footer"><span>© MovieInsight 2.0</span><div><router-link to="/insights">数据洞察</router-link><button @click="logout">退出登录</button></div></footer><p v-if="logoutError" role="alert">{{logoutError}}</p></section></div><section v-else class="source-state"><h1>暂无符合当前状态的推荐影片</h1><button @click="load">刷新推荐</button><router-link to="/movies">浏览全部电影</router-link></section></main></div></template>
+<template><div class="cinema-source" :style="{'--navigation-width':sidebarExpanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="sidebarExpanded=$event"/><main class="source-content"><div v-if="loading" class="source-state" role="status">正在载入电影…</div><div v-else-if="error" class="source-state" role="alert"><h1>暂时无法打开影院</h1><p>{{error}}</p><button @click="load">重新加载</button><router-link to="/login">重新登录</router-link></div><div v-else-if="film" class="site" data-version="A"><section class="hero" :class="{loaded:heroLoaded}"><div class="image-fallback">{{failed['hero'+film.movie_id]?'剧照暂时无法显示':'正在载入电影剧照'}}</div><img v-if="backdrop(film)&&!failed['hero'+film.movie_id]" class="backdrop" :src="backdrop(film)" :alt="film.title+'电影背景剧照'" @load="heroLoaded=true" @error="failed['hero'+film.movie_id]=true"/><div class="left-veil"/><div class="top-veil"/><div class="bottom-veil"/><div class="hero-copy"><div class="hero-kicker">FEATURED FILM / 电影精选</div><h1>{{film.title}}</h1><div class="title-en">{{film.original_title}}</div><div class="meta">{{film.release_year}}　·　{{genres(film)||'类型暂未提供'}}</div><p class="synopsis">{{film.overview||'暂无影片简介。'}}</p><div class="hero-actions"><button class="action primary" @click="openAI"><svg viewBox="0 0 24 24"><path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg>AI 探索电影</button><button class="action secondary" @click="detail(film.movie_id)"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7v1"/></svg>了解影片</button></div></div><div class="hero-index">CINEMATIC EXPERIENCE · MOVIEINSIGHT</div></section><section v-for="channel in channels" :key="channel.id" class="library" :data-channel="channel.id"><div class="rail-head"><h2>{{channel.title}}</h2><small>{{channel.note}} · <router-link :to="{path:'/recommendations',query:{channel:channel.id==='personal'?'daily':channel.id}}">全部推荐频道 →</router-link></small></div><div v-if="!railErrors[channel.id]" class="filmrow"><article v-for="(movie,index) in channel.items" v-feedback="{board:homeBoards[channel.id],position:index+1}" :key="movie.movie_id" class="filmcard"><button class="poster-shell" :class="{loaded:posterLoaded[movie.movie_id]}" :aria-label="'查看'+movie.title+'详情'" @click="detail(movie.movie_id)"><span class="marker" v-if="mark(movie)">{{mark(movie)}}</span><img v-if="poster(movie)" :key="poster(movie)" :src="poster(movie)" :alt="movie.title+'电影海报'" loading="lazy" @load="posterLoaded[movie.movie_id]=true" @error="posterError(movie,$event)"/><span class="poster-fallback"><span>电影海报</span><strong class="large">{{movie.title}}</strong><span>海报暂未显示</span></span></button><h3 class="film-title">{{movie.title}}</h3><p class="film-meta">{{movie.release_year}} · {{genres(movie)||'类型暂未提供'}}</p><p class="film-reason" v-if="channel.id==='popular'">TMDB 热度 {{movie.tmdb_popularity?.toFixed(1)}}<br>采集于 {{movie.popularity_observed_at?.slice(0,10)||'日期未知'}}</p><p v-else class="film-reason">{{movie.reasons?.join('；')}}</p></article><router-link class="rail-more" to="/movies"><span class="rail-more-arrow">→</span><span>查看全部<br>{{catalogTotal}} 部电影</span></router-link></div><div v-if="railErrors[channel.id]" class="channel-error" role="alert"><span>{{railErrors[channel.id]}}</span><button type="button" class="inline-retry" @click="load">重新加载</button></div><p v-else-if="!channel.items.length" class="channel-empty">{{channel.id==='popular'?'暂无已验证且符合条件的 TMDB 热度影片。':'暂无符合当前偏好的推荐，试试完善评分或想看清单。'}}</p></section><section class="below"><router-link to="/recommendations" class="action secondary">探索全部推荐频道：热榜、每周精选、高分、票房、相似与想看</router-link><div class="divider"/><div class="below-kicker">THE WORLD OF MOVIES</div><h2>电影不止于观看。</h2><p class="below-lead">从了解一部电影，到与你的 AI 电影助手探讨电影故事，再到收藏、评分与发现喜欢的类型。这里是 MovieInsight 的个人电影空间。</p><div class="features"><router-link to="/ai" class="feature primary-feature"><svg class="feature-icon" viewBox="0 0 24 24"><path d="M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z"/></svg><div><b>AI 电影探索</b><p>理解自然语言需求，逐步发现合适的电影。需要时由用户自行连接模型 API Key。</p></div></router-link><router-link to="/movies" class="feature"><svg class="feature-icon" viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="1"/><path d="M4 8h16M4 16h16M8 3v18M16 3v18"/></svg><div><b>电影目录</b><p>搜索、筛选、查看可信电影资料及来源。</p></div></router-link><router-link to="/movies#behavior" class="feature"><svg class="feature-icon" viewBox="0 0 24 24"><path d="M20 5c-3-3-6-1-8 1-2-2-5-4-8-1-4 4 1 9 8 15 7-6 12-11 8-15z"/></svg><div><b>我的电影</b><p>管理想看、已看、收藏与个人观影偏好。</p></div></router-link></div><footer class="footer"><span>© MovieInsight 2.0</span><div><router-link to="/insights">数据洞察</router-link><button @click="logout">退出登录</button></div></footer><p v-if="logoutError" role="alert">{{logoutError}}</p></section></div><section v-else class="source-state"><template v-if="hasRailError"><h1>部分推荐暂时不可用</h1><p v-for="(message,id) in railErrors" :key="id">{{message}}</p><button @click="load">重新加载</button><router-link to="/login">重新登录</router-link></template><template v-else><h1>暂无符合当前状态的推荐影片</h1><button @click="load">刷新推荐</button><router-link to="/movies">浏览全部电影</router-link></template></section></main></div></template>
 <style scoped>
 .film-reason{font-size:11px;line-height:1.6;color:#baaccb;margin:7px 0 0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
 .channel-empty{font-size:13px;color:#b5a9c4;padding:14px 0 24px;line-height:1.8}
+.channel-error{display:flex;align-items:center;justify-content:space-between;gap:14px;font-size:13px;color:#d8c9e6;padding:14px 0 24px;line-height:1.8}
+.channel-error .inline-retry{flex:none;border:1px solid #746086;background:transparent;color:#eee8f6;border-radius:6px;padding:7px 12px;font:inherit;cursor:pointer}
+.channel-error .inline-retry:hover{background:#241c31;border-color:#c5bde7}
+.channel-error .inline-retry:focus-visible{outline:2px solid #c2a6f4;outline-offset:2px}
 
 /* Ported from cinema_home.html V12-A; research controls and duplicate top navigation excluded. */
 .site{background:#0b0c10;color:#fff;isolation:isolate;--matte:#080b11;--ambient:#111820;--hero-h:79vh;--leftshade:.90;--focal-x:50%;overflow:visible}.site[data-version="B"]{--hero-h:94vh}.site-nav{height:74px;padding:0 5.25%;display:flex;align-items:center;justify-content:space-between;gap:18px;position:sticky;top:0;z-index:20;margin-bottom:-74px;background:linear-gradient(180deg,rgba(5,7,11,.77),rgba(5,7,11,.07));transition:background .25s ease,box-shadow .25s ease}.site-nav.solid{background:rgba(13,15,20,.96);box-shadow:0 5px 30px #0008;border-bottom:1px solid #ffffff17;backdrop-filter:blur(16px)}

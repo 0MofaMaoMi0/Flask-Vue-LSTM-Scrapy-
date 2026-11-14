@@ -12,6 +12,9 @@ import {personalRequest} from '../services/personalFeatures'
 import {movieArtwork} from '../services/movieArtwork'
 import {assistantMovieTarget} from '../services/movieNavigation'
 const props=defineProps<{surface:'explore'|'floating'}>()
+const workspaceOwner=aiWorkspace.owner
+let disposed=false
+function live(){return !disposed&&aiWorkspace.owner===workspaceOwner}
 const thread=ref<HTMLElement>(),router=useRouter()
 const message=ref(''),busy=ref(false),configBusy=ref(false),error=ref(''),notice=ref(''),result=ref<any>(null),conversation=ref<string|null>(null),status=ref<any>({configured:false,enabled:false}),draft=ref('')
 const composerInput=ref<HTMLTextAreaElement>(),expanded=ref(false)
@@ -20,7 +23,7 @@ function autoGrow(){const el=composerInput.value;if(!el)return;el.style.setPrope
 watch(message,()=>nextTick(autoGrow))
 const history=ref<{question:string,answer:string,result?:any,feedback?:string|null}[]>([])
 let controller:AbortController|null=null,pending:any=null
-async function refreshStatus(){try{status.value=await jsonRequest('status')}catch(e){error.value=(e as Error).message}}
+async function refreshStatus(){try{const data=await jsonRequest('status');if(live())status.value=data}catch(e){if(live())error.value=(e as Error).message}}
 function consume(event:string,data:any){
  nextTick(()=>{if(thread.value)thread.value.scrollTop=thread.value.scrollHeight})
  if(event==='draft')draft.value=data.text||''
@@ -32,17 +35,19 @@ function consume(event:string,data:any){
 }
 async function send(path:string,body:any){
  if(busy.value)return
- busy.value=true;error.value='';notice.value='';draft.value='';controller=new AbortController();pending={...body,path}
+ busy.value=true;error.value='';notice.value='';draft.value='';const sendingController=new AbortController();controller=sendingController;pending={...body,path}
+ const current=()=>live()&&controller===sendingController
  try{
-  const r=await request(path,'POST',{...body,stream:true},controller.signal)
+  const r=await request(path,'POST',{...body,stream:true},sendingController.signal)
+  if(!current())return
   if(!r.ok){const b=await r.json();throw new Error(b.code==='CONVERSATION_UNAVAILABLE'?'对话已失效，请开始新对话。':b.code==='REQUEST_ID_CONFLICT'?'请求编号冲突，未重新计费。':'请求未完成：'+b.code)}
   if(!r.body)throw new Error('浏览器无法读取流式响应。')
   const reader=r.body.getReader(),decoder=new TextDecoder();let buffer=''
-  while(true){const {value,done}=await reader.read();buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});let boundary:number
+  while(true){const {value,done}=await reader.read();if(!current()){await reader.cancel();return}buffer+=decoder.decode(value||new Uint8Array(),{stream:!done});let boundary:number
    while((boundary=buffer.indexOf('\n\n'))>=0){const frame=buffer.slice(0,boundary);buffer=buffer.slice(boundary+2);const event=frame.match(/^event: (.+)$/m)?.[1],data=frame.match(/^data: (.+)$/m)?.[1];if(event&&data)consume(event,JSON.parse(data))}
    if(done)break
   }
- }catch(e){if((e as Error).name!=='AbortError')error.value='连接中断，未自动重发。可重试原请求以读取结果，不会静默再次调用。'}finally{controller=null;busy.value=false;await refreshStatus()}
+ }catch(e){if(current()&&(e as Error).name!=='AbortError')error.value='连接中断，未自动重发。可重试原请求以读取结果，不会静默再次调用。'}finally{if(current()){controller=null;busy.value=false;await refreshStatus()}}
 }
 async function submit(){
  if(!message.value.trim()||busy.value)return
@@ -61,7 +66,7 @@ onDeactivated(clearSensitive)
 function sharedStatus(){refreshStatus()}
 function closeTransient(e:Event){const el=e.target as HTMLElement;if(!el?.closest?.('.side-list'))sessionMenu.value='';if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value=''}}
 onMounted(()=>{refreshStatus();window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
-onBeforeUnmount(()=>{controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
+onBeforeUnmount(()=>{saveSession();disposed=true;controller?.abort();window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
 
 function movieUrl(id:number){return assistantMovieTarget(id,props.surface,settingsRoute.fullPath)}
 async function copyAnswer(text:string){try{await navigator.clipboard.writeText(text);notice.value='已复制回答'}catch{error.value='无法访问剪贴板，请手动复制。'}}
@@ -75,9 +80,9 @@ const sessions=ref<SavedSession[]>([]),activeSession=ref('')
 const filteredSessions=computed(()=>sessions.value.filter(s=>s.title.toLowerCase().includes(sessionSearch.value.toLowerCase())))
 const otherSessions=computed(()=>aiWorkspace.archives[props.surface==='explore'?'floating':'explore'].filter(s=>s.history.length))
 const clone=<T,>(value:T):T=>JSON.parse(JSON.stringify(value))
-function saveSession(){const s=sessions.value.find(x=>x.id===activeSession.value);if(!s)return;s.history=clone(history.value);s.conversation=conversation.value;s.message=message.value;s.result=clone(result.value);s.pending=pending?clone(pending):null;if(s.history.length&&s.title==='新对话')s.title=s.history[0].question.slice(0,24);aiWorkspace.archives[props.surface]=clone(sessions.value)}
-function newSession(){if(busy.value)return;saveSession();const s:SavedSession={id:crypto.randomUUID(),title:'新对话',history:[],conversation:null,message:'',result:null,pending:null};sessions.value.unshift(s);activeSession.value=s.id;history.value=[];conversation.value=null;message.value='';result.value=null;pending=null;error.value='';notice.value='';sessionMenu.value='';saveSession()}
-function chooseSession(id:string){if(busy.value)return;saveSession();const s=sessions.value.find(x=>x.id===id);if(!s)return;activeSession.value=id;history.value=clone(s.history);hydrateFeedback();conversation.value=s.conversation;message.value=s.message;result.value=clone(s.result);pending=s.pending?clone(s.pending):null;error.value='';notice.value='';sessionMenu.value=''}
+function saveSession(){if(!live())return;const s=sessions.value.find(x=>x.id===activeSession.value);if(!s)return;s.history=clone(history.value);s.conversation=conversation.value;s.message=message.value;s.result=clone(result.value);s.pending=pending?clone(pending):null;if(s.history.length&&s.title==='新对话')s.title=s.history[0].question.slice(0,24);aiWorkspace.archives[props.surface]=clone(sessions.value);aiWorkspace.activeSessions[props.surface]=s.id}
+function newSession(){if(busy.value)return;saveSession();const s:SavedSession={id:crypto.randomUUID(),title:'新对话',history:[],conversation:null,message:'',result:null,pending:null};sessions.value.unshift(s);activeSession.value=s.id;history.value=[];conversation.value=null;message.value='';result.value=null;pending=null;draft.value='';error.value='';notice.value='';sessionMenu.value='';saveSession()}
+function chooseSession(id:string){if(busy.value)return;saveSession();const s=sessions.value.find(x=>x.id===id);if(!s)return;activeSession.value=id;history.value=clone(s.history);hydrateFeedback();conversation.value=s.conversation;message.value=s.message;result.value=clone(s.result);pending=s.pending?clone(s.pending):null;draft.value='';error.value='';notice.value='';sessionMenu.value=''}
 const menuPos=ref({top:0,left:0})
 function toggleMenu(id:string,e:MouseEvent){if(sessionMenu.value===id){sessionMenu.value='';return}const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),w=132,h=76,gap=4;let top=r.bottom+gap;if(top+h>window.innerHeight-8)top=Math.max(8,r.top-h-gap);let left=Math.min(r.right-w,window.innerWidth-w-8);menuPos.value={top,left};sessionMenu.value=id}
 async function startRename(s:SavedSession){sessionMenu.value='';editingId.value=s.id;editTitle.value=s.title;await nextTick();const el=rootElement.value?.querySelector<HTMLInputElement>('[data-edit="'+s.id+'"]');el?.focus();el?.select()}
@@ -107,7 +112,13 @@ function followup(title:string){message.value='我想进一步了解《'+title+'
 async function movieWant(mid:number){if(busy.value)return;try{const r=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});if(!r.ok)throw new Error('登录已失效');const token=(await r.json()).data.csrf_token;const b=await fetch('/api/catalog/behavior',{credentials:'same-origin'});if(!b.ok)throw new Error('行为状态不可用');const state=(await b.json()).data.state;const undo=!!state[String(mid)]?.want;const saved=await fetch('/api/catalog/behavior',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({event_id:crypto.randomUUID(),movie_id:mid,kind:'want',action:undo?'undo':'set',value:null,time:new Date().toISOString(),source:'USER_ACTION'})});if(!saved.ok)throw new Error(saved.status===409?'与已看或不感兴趣状态冲突，请在详情页调整。':'保存未确认，请到详情页核对；不会自动重试。');notice.value=undo?'已撤销想看':'已保存想看';window.dispatchEvent(new Event('mi2-behavior-changed'))}catch(e){error.value=(e as Error).message}}
 function sourceLabel(r:any){return r?.source==='LLM'?'AI 生成回答':r?.source==='CACHE'?'AI 缓存回答':r?.source==='MOCK'?'模拟测试':'本地检索 / 降级'}
 function modelLink(url:string){return /^https:\/\/www\.themoviedb\.org\/movie\/\d+(?:[/?#-]|$)/.test(url)}
-onMounted(()=>newSession())
+onMounted(()=>{
+ sessions.value=clone(aiWorkspace.archives[props.surface])
+ const selected=aiWorkspace.activeSessions[props.surface]
+ const s=sessions.value.find(x=>x.id===selected)||sessions.value[0]
+ if(s)chooseSession(s.id)
+ else newSession()
+})
 
 </script>
 <template><div ref="rootElement" class="prototype-ai mi2-docked-ai" :class="['surface-'+surface,{'pref-large-text':aiWorkspace.large,'pref-reduced-motion':aiWorkspace.reduced}]"><svg style="display:none" xmlns="http://www.w3.org/2000/svg"><symbol :id="uid('i-menu')" data-source-id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></symbol><symbol :id="uid('i-plus')" data-source-id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol><symbol :id="uid('i-max')" data-source-id="i-max" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1v4m13-5h4a1 1 0 0 1 1 1v4M3 16v4a1 1 0 0 0 1 1h4m13-5v4a1 1 0 0 1-1 1h-4"></path></symbol><symbol :id="uid('i-chevron-down')" data-source-id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol><symbol :id="uid('i-min')" data-source-id="i-min" viewBox="0 0 24 24"><path d="M4 9h5V4m11 11h-5v5M9 9 4 4m11 11 5 5"></path></symbol><symbol :id="uid('i-close')" data-source-id="i-close" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"></path></symbol><symbol :id="uid('i-send')" data-source-id="i-send" viewBox="0 0 24 24"><path d="m5 12 14-7-5 14-2-7-7 0z"></path></symbol><symbol :id="uid('i-settings')" data-source-id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"></path></symbol><symbol :id="uid('i-copy')" data-source-id="i-copy" viewBox="0 0 24 24"><rect height="12" rx="2" width="12" x="8" y="8"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></symbol><symbol :id="uid('i-refresh')" data-source-id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.9 9a7 7 0 0 1 11.9-2l2.2 2M4 15l2.2 2a7 7 0 0 0 11.9-2"></path></symbol><symbol :id="uid('i-thumb-up')" data-source-id="i-thumb-up" viewBox="0 0 24 24"><path d="M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4.5-8a3 3 0 0 1 3 3v4h5a2.5 2.5 0 0 1 2.4 3.2l-2 7a2.5 2.5 0 0 1-2.4 1.8H7"></path></symbol><symbol :id="uid('i-thumb-down')" data-source-id="i-thumb-down" viewBox="0 0 24 24"><path d="M7 14V3H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3Zm0 0 4.5 8a3 3 0 0 0 3-3v-4h5a2.5 2.5 0 0 0 2.4-3.2l-2-7A2.5 2.5 0 0 0 17.5 3H7"></path></symbol><symbol :id="uid('i-arrow-up')" data-source-id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5"></path><path d="m6 11 6-6 6 6"></path></symbol><symbol :id="uid('i-moon')" data-source-id="i-moon" viewBox="0 0 24 24"><path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10"></path></symbol><symbol :id="uid('i-search')" data-source-id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></symbol><symbol :id="uid('i-side')" data-source-id="i-side" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"></path></symbol><symbol :id="uid('i-import')" data-source-id="i-import" viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4"></path><path d="M5 19h14"></path></symbol></svg>

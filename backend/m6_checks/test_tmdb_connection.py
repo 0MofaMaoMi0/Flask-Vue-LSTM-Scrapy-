@@ -97,12 +97,62 @@ def test_online_details_enrich_only_metrics_not_frozen_facts(service):
         assert match['tmdb_id']==999 and match['movie_id'] is None
     assert doc['movie']['cast'][0]['id']==1
 
-def test_ai_and_http_use_same_online_board(service):
+def test_ai_and_http_use_same_published_board(service):
+    service.snapshot('popular',1,'a',force=True)
     with using(service,1,'a'):
         result=boards.board([],{},1,'popular')
         assert result['items'][0]['in_catalog'] is False
         assert result['items'][0]['source_rank']==1
         assert boards.public_snapshot('popular',online=False)['captured_at']==result['source_as_of']
+
+
+def test_public_board_does_not_refresh_missing_or_stale_cache(service,monkeypatch):
+    from catalog import board_snapshots
+    monkeypatch.setattr(board_snapshots,'read',lambda channel:None)
+    monkeypatch.setattr(boards,'DATA',service.folder/'absent-bundled-data')
+    def unexpected(*args,**kwargs):
+        pytest.fail('Public board attempted credential access or external refresh')
+    monkeypatch.setattr(service,'_get',unexpected)
+    monkeypatch.setattr(service,'_entry',unexpected)
+    with using(service,1,'a'):
+        assert boards.board([],{},1,'popular')['status']=='UNAVAILABLE'
+        service._boards['popular']={'schema':1,'channel':'popular','captured_at':'2000-01-01T00:00:00+00:00','items':[]}
+        result=boards.board([],{},1,'popular')
+        assert result['status']=='STALE' and result['source_as_of']=='2000-01-01T00:00:00+00:00'
+
+
+def test_cache_only_read_does_not_wait_for_refresh_lock(service):
+    doc={'schema':1,'channel':'popular','captured_at':'2000-01-01T00:00:00+00:00','items':[]}
+    service._boards['popular']=doc
+    lock=service._resource_lock('popular')
+    with lock:
+        # A timed join prevents a lock regression from hanging the test suite.
+        result=[]
+        reader=threading.Thread(target=lambda:result.append(service.snapshot('popular')),daemon=True)
+        reader.start();reader.join(1)
+        finished=not reader.is_alive()
+    reader.join(1)
+    assert finished and result==[doc]
+
+
+@pytest.mark.parametrize('broken',[
+    {'schema':2,'channel':'popular','captured_at':'2000-01-01T00:00:00+00:00','items':[]},
+    {'schema':1,'channel':'trending_day','captured_at':'2000-01-01T00:00:00+00:00','items':[]},
+    {'schema':1,'channel':'popular','captured_at':'invalid','items':[]},
+    {'schema':1,'channel':'popular','captured_at':'2000-01-01T00:00:00+00:00','items':{}},
+])
+def test_cache_only_read_rejects_invalid_documents(service,broken):
+    service._boards['popular']=broken
+    assert service.snapshot('popular') is None
+
+
+def test_public_board_prefers_newer_scheduled_snapshot(service,monkeypatch):
+    from catalog import board_snapshots
+    service._boards['popular']={'schema':1,'channel':'popular','captured_at':'2000-01-01T00:00:00+00:00','items':[]}
+    scheduled={'schema':1,'channel':'popular','captured_at':'2001-01-01T00:00:00+00:00','items':[]}
+    monkeypatch.setattr(board_snapshots,'read',lambda channel:scheduled)
+    with using(service,1,'a'):
+        assert boards.board([],{},1,'popular')['source_as_of']==scheduled['captured_at']
 
 def test_new_heat_does_not_redate_or_discard_newer_detail_revenue(service):
     service._details[121]={'schema':1,'captured_at':'2026-11-13T03:00:00+00:00','movie':{'id':121,'revenue':500,'popularity':1,'vote_average':7.,'vote_count':100}}
