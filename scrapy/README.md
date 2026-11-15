@@ -12,7 +12,7 @@ movies -> movie_comment -> comments
 movies -> rebuild_pid -> person_obj -> person_item -> person
 
 movies -> sync_movies -> movies2
-comments -> Flask/docomment.py 情感分析 -> comments2
+comments -> 旧 Flask/docomment.py 已退役；本采集器只保留原始评论采集，不自动生成 comments2
 movies(imdb_id) -> movie_cover_tmdb -> CoverPipeline -> data/covers
 ```
 

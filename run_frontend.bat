@@ -1,32 +1,32 @@
 @echo off
 setlocal EnableExtensions
 chcp 65001 >nul
-
 set "PROJECT_ROOT=%~dp0"
-cd /d "%PROJECT_ROOT%vue"
+set "STARTER=%PROJECT_ROOT%..\start-latest.ps1"
 
-where npm >nul 2>nul
-if errorlevel 1 goto :npm_missing
-if exist "node_modules" goto :start
+if /I "%~1"=="--help" goto :help
+if not exist "%STARTER%" (
+  echo [ERROR] Root launcher not found: %STARTER%
+  exit /b 1
+)
 
-echo Installing frontend dependencies. This may take a few minutes.
-call npm install
-if errorlevel 1 goto :install_failed
+if /I "%~1"=="--check" goto :check
 
-:start
-echo Starting Vue frontend at http://127.0.0.1:8999
-call npm run serve
-goto :end
+echo [INFO] Starting or reusing the current frontend through start-latest.ps1.
+echo [INFO] No npm install, no dependency upgrade and no execution-policy bypass.
+powershell.exe -NoLogo -NoProfile -File "%STARTER%"
+set RC=%ERRORLEVEL%
+echo [INFO] Frontend launcher exit code: %RC%
+exit /b %RC%
 
-:npm_missing
-echo [ERROR] npm was not found. Install Node.js and add it to PATH.
-goto :end
+:check
+powershell.exe -NoLogo -NoProfile -File "%STARTER%" -CheckOnly
+set RC=%ERRORLEVEL%
+echo [INFO] Static check exit code: %RC%
+exit /b %RC%
 
-:install_failed
-echo [ERROR] npm install failed. Check the Node.js version and network.
-
-:end
-echo.
-echo Frontend process has stopped.
-pause
-endlocal
+:help
+echo Usage: run_frontend.bat [--check^|--help]
+echo   default   start or reuse the current frontend at 5174
+echo   --check   static launcher check only
+exit /b 0
