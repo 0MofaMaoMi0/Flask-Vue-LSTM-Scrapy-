@@ -1,4 +1,5 @@
 import {countryName} from './countryDisplay.js';
+import {countryLocation} from './countryLocations.js';
 // G2-B independent visual presets. All effects are rendering-only.
 // These colors are never allowed to change or override the analytics data.
 export const GLOBE_THEMES = Object.freeze({
@@ -61,9 +62,9 @@ export function manualLabelData(stats, metric, features, checkedIso3 = [], selec
   const featureMap = new Map(features.map(f => [f.properties.iso3, f]));
   const records = new Map((stats?.countries || []).map(c => [c.iso3, c]));
   const codes = Array.isArray(checkedIso3) ? checkedIso3 : [];
-  return [...new Set(codes)].filter(code => typeof code === 'string' && featureMap.has(code))
+  return [...new Set(codes)].filter(code => typeof code === 'string' && countryLocation(code,featureMap))
     .map(iso3 => {
-      const point = featureMap.get(iso3).properties;
+      const point = countryLocation(iso3,featureMap);
       const row = records.get(iso3);
       const selected = iso3 === selectedIso3;
       const value = metric === 'average_rating'

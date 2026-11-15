@@ -1,6 +1,7 @@
 import {metricValue, escapeHtml} from './stats.js';
 import {GLOBE_THEMES, pickTheme, shade, altitude, manualLabelData, fitGlobeAltitude} from './globeVisuals.js';
 import {countryName,countryEnglish,flagUrl,flagAlt} from './countryDisplay.js';
+import {countryLocation} from './countryLocations.js';
 
 // True Globe.GL engine; no 2D rendering fallback is disguised as WebGL.
 export function createMovieGlobe({element, GlobeConstructor, features, getStats, getMetric, getSelected,
@@ -65,9 +66,9 @@ export function createMovieGlobe({element, GlobeConstructor, features, getStats,
   function applyLabels(){
     const tags=manualLabelData(getStats(),getMetric(),features,checkedLabelIso3,selectedIso);
     globe.htmlElementsData(tags);
-    const selected=selectedIso&&featureMap.get(selectedIso);
+    const selected=selectedIso&&countryLocation(selectedIso,featureMap);
     globe.ringsData(selected&&currentEffects!=='subtle'?[{
-      lat:selected.properties.lat,lng:selected.properties.lng,iso3:selectedIso
+      lat:selected.lat,lng:selected.lng,iso3:selectedIso
     }]:[]);
   }
   globe
@@ -133,12 +134,12 @@ export function createMovieGlobe({element, GlobeConstructor, features, getStats,
     applyLabels();
   }
   function selectCountry(iso3,animate=true){
-    selectedIso=featureMap.has(iso3)?iso3:null;
+    const point=countryLocation(iso3,featureMap);
+    selectedIso=point?iso3:null;
     controls.autoRotate=false;
     refresh();
-    const f=featureMap.get(selectedIso);
-    if(f&&animate){
-      globe.pointOfView({lat:f.properties.lat,lng:f.properties.lng,altitude:Math.max(.55,fitAltitude*.94)},prefersReducedMotion?0:900);
+    if(point&&animate){
+      globe.pointOfView({lat:point.lat,lng:point.lng,altitude:Math.max(.55,fitAltitude*.94)},prefersReducedMotion?0:900);
     }
   }
   function reset(){
