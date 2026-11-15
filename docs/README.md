@@ -1,51 +1,46 @@
-# 文档已迁出源码目录
+# 项目源码文档导航
 
-本项目的说明、交接、计划、巡检与总结文档**不再放在源码仓库内**，已统一迁至：
+详细说明、交接、计划、巡检与总结仍统一放在仓库外的 `项目工作日志/`；本目录只保留源码仓库内的简洁导航，不另造大报告或平行“最新版”。
+
+## 先看现行入口
+
+| 用途 | 位置 |
+|---|---|
+| 当前项目总览（权威现状） | [`项目工作日志/00-索引/当前项目总览.md`](../../项目工作日志/00-索引/当前项目总览.md) |
+| 项目工作日志索引 | [`项目工作日志/00-索引/README.md`](../../项目工作日志/00-索引/README.md) |
+| M10 冻结交付与已知限制 | [`项目工作日志/06-开发与验证/M10-20261115/final-delivery/`](../../项目工作日志/06-开发与验证/M10-20261115/final-delivery/) |
+| 旧源码清理执行核验 | [`项目工作日志/05-环境与运维/旧源码清理-20261115/最终清理核验.json`](../../项目工作日志/05-环境与运维/旧源码清理-20261115/最终清理核验.json) |
+| 本次标准结构整理结果 | [`项目工作日志/05-环境与运维/项目结构整理-20261115/result.json`](../../项目工作日志/05-环境与运维/项目结构整理-20261115/result.json) |
+| 历史保留资产说明 | [legacy/README.md](../legacy/README.md) |
+
+## 标准目录与入口
 
 ```text
-F:\Python-project\Flask-Vue-LSTM-scrapy\项目工作日志\
+项目源码/
+├─ backend/       Flask 正式应用
+├─ movie-web/     Vue 3 正式前端
+├─ scrapy/        豆瓣采集辅助
+├─ scripts/       canonical 启动器与 Windows 入口
+├─ docs/          本导航
+├─ data/          数据/素材
+└─ legacy/        旧 Flask/vue 保护物
 ```
 
-入口文件（先看这个）：
+Windows 日常入口：
 
-```text
-F:\Python-project\Flask-Vue-LSTM-scrapy\项目工作日志\00-索引\README.md
+```bat
+scripts\windows\start-frontend.cmd
+scripts\windows\check-backend.cmd
+scripts\windows\start-frontend.cmd --check
 ```
 
-## 原文件去向
+当前运行链路为 5174 前端 → 3629 受控 SSH 隧道 → 隔离 Ubuntu 5000；不要使用旧 8091 作为正常后端，也不要把只读验收端口 1461/3575 当入口。配置、秘密、数据、模型和环境边界见仓库根 `README.md`。
 
-| 原路径（本目录下） | 新位置（`项目工作日志` 下） |
-| --- | --- |
-| `docs\handoff.md` | `01-交接与现状\handoff.md` |
-| `docs\project-framework.md` | `02-架构与设计\project-framework.md` |
-| `docs\scrapy-development-plan.md` | `03-计划与验收\scrapy-development-plan.md` |
-| `docs\reports\2026-10-16-scrapy-completion-assessment.md` | `04-巡检与评估报告\2026-10-16-scrapy-completion-assessment.md` |
-| `docs\architecture.md` | `90-历史与过时\architecture.md` |
-| `docs\data-flow.md` | `90-历史与过时\data-flow.md` |
-| `docs\troubleshooting.md` | `90-历史与过时\troubleshooting.md` |
+## 历史文档去向
 
-迁移日期：2026-10-31，同盘移动，内容未改动。
+- `docs/M9_HANDOFF_20261112.md`、`docs/M9_LOOP_D_FEEDBACK_DESIGN.md` 是历史设计/交接材料，保留供追溯，不代表当前运行入口。
+- 2026-10-31 的盘点、交接和阶段报告是历史记录，不再称为“最新”；其归档位置和文件去向以 `项目工作日志/00-索引/README.md` 及其中链接为准。
+- 原 `docs/architecture.md`、`data-flow.md`、`troubleshooting.md` 已迁出/归档，恢复方法与历史提交见工作日志索引；不要在 `docs/` 重建重复版本。
+- 旧 Flask/Vue2 代码与保护物不再位于仓库根；历史结构只在 `legacy/` 或旧检查点中理解，当前实施以 `backend/`、`movie-web/` 为准。
 
-## 现行文档（按权威性）
-
-完整权威顺序共 14 条，以 `项目工作日志\00-索引\README.md` 第二节为准；此处只摘前 4 条，避免两份清单各说各话：
-
-1. `项目工作日志\02-架构与设计\project-framework.md` —— 架构与数据流权威说明
-2. `项目工作日志\01-交接与现状\交接-2026-10-31.md` —— 当前状态交接（实测）
-3. `项目工作日志\03-计划与验收\scrapy-development-plan.md` —— 阶段 0–6 与验收标准
-4. `项目工作日志\04-巡检与评估报告\2026-10-31-项目盘点与后续准备.md` —— 最新盘点
-
-## 如需恢复原位置
-
-三份文档的删除已随提交 `c81230b`（2026-10-31）落地，`HEAD` 中已无这些文件，
-因此不能用 `git checkout --`（它会到 `HEAD`/暂存区找，必然报 `pathspec did not match`）。
-需从删除前的最后一个提交 `d4a86ac` 取回：
-
-```powershell
-cd 'F:\Python-project\Flask-Vue-LSTM-scrapy\项目源码'
-git checkout d4a86ac -- docs/architecture.md docs/data-flow.md docs/troubleshooting.md
-```
-
-若不确定是哪个提交，可自查：`git log --diff-filter=D --oneline -- docs/`。
-
-其余未纳入 Git 的文档，按上表从 `项目工作日志` 手工移回即可。
+M9 仍为桌面限定结项状态；M10 交付仍待所有者验收。文档入口更新不代表历史验收状态、凭据事件或未归因 HTTP201 状态改变。

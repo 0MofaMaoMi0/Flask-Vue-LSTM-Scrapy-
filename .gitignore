@@ -85,3 +85,7 @@ desktop.ini
 
 # Login integration local caches
 .local-cache/
+
+# Local protected legacy assets; tracked historical blobs remain versioned.
+/legacy/*
+!/legacy/README.md
