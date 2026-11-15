@@ -4,7 +4,7 @@ from .tools import validate_filters,facts
 from .conditions import merge_for_tool,hard_conditions
 class AgentTools:
     def __init__(self,reader,user,initial=(),conditions=None):self.reader=reader;self.user=user;self.calls=0;self.conditions=conditions or {};self.model_hints=[];self.observed={m['movie_id']:self.dto(m) for m in initial}
-    def dto(self,m):return dict(facts(m),overview=str(m.get('overview') or '')[:1200],local_reasons=m.get('local_reasons',[]),tmdb_popularity=m.get('tmdb_popularity'),popularity_observed_at=m.get('popularity_observed_at'),**{k:m[k] for k in ('tmdb_id','tmdb_rating','vote_count','revenue','revenue_as_of','feature_source','feature_as_of','tmdb_details','tmdb_status') if k in m})
+    def dto(self,m):return dict(facts(m),overview=str(m.get('overview') or '')[:1200],local_reasons=m.get('local_reasons',[]),tmdb_popularity=m.get('tmdb_popularity'),popularity_observed_at=m.get('popularity_observed_at'),**{k:m[k] for k in ('tmdb_id','tmdb_rating','vote_count','revenue','revenue_as_of','feature_source','feature_as_of','tmdb_details','tmdb_status','score','components','reason_codes','evidence','recommendation_version') if k in m})
     def execute(self,name,args):
         if type(args) is not dict:raise ValueError('Tool arguments')
         self.calls+=1
@@ -80,8 +80,17 @@ def verify_final(content,observed,reader,user,filters=None,behavior_query=False)
         if (ids or external) and filters.get('_needs_clarification'):raise ValueError('Unresolved explicit user conditions')
         for mid in ids:
             state={} if behavior_query else behavior.get(str(mid),{})
-            if not matches(visible[mid],filters,state):raise ValueError('Final movie violates server-enforced conditions')
+            if not matches(visible[mid],filters,state) or (not behavior_query and (visible[mid].get('is_adult') is True or state.get('watched') and filters.get('unwatched') is not False)):raise ValueError('Final movie violates server-enforced conditions')
     items=[dict(facts(visible[mid]),poster=visible[mid].get('poster'),in_catalog=True,verification='LOCAL_DATABASE',reasons=['详见AI生成解释']) for mid in ids]
+    grounded=reader.recommendation_evidence(user,ids,filters or {}) if ids and not behavior_query and hasattr(reader,'recommendation_evidence') else {}
+    if ids and not behavior_query and hasattr(reader,'recommendation_evidence') and set(grounded)!=set(ids):raise ValueError('Final movie violates server-enforced conditions')
+    for item in items:
+        rank=grounded.get(item['movie_id'])
+        if rank:
+            item.update({k:rank[k] for k in ('score','components','reason_codes','evidence','recommendation_version','reasons')})
+        else:
+            evidence=[{'source':'CATALOG','field':key,'value':visible[item['movie_id']][key]} for key in ('release_year','genres','runtime_minutes','original_language') if visible[item['movie_id']].get(key)]
+            item.update(reason_codes=['VERIFIED_CATALOG_FACTS'],evidence=evidence,recommendation_version='m10-grounding-v1',reasons=['目录核实：'+str(e['value']) for e in evidence] or ['目录中的真实电影记录'])
     if type(external) is not list or len(external)>5:raise ValueError('Discovery limit')
     discoveries=[]
     for item in external:

@@ -38,7 +38,7 @@ def parse(message,previous=None,*,max_length=500):
     if re.search(r'不限类型|类型不限|类型随意|取消类型(?:限制)?',text):
         _clear_positive(f);f['excluded_genres']=[]
         for g in GENRES:f['_soft_preferences'].pop(g,None)
-    if re.search(r'看过的也可以|包括已看|取消(?:未看|没看过|已看)限制|不限是否看过',text):f.pop('unwatched',None)
+    if re.search(r'重温|再看一次|看过的也可以|包括已看|取消(?:未看|没看过|已看)限制|不限是否看过',text):f['unwatched']=False
     # Split scope before classifying each genre; a negative cue applies to its list,
     # but cannot turn a following positive clause into a negative or vice versa.
     events={};positive_order=[];additive=bool(re.search(r'加上|再加|增加|也要|不仅',text));mode='all' if re.search(r'同时|兼有|都(?:要|有|包含)|两种.*都有',text) else 'any'

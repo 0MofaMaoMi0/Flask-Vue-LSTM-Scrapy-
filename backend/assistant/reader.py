@@ -2,7 +2,8 @@
 from sqlalchemy import select
 from catalog.models import CatalogBase
 from catalog.recommendation import recommend
-from .conditions import matches,genre_groups
+from catalog.recommendation_pipeline import rank_movies
+from .conditions import matches,genre_groups,FILTER_KEYS
 class CatalogReader:
     def __init__(self,engine,behavior,tmdb=None,cache_dir=None):self.engine=engine;self.behavior=behavior;self.tmdb=tmdb;self.cache_dir=cache_dir
     def snapshot(self,user):
@@ -16,9 +17,17 @@ class CatalogReader:
         if intent=='recommend' and filters.get('behavior')=='want':
             allowed=[m for m in allowed if state.get(str(m['movie_id']),{}).get('want')]
         if intent=='recommend':
-            ranking=recommend(allowed,state,profile_movies=movies,limit=10,baseline_field='catalog_popularity',mode='M7_LOCAL',cold_start_reason='目录冷启动推荐')
-            byid={m['movie_id']:m for m in allowed};allowed=[dict(byid[r['movie_id']],local_reasons=r['reasons']) for r in ranking['items'] if r['movie_id'] in byid]
+            policy={k:v for k,v in filters.items() if k in FILTER_KEYS or k in ('_genre_groups','_year_groups')}
+            ranking=rank_movies(allowed,state,profile_movies=movies,limit=10,filters=policy,allow_watched=filters.get('unwatched') is False)
+            byid={m['movie_id']:m for m in allowed};allowed=[dict(byid[r['movie_id']],local_reasons=r['reasons'],**{k:r[k] for k in ('score','components','reason_codes','evidence','recommendation_version')}) for r in ranking['items'] if r['movie_id'] in byid]
         return allowed[:10],state,truncated,movies
+
+    def recommendation_evidence(self,user,ids,filters):
+        movies,state,_=self.snapshot(user)
+        selected=[m for m in movies if m['movie_id'] in ids]
+        policy={k:v for k,v in filters.items() if k in FILTER_KEYS or k in ('_genre_groups','_year_groups')}
+        result=rank_movies(selected,state,profile_movies=movies,limit=10,filters=policy,allow_watched=filters.get('unwatched') is False)
+        return {m['movie_id']:m for m in result['items']}
 
     def recommendation_board(self,user,channel,filters,keyword='',limit=10,scope='all'):
         from catalog.recommendation_boards import board

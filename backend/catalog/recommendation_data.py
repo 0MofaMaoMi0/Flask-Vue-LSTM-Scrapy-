@@ -77,5 +77,5 @@ def _load_candidates(engine):
             byid[row['movie_id']]['poster']=asset_url(row)
     maximum=max((math.log1p(row['tmdb_popularity']) for row in movies if row['tmdb_popularity'] is not None),default=0)
     for row in movies:
-        row['catalog_popularity']=math.log1p(row['tmdb_popularity'])/maximum if maximum and row['tmdb_popularity'] is not None else 0
+        row['catalog_popularity']=(math.log1p(row['tmdb_popularity'])/maximum if maximum else 0.0) if row['tmdb_popularity'] is not None else None
     return movies

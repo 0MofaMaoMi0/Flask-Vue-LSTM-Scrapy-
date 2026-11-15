@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/m10/scenarios.schema.json",
+  "title": "M10 offline evaluation scenarios",
+  "type": "object",
+  "required": ["schema_version", "scenarios"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "m10-eval-v1"},
+    "state_as_of": {"type": "string", "description": "Aware ISO-8601 time for the default state."},
+    "note": {"type": "string", "maxLength": 500},
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/scenario"}
+    }
+  },
+  "$defs": {
+    "stringList": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {"type": "string", "minLength": 1, "maxLength": 40},
+      "uniqueItems": true
+    },
+    "hardConditions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "genre": {"type": "string", "minLength": 1, "maxLength": 40},
+        "genres_any": {"$ref": "#/$defs/stringList"},
+        "genres_all": {"$ref": "#/$defs/stringList"},
+        "excluded_genres": {"$ref": "#/$defs/stringList"},
+        "year_from": {"type": "integer", "minimum": 1880, "maximum": 2100},
+        "year_to": {"type": "integer", "minimum": 1880, "maximum": 2100},
+        "years_any": {
+          "type": "array", "minItems": 1, "maxItems": 15, "uniqueItems": true,
+          "items": {"type": "integer", "minimum": 1880, "maximum": 2100}
+        },
+        "excluded_year_ranges": {
+          "type": "array", "maxItems": 15,
+          "items": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 1880, "maximum": 2100}
+          }
+        },
+        "year_ranges_any": {
+          "type": "array", "maxItems": 15,
+          "items": {
+            "type": "array", "minItems": 2, "maxItems": 2,
+            "items": {"type": "integer", "minimum": 1880, "maximum": 2100}
+          }
+        },
+        "runtime_max": {"type": "integer", "minimum": 1, "maximum": 600},
+        "language": {"type": "string", "minLength": 1, "maxLength": 40},
+        "unwatched": {"type": "boolean"}
+      }
+    },
+    "stateValue": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "rating": {"type": "number", "minimum": 0.5, "maximum": 5},
+        "favorite": {"type": "boolean"},
+        "want": {"type": "boolean"},
+        "watched": {"type": "boolean"},
+        "not_interested": {"type": "boolean"}
+      }
+    },
+    "labels": {
+      "type": "object",
+      "required": ["relevant_movie_ids", "label_source", "reliable"],
+      "additionalProperties": false,
+      "properties": {
+        "relevant_movie_ids": {
+          "type": "array",
+          "items": {"type": "integer", "minimum": 1},
+          "uniqueItems": true
+        },
+        "label_source": {"enum": ["HUMAN", "HISTORICAL_HELDOUT", "SYNTHETIC", "NONE"]},
+        "reliable": {"type": "boolean"},
+        "label_window": {
+          "type": "object",
+          "required": ["from", "to"],
+          "additionalProperties": false,
+          "properties": {
+            "from": {"type": "string"},
+            "to": {"type": "string"}
+          }
+        },
+        "note": {"type": "string", "maxLength": 500},
+        "evidence": {"type": "string", "maxLength": 500}
+      }
+    },
+    "scenario": {
+      "type": "object",
+      "required": ["scenario_id", "category", "split", "labels"],
+      "additionalProperties": false,
+      "properties": {
+        "scenario_id": {"type": "string", "minLength": 1, "maxLength": 100},
+        "category": {
+          "enum": [
+            "cold_start", "genre", "multi_genre", "watched", "not_interested",
+            "multi_hard_conditions", "soft_preference", "niche", "no_results",
+            "out_of_catalog"
+          ]
+        },
+        "split": {"enum": ["train", "dev", "test"]},
+        "query": {"type": "string", "maxLength": 500},
+        "state": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/stateValue"}
+        },
+        "state_as_of": {"type": "string"},
+        "hard_conditions": {"$ref": "#/$defs/hardConditions"},
+        "soft_preferences": {"type": "object"},
+        "allow_external": {"type": "boolean"},
+        "expectation": {"enum": ["RESULTS", "NO_RESULTS", "EXTERNAL_DISCOVERY"]},
+        "notes": {"type": "string", "maxLength": 500},
+        "labels": {"$ref": "#/$defs/labels"}
+      }
+    }
+  }
+}

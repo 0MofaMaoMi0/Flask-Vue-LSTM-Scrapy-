@@ -3,10 +3,11 @@ import hashlib,json,math,os,threading
 from pathlib import Path
 from datetime import datetime,timedelta,timezone
 from .recommendation import recommend
+from .recommendation_pipeline import rank_movies,RECOMMENDATION_VERSION
 from .recommendation_data import load_candidates,valid_number
 from assistant.conditions import matches,validate_filters
 
-VERSION='boards-v1'
+VERSION='boards-m10-v2'
 CHANNELS={
  'popular':'热门推荐','trending_day':'今日热榜','trending_week':'本周热榜',
  'daily':'每日为你推荐','weekly':'每周精选','top_rated':'高分口碑',
@@ -112,12 +113,12 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     personal=channel in ('daily','weekly','because','personal')
     def allowed(m):
         s=state.get(str(m.get('movie_id')),{})
-        return matches(m,filters,s) and (not personal or not s.get('watched')) and (not keyword or keyword.casefold() in (m['title']+' '+(m.get('original_title') or '')).casefold()) and (min_votes is None or (m.get('vote_count') is not None and m['vote_count']>=min_votes))
+        return matches(m,filters,s) and (not personal or not s.get('watched') or filters.get('unwatched') is False) and (not keyword or keyword.casefold() in (m['title']+' '+(m.get('original_title') or '')).casefold()) and (min_votes is None or (m.get('vote_count') is not None and m['vote_count']>=min_votes))
     result={'channel':channel,'title':CHANNELS[channel],'description':DESCRIPTIONS[channel],'algorithm_version':VERSION,'scope':'LOCAL_CATALOG','catalog_total':len(active),
         'as_of':now.isoformat(),'period':None,'timezone':'Asia/Shanghai','paid_model_tokens':0,'items':[],
         'popularity_covered':sum(m.get('tmdb_popularity') is not None for m in active),'status':'OK','limitations':[]}
     result['mode']='MYSQL_CATALOG_POPULAR' if channel=='popular' else 'MYSQL_AUTHENTICATED_RECOMMENDATION' if channel=='personal' else 'MYSQL_RECOMMENDATION_CHANNEL'
-    ranked=[];reasons={};scores={};source_ranks={};matching_count=None
+    ranked=[];reasons={};scores={};source_ranks={};matching_count=None;ranking_evidence={}
     if channel in PUBLIC:
         # Browsing uses published snapshots; explicit TMDB refresh and scheduled
         # jobs update them without tying a catalog GET to external network work.
@@ -143,7 +144,10 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
         if channel in ('personal','daily','weekly','watchlist'):
             if channel=='watchlist':eligible=[m for m in eligible if state.get(str(m['movie_id']),{}).get('want') and not state.get(str(m['movie_id']),{}).get('watched')]
             matching_count=len(eligible)
-            ranking=recommend(eligible,state,profile_movies=active,limit=50,weights=weights,baseline_field='catalog_popularity',cold_start_reason='可用热度与多样性冷启动')
+            from assistant.conditions import FILTER_KEYS
+            policy={k:v for k,v in filters.items() if k in FILTER_KEYS or k in ('_genre_groups','_year_groups')}
+            ranking=rank_movies(eligible,state,profile_movies=active,limit=50,weights=weights,filters=policy,allow_watched=filters.get('unwatched') is False)
+            ranking_evidence={r['movie_id']:r for r in ranking['items']}
             ranked=[byid[r['movie_id']] for r in ranking['items']]
             reasons={str(r['movie_id']):list(r['reasons']) for r in ranking['items']};scores={str(r['movie_id']):r['score'] for r in ranking['items']}
             if channel in ('daily','weekly'):
@@ -151,7 +155,12 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
                 for m in ranked:
                     n=m.get('vote_count') or 0
                     if m.get('tmdb_rating') is not None and n>0:
-                        scores[str(m['movie_id'])]+=.2*(n*m['tmdb_rating']+100*6.5)/(n+100)/10
+                        bonus=.2*(n*m['tmdb_rating']+100*6.5)/(n+100)/10
+                        scores[str(m['movie_id'])]+=bonus
+                        detail=ranking_evidence[m['movie_id']]
+                        detail['components']['board_rating_prior']=bonus
+                        detail['reason_codes']=sorted(set(detail['reason_codes']+['PERIOD_RATING_PRIOR']))
+                        detail['evidence'].append({'source':'TMDB_DATABASE_SNAPSHOT','field':'tmdb_rating','value':m['tmdb_rating'],'vote_count':n,'contribution':bonus})
                         reasons[str(m['movie_id'])].append('结合有投票依据的TMDB口碑')
                 def variety(m):
                     h=hashlib.sha256((VERSION+'|'+str(user)+'|'+channel+'|'+period+'|'+str(m['movie_id'])).encode()).digest()
@@ -209,6 +218,11 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
         local=m.get('movie_id') is not None;key=str(m['movie_id']) if local and channel not in PUBLIC else str(m.get('tmdb_id'))
         item={k:m.get(k) for k in ('movie_id','tmdb_id','title','original_title','release_year','runtime_minutes','original_language','genres','poster','tmdb_rating','vote_count','revenue','revenue_as_of','revenue_source','tmdb_popularity','feature_source','feature_as_of','popularity_observed_at')}
         item.update(key=('local:'+str(m['movie_id'])) if local else 'tmdb:'+str(m['tmdb_id']),in_catalog=local,rank=index,source_rank=source_ranks.get(str(m.get('tmdb_id'))),reasons=reasons.get(key,[]),score=scores.get(str(m.get('movie_id'))),tmdb_url='https://www.themoviedb.org/movie/'+str(m['tmdb_id']) if m.get('tmdb_id') else None,verification='LOCAL_DATABASE' if local else 'TMDB_OFFICIAL_LIST')
+        evidence=ranking_evidence.get(m.get('movie_id'))
+        if evidence:
+            item.update({k:evidence[k] for k in ('reason_codes','evidence','components','recommendation_version')},score_basis='RAW_BEFORE_DIVERSITY')
+        else:
+            item.update(reason_codes=['CHANNEL_'+channel.upper()],evidence=[{'source':result['source'],'field':'channel','value':channel,'as_of':result.get('source_as_of')}],recommendation_version=VERSION)
         result['items'].append(item)
     if not result['items'] and result['status']=='OK':result['status']='NO_DATA'
     return result
