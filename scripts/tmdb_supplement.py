@@ -35,7 +35,7 @@ from catalog.tmdb_supplement.ingest import (  # noqa: E402
     dry_run as ingest_dry_run,
     run as ingest_run,
 )
-from catalog.tmdb_supplement import board_ingest, trending  # noqa: E402
+from catalog.tmdb_supplement import board_ingest, release_repair, trending  # noqa: E402
 
 EXIT_OK = 0
 EXIT_INPUT = 2
@@ -139,6 +139,36 @@ def _ingest(args):
         return _failure(error)
 
 
+def _repair(args):
+    try:
+        archive = _archive_path(args.archive)
+        if args.command == 'repair-releases-plan':
+            result = release_repair.dry_run(str(archive))
+            result['command'] = 'repair-releases-plan'
+            _print(result)
+            return EXIT_OK
+        if not args.execute:
+            return _failure(release_repair.RepairInputError(
+                'EXECUTE_FLAG_REQUIRED', 'database writes require --execute'))
+        engine, raw = _connect(args.dsn_env)
+        try:
+            result = release_repair.run(_Adapter(raw), str(archive))
+        finally:
+            try:
+                raw.close()
+            finally:
+                engine.dispose()
+        result['command'] = 'repair-releases'
+        _print(result)
+        return EXIT_OK
+    except release_repair.RepairRejected as error:
+        print(json.dumps({'status': 'REJECTED', 'code': error.code},
+                         ensure_ascii=False), file=sys.stderr)
+        return EXIT_INCOMPLETE
+    except release_repair.RepairError as error:
+        return _failure(error)
+
+
 def _trending(args):
     provider = lambda: os.environ.get(args.token_env, '')
     try:
@@ -224,12 +254,20 @@ def main(argv=None):
     board.add_argument('--job-ref', help='stable job reference (defaults to the archive job id)')
     board.add_argument('--dsn-env', default='MI2_DATABASE_URL')
     board.add_argument('--execute', action='store_true', help='required explicit database write switch')
+    repair_plan = sub.add_parser('repair-releases-plan', help='offline dry-run of a derived releases-repair archive')
+    repair_plan.add_argument('--archive', required=True, help='derived repair archive directory')
+    repair = sub.add_parser('repair-releases', help='explicit transactional repair of the releases topic only')
+    repair.add_argument('--archive', required=True, help='derived repair archive directory')
+    repair.add_argument('--dsn-env', default='MI2_DATABASE_URL')
+    repair.add_argument('--execute', action='store_true', help='required explicit database write switch')
     args = parser.parse_args(argv)
 
     if args.command in ('ingest', 'ingest-plan'):
         return _ingest(args)
     if args.command in ('board-ingest', 'board-ingest-plan'):
         return _board(args)
+    if args.command in ('repair-releases', 'repair-releases-plan'):
+        return _repair(args)
     if args.command == 'trending-capture':
         return _trending(args)
 

@@ -86,15 +86,47 @@ class UpstreamError(NormalizeError):
     code = "UPSTREAM_DETAIL_FAILED"
 
 
-def _issue(issues, code, field, message, **extra):
+def _issue(issues, code, field, message, *, severity="error", **extra):
     row = {
         "code": code,
         "field": field,
-        "severity": "error",
+        "severity": severity,
         "message": message,
     }
     row.update(extra)
     issues.append(row)
+
+
+# Upstream occasionally serialises a locale object as a flat Ruby hash inspect
+# string, e.g. ``{"folded_name"=>"English", "iso_639_1"=>"en", ...}``.  The
+# pattern below accepts only that literal shape: bounded length, no escapes,
+# no nested braces, ``"key"=>"value"`` pairs separated by ``", "``.
+_RUBY_FLAT_LOCALE = re.compile(
+    r'\{(?:"[A-Za-z0-9_]{1,64}"\s*=>\s*"[^"\\{}\r\n]{0,200}")'
+    r'(?:,\s*"[A-Za-z0-9_]{1,64}"\s*=>\s*"[^"\\{}\r\n]{0,200}")*\}'
+)
+_RUBY_PAIR = re.compile(r'"([A-Za-z0-9_]{1,64})"\s*=>\s*"([^"\\{}\r\n]{0,200})"')
+_MAX_LOCALE_TEXT = 400
+
+
+def _release_language(value):
+    """Return ``(code, evidence)`` for a release locale, or ``(None, None)``.
+
+    A plain 2..3 letter code is accepted as-is.  For the single known upstream
+    serialisation shape the explicit ``iso_639_1`` value is used, but only when
+    the whole string matches the strict literal pattern and carries exactly one
+    such key whose value is itself a valid code.  Nothing is evaluated and no
+    code is inferred from a language name.
+    """
+    if type(value) is str and LANGUAGE_RE.fullmatch(value):
+        return value, None
+    if type(value) is str and len(value) <= _MAX_LOCALE_TEXT and _RUBY_FLAT_LOCALE.fullmatch(value):
+        pairs = _RUBY_PAIR.findall(value)
+        keys = [key for key, _ in pairs]
+        codes = [item for key, item in pairs if key == "iso_639_1"]
+        if keys.count("iso_639_1") == 1 and len(codes) == 1 and LANGUAGE_RE.fullmatch(codes[0]):
+            return codes[0], {"converted_from": "ruby_hash", "raw": value}
+    return None, None
 
 
 def _partial(issues, field, valid_count, invalid_count):
@@ -564,13 +596,17 @@ def _releases(raw, present, issues):
                 invalid += 1
                 _issue(issues, "INVALID_RELEASE_NOTE", "releases", "note 类型错误或超长", region=code, index=release_index)
                 note = None
-            language = row.get("iso_639_1")
-            if language in (None, ""):
+            raw_language = row.get("iso_639_1")
+            language, converted = _release_language(raw_language)
+            if raw_language in (None, ""):
                 language = None
-            elif type(language) is not str or not LANGUAGE_RE.fullmatch(language):
+            elif language is None:
                 invalid += 1
                 _issue(issues, "INVALID_RELEASE_LANGUAGE", "releases", "发行语言代码格式错误", region=code, index=release_index)
-                language = None
+            elif converted is not None:
+                _issue(issues, "RELEASE_LANGUAGE_CONVERTED", "releases",
+                       "语言代码取自上游已知序列化格式中的 iso_639_1 明示值",
+                       severity="warning", region=code, index=release_index, **converted)
             item = {
                 "type": rtype,
                 "type_name": RELEASE_TYPE_NAMES[rtype],

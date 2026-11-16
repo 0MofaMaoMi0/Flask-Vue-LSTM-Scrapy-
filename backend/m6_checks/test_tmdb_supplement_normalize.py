@@ -285,6 +285,38 @@ class NormalizeContractTests(unittest.TestCase):
         self.assertEqual(doc["facts"]["countries"], [{"iso_3166_1": "US", "name": "United States"}])
         self.assertTrue(any(x["code"] == "PARTIAL_INVALID" for x in doc["issues"]))
 
+    def test_ruby_hash_release_language_uses_explicit_code(self):
+        payload = full_payload()
+        raw = ('{"folded_name"=>"English", "english_name"=>"English", '
+               '"iso_639_1"=>"en", "native_name"=>"English"}')
+        payload["release_dates"] = {"results": [
+            {"iso_3166_1": "AU", "release_dates": [
+                {"type": 3, "release_date": "2026-01-02", "iso_639_1": raw},
+            ]},
+        ]}
+        doc = call(payload)
+        self.assertEqual(doc["field_status"]["releases"], "PRESENT")
+        row = doc["facts"]["releases"][0]["release_dates"][0]
+        self.assertEqual(row["iso_639_1"], "en")
+        converted = [x for x in doc["issues"] if x["code"] == "RELEASE_LANGUAGE_CONVERTED"]
+        self.assertEqual(len(converted), 1)
+        self.assertEqual(converted[0]["raw"], raw)
+        self.assertEqual(converted[0]["severity"], "warning")
+        self.assertEqual(converted[0]["region"], "AU")
+
+    def test_unrecognised_release_language_still_fails(self):
+        for value in ("Mandarin", "PT-BR", "-", '{"native_name"=>"Mandarin"}'):
+            payload = full_payload()
+            payload["release_dates"] = {"results": [
+                {"iso_3166_1": "AU", "release_dates": [
+                    {"type": 3, "release_date": "2026-01-02", "iso_639_1": value},
+                ]},
+            ]}
+            doc = call(payload)
+            self.assertEqual(doc["field_status"]["releases"], "FAILED", value)
+            self.assertTrue(
+                any(x["code"] == "INVALID_RELEASE_LANGUAGE" for x in doc["issues"]), value)
+
     def test_only_production_countries_are_used(self):
         payload = full_payload()
         payload["origin_country"] = ["FR"]
