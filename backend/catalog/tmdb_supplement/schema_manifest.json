@@ -1,0 +1,2284 @@
+{
+  "schema_version": "tmdb-supplement-schema-v1",
+  "status": "PROPOSED_NOT_EXECUTED",
+  "generated_at_utc": "2026-11-16T13:30:00Z",
+  "author": "员工1-结构 (task_4d3c4714c8e1)",
+  "ddl_file": "schema.sql",
+  "target": {
+    "database": "mi2_m6_realcopy_20261107",
+    "operation": "additive-only",
+    "creates_database": false,
+    "alters_or_drops_existing_tables": false,
+    "alters_existing_indexes": false,
+    "grants_privileges": false,
+    "disables_foreign_key_checks": false,
+    "executed": false
+  },
+  "conventions": {
+    "engine": "InnoDB",
+    "charset": "utf8mb4",
+    "collation": "utf8mb4_bin",
+    "case_policy": "所有标识类文本列使用 ascii/ascii_bin，大小写敏感且由 CHECK 固定：国家代码 UPPER，语言代码 LOWER，SHA256 小写十六进制。展示名按原样保存，不用于身份比较。",
+    "time_policy": "全部时间列为 DATETIME(6)，值一律为 UTC；不使用 TIMESTAMP（避免会话时区隐式转换），原始上游时间串另存于 *_raw 列。",
+    "null_policy": "未知写 NULL，不写 0 代替未知；有效 0（vote_count=0、popularity=0）原样保留。无默认值的必填列由写入方显式提供。",
+    "fk_policy": "全部外键 ON DELETE RESTRICT ON UPDATE RESTRICT；不出现 CASCADE / SET NULL。",
+    "identity_policy": "指向已有电影身份的列一律 BIGINT（有符号），与 models.py 的 movies.movie_id 草案一致；新增字典表使用内部自增主键 + TMDB ID 唯一列，沿用 genres 的既有模式。",
+    "statement_policy": "本文件只有 CREATE TABLE；不使用 IF NOT EXISTS；执行前必须完成 preflight，同名表存在即停止。"
+  },
+  "execution": {
+    "statement_count": 12,
+    "statement_kinds": [
+      "CREATE TABLE"
+    ],
+    "transactional": false,
+    "note": "MySQL DDL 逐条自动提交，无法整体回滚；中断后只能按 preflight 逐表比对指纹续跑，禁止自动 DROP 或重跑 IF NOT EXISTS。",
+    "statement_order": [
+      "tmdb_supplement_jobs",
+      "tmdb_companies",
+      "tmdb_keywords",
+      "tmdb_movie_metadata",
+      "tmdb_movie_countries",
+      "tmdb_movie_companies",
+      "tmdb_movie_languages",
+      "tmdb_movie_keywords",
+      "tmdb_release_records",
+      "tmdb_metric_observations",
+      "tmdb_board_snapshots",
+      "tmdb_board_entries"
+    ]
+  },
+  "preconditions": [
+    {
+      "id": "PC-01",
+      "item": "movie_id 类型",
+      "expectation": "movies.movie_id 为有符号 BIGINT NOT NULL AUTO_INCREMENT；本 DDL 全部以 BIGINT 书写",
+      "basis": "backend/catalog/models.py 静态草案（BigInteger）",
+      "verified_on_instance": false,
+      "on_mismatch": "停止：按实际类型重新生成，不执行本文件"
+    },
+    {
+      "id": "PC-02",
+      "item": "被引用的既有表与列",
+      "expectation": "movies(movie_id) 主键；ingest_batches(batch_id) 主键；movie_source_records 存在 UNIQUE(id, movie_id)（草案 uq_movie_source_records_1），且 id/movie_id 均为有符号 BIGINT",
+      "basis": "models.py 静态草案",
+      "verified_on_instance": false,
+      "on_mismatch": "停止：复合外键 (source_record_pk, movie_id) 无法创建"
+    },
+    {
+      "id": "PC-03",
+      "item": "MySQL 版本与 CHECK",
+      "expectation": "MySQL >= 8.0.16（CHECK 约束实际生效）。5.7 会解析但忽略 CHECK，需按“无 CHECK 保护”重新评估",
+      "basis": "项目既有 InnoDB/utf8mb4 结构与 JSON 列使用",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-04",
+      "item": "字符集/排序规则",
+      "expectation": "实例支持 utf8mb4、utf8mb4_bin、ascii、ascii_bin；既有 16 表所用排序规则与本文件不冲突（新表不与既有文本列做等值/连接比较）",
+      "basis": "models.py 已使用 utf8mb4_bin 与 ascii_bin",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-05",
+      "item": "表名不冲突",
+      "expectation": "目标库不存在 12 个新表名（见 preflight.new_tables_absent）",
+      "basis": "models.py 只有 16 张既有表",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-06",
+      "item": "外键开关与会话",
+      "expectation": "执行会话未设置 FOREIGN_KEY_CHECKS=0；未使用 SET GLOBAL；执行账号无需 DROP/GRANT 权限（本文件不含此类语句）",
+      "basis": "协作契约：不关外键、不 GRANT",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-07",
+      "item": "既有表定义不被改动",
+      "expectation": "执行前后 movies / movie_source_records / ingest_batches 的 SHOW CREATE TABLE 指纹不变；本文件不含 ALTER",
+      "basis": "任务约束：原 16 表定义与索引不能改",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-08",
+      "item": "回退前置",
+      "expectation": "新增表一旦写入真实数据，回退前必须先保留数据；本项目不生成自动删除脚本",
+      "basis": "任务约束：保留数据后才可回退",
+      "verified_on_instance": false
+    },
+    {
+      "id": "PC-09",
+      "item": "新表列宽与 normalizer 上限一致",
+      "expectation": "job_ref 128 / country_name 255 / keywords.name 500 / spoken_languages.* 500 / popularity DECIMAL(20,4) 覆盖 MAX_COUNT=1e15；normalizer 若放宽上限，只能加宽新增表列",
+      "basis": "backend/catalog/tmdb_supplement/normalize.py 的 JOB_RE、_countries、_keywords、_optional_text、_metrics",
+      "verified_on_instance": false,
+      "on_mismatch": "停止写入并按新上限重新生成新增表列（不得 ALTER 原 16 表，也不得截断）"
+    }
+  ],
+  "unverified": [
+    "未连接任何 MySQL 实例：12 张表的真实 SHOW CREATE TABLE、字符集/排序规则、外键行为、CHECK 是否生效均未执行验证。",
+    "未核对 movies.movie_id 的真实列类型是否与静态草案一致（有符号 BIGINT 待 SHOW CREATE 确认）。",
+    "未核对既有库中 movie_source_records 的 UNIQUE(id, movie_id) 是否与草案一致。",
+    "未验证目标实例的 MySQL 版本、sql_mode（STRICT 等）、以及默认排序规则。",
+    "未验证同批重跑/旧版本保护/事务中断/回退流程的真实行为；这些属于写入方（员工3/员工5）与 Codex 的隔离库验收。",
+    "未评估数据量级下的索引代价（预计电影量级约 2000，未做真实 EXPLAIN）。",
+    "provenance_json / last_attempt_json 的 JSON 内部结构由写入方实现，MySQL 只校验是合法 JSON，不校验键与取值；本层用 manifest 与静态测试固定其形状，真实写入行为待员工3/员工5 与 Codex 验收。",
+    "normalize 的 dedupe_key 与 record_fingerprint 组合公式只做离线哈希校验；真实 MySQL 下的唯一键去重效果待隔离库执行验证。"
+  ],
+  "preflight": {
+    "why": "MySQL DDL 逐条提交，失败重跑时若用 IF NOT EXISTS 会静默接受半成品或同名异结构，导致后续写入错位；因此必须显式前置核验。",
+    "rules": [
+      "执行任何语句前：查询 information_schema.TABLES，12 个新表名必须全部不存在；存在任一即 ABORT（SUPPLEMENT_SCHEMA_PARTIAL），保留现场人工核对。",
+      "若上次执行中断留下部分表：逐表比对 information_schema 的列/主键/唯一键/索引/外键与 preflight.fingerprints 中该表的指纹；完全一致才允许跳过该表，其余表继续；不一致一律 ABORT（SUPPLEMENT_SCHEMA_DRIFT），不做自动修复、不 DROP 已建表。",
+      "执行前：确认 movies / ingest_batches / movie_source_records 存在，且 movies.movie_id 为有符号 bigint、movie_source_records 具备 (id, movie_id) 唯一键。",
+      "执行后：重复指纹核对，并比对既有 16 表的 SHOW CREATE TABLE 与执行前一致。",
+      "全程禁止 SET FOREIGN_KEY_CHECKS=0、SET GLOBAL、GRANT、DROP、TRUNCATE、ALTER。"
+    ],
+    "queries": [
+      {
+        "id": "new_tables_absent",
+        "sql": "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('tmdb_supplement_jobs','tmdb_companies','tmdb_keywords','tmdb_movie_metadata','tmdb_movie_countries','tmdb_movie_companies','tmdb_movie_languages','tmdb_movie_keywords','tmdb_release_records','tmdb_metric_observations','tmdb_board_snapshots','tmdb_board_entries')",
+        "expected": "0 rows",
+        "on_violation": "ABORT SUPPLEMENT_SCHEMA_PARTIAL"
+      },
+      {
+        "id": "referenced_tables_present",
+        "sql": "SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME IN ('movies','movie_source_records','ingest_batches')",
+        "expected": "3 rows",
+        "on_violation": "ABORT SUPPLEMENT_SCHEMA_TARGET_MISSING"
+      },
+      {
+        "id": "movie_id_type",
+        "sql": "SELECT COLUMN_TYPE, IS_NULLABLE, EXTRA FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'movies' AND COLUMN_NAME = 'movie_id'",
+        "expected": "COLUMN_TYPE = 'bigint'（有符号，无 unsigned），IS_NULLABLE = 'NO'",
+        "on_violation": "ABORT SUPPLEMENT_SCHEMA_TYPE_MISMATCH"
+      },
+      {
+        "id": "source_record_unique_key",
+        "sql": "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'movie_source_records' AND COLUMN_NAME IN ('id','movie_id') ORDER BY INDEX_NAME, SEQ_IN_INDEX",
+        "expected": "存在某个索引其前两列为 (id, movie_id) 且 NON_UNIQUE = 0（对应草案 uq_movie_source_records_1）",
+        "on_violation": "ABORT SUPPLEMENT_SCHEMA_FK_TARGET_NOT_UNIQUE"
+      },
+      {
+        "id": "existing_tables_fingerprint",
+        "sql": "SHOW CREATE TABLE movies; SHOW CREATE TABLE movie_source_records; SHOW CREATE TABLE ingest_batches; SHOW CREATE TABLE movie_ratings_summary;",
+        "expected": "执行前后文本一致（执行前保存，执行后对比）",
+        "on_violation": "ABORT SUPPLEMENT_SCHEMA_EXISTING_TABLE_TOUCHED"
+      }
+    ],
+    "fingerprints": {
+      "algorithm": "sha256 of canonical JSON: {columns:[{name,type,nullable,default,auto_increment}], primary_key, unique_keys, indexes, foreign_keys}（不含 CHECK 文本与注释）",
+      "tables": [
+        {
+          "table": "tmdb_supplement_jobs",
+          "fingerprint": "5b49869ff6232d6b622490de631593d8e0edd3b175c9d39f3fb6381bcca9da1b"
+        },
+        {
+          "table": "tmdb_companies",
+          "fingerprint": "9db6c32b951f3572483778374fa490e17a204aa1ff107dce38ee914bcf577314"
+        },
+        {
+          "table": "tmdb_keywords",
+          "fingerprint": "62972cce6f06fbb5ce5d63add3daccb5b310b32ee06eb1c00472eff950e8f34a"
+        },
+        {
+          "table": "tmdb_movie_metadata",
+          "fingerprint": "35ae654df7aed4fcc2c0581c7191fe9deb4a10767b4319c13126404d4734d113"
+        },
+        {
+          "table": "tmdb_movie_countries",
+          "fingerprint": "4491393b4ab67439a3d6b251bbe155003a28b8939a42d3a79165d45e6f995d58"
+        },
+        {
+          "table": "tmdb_movie_companies",
+          "fingerprint": "97f59a79725abe6bf0f00a157a9b84bc93af3a801f2c77f65d71e2230011bf9c"
+        },
+        {
+          "table": "tmdb_movie_languages",
+          "fingerprint": "0451ceed36f10ae501aad8e63b450e1aa037896daaecfa1146d49ef05ecc104a"
+        },
+        {
+          "table": "tmdb_movie_keywords",
+          "fingerprint": "0c1a19b61968b2652a3195404ba9c0d45cbffd25d1bedab11b501f26b0988e46"
+        },
+        {
+          "table": "tmdb_release_records",
+          "fingerprint": "a8e18527ef77f2f2e6aaa814056be30223b25b6397485489c0f3800b316bc5d5"
+        },
+        {
+          "table": "tmdb_metric_observations",
+          "fingerprint": "1ca961f69b46120c3e5bfa2e8df6dac9e204250462edb888a919e9bdd956fac8"
+        },
+        {
+          "table": "tmdb_board_snapshots",
+          "fingerprint": "e400a2696288e3b942f211407f458b596dc673ce3c87ff3cbd4bd70a15692c95"
+        },
+        {
+          "table": "tmdb_board_entries",
+          "fingerprint": "f07499314e926133f1e1c0e8e4949ad86569c97281c254ec9c63288c0b13338d"
+        }
+      ]
+    }
+  },
+  "reused_existing_tables": {
+    "movies": {
+      "reference_columns": [
+        "movie_id"
+      ],
+      "used_for": "电影内部身份；全部新增关联/观测表的 movie_id 外键目标",
+      "mutations": "none"
+    },
+    "movie_external_ids": {
+      "reference_columns": [
+        "source",
+        "external_id",
+        "movie_id"
+      ],
+      "used_for": "榜单条目的 tmdb_id → movie_id 解析（source='tmdb'，external_id 为字符串，需 CAST）；不在新表重复保存外部标识",
+      "mutations": "none"
+    },
+    "movie_source_records": {
+      "reference_columns": [
+        "id",
+        "movie_id",
+        "payload_hash",
+        "fetched_at",
+        "ingest_batch_id"
+      ],
+      "used_for": "原始响应与批次来源；新增表以 (source_record_pk, movie_id) 复合外键指向它，保证溯源属于同一电影",
+      "mutations": "none"
+    },
+    "ingest_batches": {
+      "reference_columns": [
+        "batch_id"
+      ],
+      "used_for": "补采任务与榜单快照的批次审计",
+      "mutations": "none"
+    },
+    "movie_ratings_summary": {
+      "reference_columns": [
+        "movie_id",
+        "source",
+        "score_value",
+        "score_scale",
+        "vote_count",
+        "observed_at",
+        "selected_source_record_pk"
+      ],
+      "used_for": "站内当前评分摘要（含 TMDB 当前值，source 区分来源，主键 (movie_id, source)）；新增 tmdb_metric_observations 只保存历史观测点，不另建评分主表",
+      "mutations": "none"
+    },
+    "people": {
+      "reference_columns": [
+        "person_id"
+      ],
+      "used_for": "演职员身份（P1-02 复用，不新增人物表）",
+      "mutations": "none"
+    },
+    "movie_credits": {
+      "reference_columns": [
+        "movie_id",
+        "person_id",
+        "source",
+        "source_credit_key",
+        "role_type",
+        "job",
+        "character_name",
+        "sort_order"
+      ],
+      "used_for": "演职员关系（P1-02 复用）；新表只在 tmdb_movie_metadata.credits_at 记录该主题的补采时间与状态",
+      "mutations": "none"
+    },
+    "genres": {
+      "reference_columns": [
+        "genre_id",
+        "tmdb_genre_id"
+      ],
+      "used_for": "P0-05 基础类型（复用，不新增类型表）",
+      "mutations": "none"
+    },
+    "movie_genres": {
+      "reference_columns": [
+        "movie_id",
+        "genre_id"
+      ],
+      "used_for": "电影-类型关系（复用）",
+      "mutations": "none"
+    },
+    "movie_assets": {
+      "reference_columns": [
+        "movie_id",
+        "asset_type",
+        "source_path"
+      ],
+      "used_for": "海报/背景图（复用，不新增素材表）",
+      "mutations": "none"
+    }
+  },
+  "logical_responsibilities": [
+    {
+      "id": "R01",
+      "responsibility": "补采任务：范围、预算、计数、状态、断点、恢复",
+      "tables": [
+        "tmdb_supplement_jobs"
+      ],
+      "reused": [
+        "ingest_batches"
+      ],
+      "merge_or_split_note": "独立成表：任务生命周期与电影级当前态、明细关系都不同频；不拆成“预算表/断点表/状态表”。"
+    },
+    {
+      "id": "R02",
+      "responsibility": "每电影当前补充态：版本、TMDB 身份、来源记录/响应摘要、各主题状态与 UTC 时间",
+      "tables": [
+        "tmdb_movie_metadata"
+      ],
+      "reused": [
+        "movies",
+        "movie_source_records"
+      ],
+      "merge_or_split_note": "独立成表：不能 ALTER movies，且当前态需要按电影覆盖更新；不把主题状态拆成每主题一张状态表。"
+    },
+    {
+      "id": "R03",
+      "responsibility": "制作国家（多对多）",
+      "tables": [
+        "tmdb_movie_countries"
+      ],
+      "reused": [
+        "movies"
+      ],
+      "merge_or_split_note": "不设国家字典表：ISO 3166-1 是封闭标准，展示名随行缓存即可，身份仍为代码。"
+    },
+    {
+      "id": "R04",
+      "responsibility": "制作公司字典",
+      "tables": [
+        "tmdb_companies"
+      ],
+      "reused": [],
+      "merge_or_split_note": "公司有名称/来源国家/logo 三个独立属性，且被多部电影共享，保留字典表避免每部电影重复 10+ 次。"
+    },
+    {
+      "id": "R05",
+      "responsibility": "电影-公司关联（多对多）",
+      "tables": [
+        "tmdb_movie_companies"
+      ],
+      "reused": [
+        "movies",
+        "tmdb_companies"
+      ],
+      "merge_or_split_note": "关系表独立，主键即去重键；不把公司名写进关系行。"
+    },
+    {
+      "id": "R06",
+      "responsibility": "对白语言字典（代码 + 展示名）",
+      "tables": [
+        "tmdb_movie_languages"
+      ],
+      "reused": [],
+      "merge_or_split_note": "合并进 R07：ISO 639-1 只有“代码+两个展示名”，独立字典表会多一条同步路径而无查询收益；按代码汇总不需要字典表，展示名取任意一行。公司/关键词不合并，因为它们属性更多且被复用更频繁。"
+    },
+    {
+      "id": "R07",
+      "responsibility": "电影-对白语言关联（多对多）",
+      "tables": [
+        "tmdb_movie_languages"
+      ],
+      "reused": [
+        "movies"
+      ],
+      "merge_or_split_note": "与 R06 同表：主键 (movie_id, language_code)，展示名作为属性列。"
+    },
+    {
+      "id": "R08",
+      "responsibility": "关键词字典",
+      "tables": [
+        "tmdb_keywords"
+      ],
+      "reused": [],
+      "merge_or_split_note": "保留字典：关键词量大、名称会独立变更、后续推荐/主题页会复用；名称不唯一，身份是 TMDB keyword id。"
+    },
+    {
+      "id": "R09",
+      "responsibility": "电影-关键词关联（多对多）",
+      "tables": [
+        "tmdb_movie_keywords"
+      ],
+      "reused": [
+        "movies",
+        "tmdb_keywords"
+      ],
+      "merge_or_split_note": "关系表独立，主键即去重键。"
+    },
+    {
+      "id": "R10",
+      "responsibility": "各地区发行与认证（含发行类型、语言、原始时间串）",
+      "tables": [
+        "tmdb_release_records"
+      ],
+      "reused": [
+        "movies",
+        "movie_source_records"
+      ],
+      "merge_or_split_note": "单表按行存一条发行记录；不按国家/类型拆表，也不依赖可空复合唯一去重（改用 NOT NULL 指纹唯一）。"
+    },
+    {
+      "id": "R11",
+      "responsibility": "真实指标观测历史（评分/票数/热度，按实际采集时点）",
+      "tables": [
+        "tmdb_metric_observations"
+      ],
+      "reused": [
+        "movie_ratings_summary",
+        "movie_source_records"
+      ],
+      "merge_or_split_note": "单表存三类指标：它们同一时点一起采集，拆表只会扩大连接；与 movie_ratings_summary 分工为“历史点 vs 当前摘要”。"
+    },
+    {
+      "id": "R12",
+      "responsibility": "榜单快照（频道、实际采集时刻、批次、成功状态）",
+      "tables": [
+        "tmdb_board_snapshots"
+      ],
+      "reused": [
+        "ingest_batches"
+      ],
+      "merge_or_split_note": "快照头与条目分表（1:N）；不把条目塞进 JSON，否则无法按排名/电影查询。"
+    },
+    {
+      "id": "R13",
+      "responsibility": "榜单条目（原始排名，库外允许无 movie_id）",
+      "tables": [
+        "tmdb_board_entries"
+      ],
+      "reused": [
+        "movies",
+        "movie_external_ids"
+      ],
+      "merge_or_split_note": "独立子表；movie_id 可空但仍有 RESTRICT 外键（NULL 不受约束），不自动建片。"
+    }
+  ],
+  "tables": [
+    {
+      "name": "tmdb_supplement_jobs",
+      "role": "R01 补采任务：预算、计数、状态、断点",
+      "identity": "job_id 内部自增；job_ref 为任务可读标识（与规范化文档 job_id 一致），唯一",
+      "columns": [
+        {
+          "name": "job_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "job_ref",
+          "type": "VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "有界任务标识，与 normalize.job_id 一致（JOB_RE 1..128），唯一"
+        },
+        {
+          "name": "mode",
+          "type": "VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "dry-run | write"
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "pending/running/paused/succeeded/partial/failed/interrupted"
+        },
+        {
+          "name": "request_budget",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 请求上限，必须 > 0"
+        },
+        {
+          "name": "request_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "0",
+          "note": "已用请求数，不得超过预算"
+        },
+        {
+          "name": "success_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "0",
+          "note": "成功电影数"
+        },
+        {
+          "name": "failure_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "0",
+          "note": "失败电影数"
+        },
+        {
+          "name": "skipped_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "0",
+          "note": "跳过电影数"
+        },
+        {
+          "name": "scope_json",
+          "type": "JSON",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "范围摘要；禁止写入 Token/连接串"
+        },
+        {
+          "name": "checkpoint_json",
+          "type": "JSON",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "断点（游标/页码/已处理计数）；禁止写入 Token"
+        },
+        {
+          "name": "ingest_batch_id",
+          "type": "BIGINT",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "批次审计；dry-run 可为空"
+        },
+        {
+          "name": "started_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        },
+        {
+          "name": "heartbeat_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC，用于识别卡死任务"
+        },
+        {
+          "name": "finished_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC；终态必须非空"
+        },
+        {
+          "name": "error_code",
+          "type": "VARCHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "稳定错误码，不含秘密"
+        },
+        {
+          "name": "error_summary",
+          "type": "VARCHAR(512)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "简短错误摘要，不含秘密"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "job_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_supplement_jobs_ref",
+          "columns": [
+            "job_ref"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_supplement_jobs_status",
+          "columns": [
+            "status",
+            "started_at",
+            "job_id"
+          ],
+          "purpose": "按状态查看/恢复任务"
+        },
+        {
+          "name": "ix_tmdb_supplement_jobs_batch",
+          "columns": [
+            "ingest_batch_id"
+          ],
+          "purpose": "外键索引 + 批次反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_supplement_jobs_batch",
+          "columns": [
+            "ingest_batch_id"
+          ],
+          "references": {
+            "table": "ingest_batches",
+            "columns": [
+              "batch_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_supplement_jobs_mode",
+          "expression": "mode IN ('dry-run','write')"
+        },
+        {
+          "name": "ck_tmdb_supplement_jobs_status",
+          "expression": "status IN ('pending','running','paused','succeeded','partial','failed','interrupted')"
+        },
+        {
+          "name": "ck_tmdb_supplement_jobs_budget",
+          "expression": "request_budget > 0 AND request_count >= 0 AND request_count <= request_budget"
+        },
+        {
+          "name": "ck_tmdb_supplement_jobs_counts",
+          "expression": "success_count >= 0 AND failure_count >= 0 AND skipped_count >= 0"
+        },
+        {
+          "name": "ck_tmdb_supplement_jobs_finished",
+          "expression": "status NOT IN ('succeeded','partial','failed') OR finished_at IS NOT NULL"
+        },
+        {
+          "name": "ck_tmdb_supplement_jobs_times",
+          "expression": "finished_at IS NULL OR finished_at >= started_at"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "任务创建时写 scope_json 与 request_budget；每完成一次请求更新 request_count/heartbeat_at/checkpoint_json；终态写 finished_at 与 error_code。暂停/恢复只更新 status 与 checkpoint，不新建行。",
+      "dedup": "job_ref 唯一：同一任务重入更新原行，不重复建任务。",
+      "null_semantics": "checkpoint_json / heartbeat_at / error_* / ingest_batch_id 可为 NULL（尚未产生）。"
+    },
+    {
+      "name": "tmdb_companies",
+      "role": "R04 制作公司字典",
+      "identity": "company_id 内部自增；tmdb_company_id 唯一（TMDB 身份）",
+      "columns": [
+        {
+          "name": "company_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "tmdb_company_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 公司 ID，> 0"
+        },
+        {
+          "name": "name",
+          "type": "VARCHAR(255)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "公司名，可变更属性"
+        },
+        {
+          "name": "origin_country",
+          "type": "CHAR(2) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "ISO 3166-1 alpha-2 大写；未知 NULL；不等同制作国家"
+        },
+        {
+          "name": "logo_path",
+          "type": "VARCHAR(500)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB logo 路径；normalize 只校验格式不限长度，写入方按 500 校验并报 issue"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "company_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_companies_tmdb",
+          "columns": [
+            "tmdb_company_id"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_companies_country",
+          "columns": [
+            "origin_country",
+            "company_id"
+          ],
+          "purpose": "国家专题公司排行"
+        }
+      ],
+      "foreign_keys": [],
+      "checks": [
+        {
+          "name": "ck_tmdb_companies_tmdb",
+          "expression": "tmdb_company_id > 0"
+        },
+        {
+          "name": "ck_tmdb_companies_name",
+          "expression": "CHAR_LENGTH(TRIM(name)) > 0"
+        },
+        {
+          "name": "ck_tmdb_companies_origin",
+          "expression": "origin_country IS NULL OR (CHAR_LENGTH(origin_country)=2 AND origin_country=UPPER(origin_country))"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "按 tmdb_company_id UPSERT 名称/来源国家/logo；名称变化只更新属性，不改变身份。",
+      "dedup": "tmdb_company_id 唯一。",
+      "null_semantics": "origin_country / logo_path 可为 NULL（上游未提供），不推断为 US。"
+    },
+    {
+      "name": "tmdb_keywords",
+      "role": "R08 关键词字典",
+      "identity": "keyword_id 内部自增；tmdb_keyword_id 唯一；name 不唯一",
+      "columns": [
+        {
+          "name": "keyword_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "tmdb_keyword_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB keyword ID，> 0"
+        },
+        {
+          "name": "name",
+          "type": "VARCHAR(500)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "关键词名。宽度对齐 normalize 的 500；超长元素被 normalizer 丢弃并报 issue"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "keyword_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_keywords_tmdb",
+          "columns": [
+            "tmdb_keyword_id"
+          ]
+        }
+      ],
+      "indexes": [],
+      "foreign_keys": [],
+      "checks": [
+        {
+          "name": "ck_tmdb_keywords_tmdb",
+          "expression": "tmdb_keyword_id > 0"
+        },
+        {
+          "name": "ck_tmdb_keywords_name",
+          "expression": "CHAR_LENGTH(TRIM(name)) > 0"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "按 tmdb_keyword_id UPSERT 名称；不同 ID 同名不合并。",
+      "dedup": "tmdb_keyword_id 唯一；name 故意不唯一。",
+      "null_semantics": "无（全部必填）。"
+    },
+    {
+      "name": "tmdb_movie_metadata",
+      "role": "R02 每电影当前补充态：三层状态（尝试状态 / 尝试来源 / 已保留事实来源）+ 逐主题成功时间",
+      "identity": "movie_id 主键（一电影一行）；tmdb_id 唯一",
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "tmdb_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 电影 ID，> 0，唯一"
+        },
+        {
+          "name": "source_record_pk",
+          "type": "BIGINT",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "base 主题当前事实来源，是 provenance_json.base 的投影列；不能用于给其它主题归因"
+        },
+        {
+          "name": "payload_sha256",
+          "type": "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "base 响应的规范化 payload SHA256（小写十六进制），与 provenance_json.base 一致"
+        },
+        {
+          "name": "field_status_json",
+          "type": "JSON",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "8 主题最近一次尝试状态，严格五态 NOT_FETCHED/MISSING/EMPTY/PRESENT/FAILED；冲突不是状态，记 FAILED + error_code=TOPIC_VERSION_CONFLICT"
+        },
+        {
+          "name": "last_attempt_json",
+          "type": "JSON",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "8 主题最近尝试状态/时间/来源/错误；按 attempt_at 单调更新；版本冲突写 error_code=TOPIC_VERSION_CONFLICT 与 conflict_details"
+        },
+        {
+          "name": "provenance_json",
+          "type": "JSON",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "8 主题已保留事实来源/成功版本；state 仅 PRESENT/EMPTY；失败与版本冲突都不得改写"
+        },
+        {
+          "name": "base_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "base 主题已保留事实的成功时间（UTC），不是最近尝试时间"
+        },
+        {
+          "name": "countries_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "countries 主题成功时间（UTC）"
+        },
+        {
+          "name": "companies_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "companies 主题成功时间（UTC）"
+        },
+        {
+          "name": "spoken_languages_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "spoken_languages 主题成功时间（UTC）"
+        },
+        {
+          "name": "keywords_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "keywords 主题成功时间（UTC）"
+        },
+        {
+          "name": "releases_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "releases 主题成功时间（UTC）"
+        },
+        {
+          "name": "credits_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "credits 主题成功时间（UTC）；明细复用 movie_credits"
+        },
+        {
+          "name": "metrics_at",
+          "type": "DATETIME(6)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "metrics 主题成功时间（UTC）"
+        },
+        {
+          "name": "fetched_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "全局高水位：最近尝试/响应时间（UTC），永不倒退；不代表所有主题都更新到该时间"
+        },
+        {
+          "name": "updated_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "movie_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_movie_metadata_tmdb",
+          "columns": [
+            "tmdb_id"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_movie_metadata_fetched",
+          "columns": [
+            "fetched_at",
+            "movie_id"
+          ],
+          "purpose": "按时间找出过期/待更新电影"
+        },
+        {
+          "name": "ix_tmdb_movie_metadata_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "purpose": "复合外键索引 + 来源反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_movie_metadata_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_movie_metadata_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "references": {
+            "table": "movie_source_records",
+            "columns": [
+              "id",
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_movie_metadata_tmdb",
+          "expression": "tmdb_id > 0"
+        },
+        {
+          "name": "ck_tmdb_movie_metadata_sha",
+          "expression": "payload_sha256 IS NULL OR CHAR_LENGTH(payload_sha256)=64"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "逐主题处理，绝不用全局 fetched_at 短路整部电影：对 8 个主题分别比较本次响应的 fetched_at 与该主题已保留事实的 fetched_at（provenance_json[topic].fetched_at，冗余列 *_at）。本次严格更新（>）且状态为 PRESENT/EMPTY 时才替换该主题关系行、推进 *_at、写 provenance_json[topic]={source_record_pk,payload_sha256,fetched_at,state}；PRESENT 按业务键 upsert，EMPTY 清空该主题关系行。相等时间戳且 payload_sha256 相同 => no-op；相等时间戳但 payload_sha256 不同 => field_status_json[topic]='FAILED' 且 last_attempt_json[topic] 记 error_code='TOPIC_VERSION_CONFLICT' 与 conflict_details，关系行、provenance_json、*_at 全部不变（不设第六态，也不把冲突挂到已保留事实）。FAILED/MISSING/NOT_FETCHED（含 normalize 的部分失败）只写 field_status_json[topic] 与 last_attempt_json[topic]，不动关系行、不动 provenance_json、不推进 *_at，不设部分接受路径。尝试层按 attempt_at 单调更新，旧尝试不得覆盖较新尝试。全局 fetched_at = max(现有, 本次 attempt fetched_at)，只作高水位。",
+      "dedup": "movie_id 主键 + tmdb_id 唯一；一电影一行，UPSERT。",
+      "null_semantics": "source_record_pk/payload_sha256 在从未成功时可为 NULL；各 *_at 在以该主题尚未成功时为 NULL。",
+      "status_model": "field_status_json（最近尝试状态） / last_attempt_json（最近尝试来源与时间） / provenance_json（已保留事实来源）三层分离，见 topic_state_model"
+    },
+    {
+      "name": "tmdb_movie_countries",
+      "role": "R03 制作国家关联",
+      "identity": "(movie_id, country_iso2)",
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "country_iso2",
+          "type": "CHAR(2) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "ISO 3166-1 alpha-2 大写"
+        },
+        {
+          "name": "country_name",
+          "type": "VARCHAR(255)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "展示名缓存。宽度对齐 normalize 的 255；超长由 normalizer 报 issue，不截断"
+        }
+      ],
+      "primary_key": [
+        "movie_id",
+        "country_iso2"
+      ],
+      "unique_keys": [],
+      "indexes": [
+        {
+          "name": "ix_tmdb_movie_countries_country",
+          "columns": [
+            "country_iso2",
+            "movie_id"
+          ],
+          "purpose": "国家电影数/国家×类型统计"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_movie_countries_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_movie_countries_iso",
+          "expression": "CHAR_LENGTH(country_iso2)=2 AND country_iso2=UPPER(country_iso2)"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "该主题成功时按电影整体替换（删除旧行 + 插入新行，同事务）；失败不清空。",
+      "dedup": "主键即去重键；同批重跑幂等。",
+      "null_semantics": "country_name 可为 NULL；缺失国家不插入猜测行。"
+    },
+    {
+      "name": "tmdb_movie_companies",
+      "role": "R05 电影-公司关联",
+      "identity": "(movie_id, company_id)",
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "company_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "tmdb_companies.company_id"
+        }
+      ],
+      "primary_key": [
+        "movie_id",
+        "company_id"
+      ],
+      "unique_keys": [],
+      "indexes": [
+        {
+          "name": "ix_tmdb_movie_companies_company",
+          "columns": [
+            "company_id",
+            "movie_id"
+          ],
+          "purpose": "公司作品数/公司国家排行"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_movie_companies_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_movie_companies_company",
+          "columns": [
+            "company_id"
+          ],
+          "references": {
+            "table": "tmdb_companies",
+            "columns": [
+              "company_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [],
+      "secret_columns": [],
+      "write_semantics": "主题成功时按电影整体替换。",
+      "dedup": "主键即去重键。",
+      "null_semantics": "无（全部必填）。"
+    },
+    {
+      "name": "tmdb_movie_languages",
+      "role": "R06+R07 对白语言（字典属性内联）与电影关联",
+      "identity": "(movie_id, language_code)",
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "language_code",
+          "type": "VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "ISO 639-1 小写代码"
+        },
+        {
+          "name": "english_name",
+          "type": "VARCHAR(500)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "英文名。宽度对齐 normalize 的 500；超长置空并报 issue"
+        },
+        {
+          "name": "name",
+          "type": "VARCHAR(500)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "本地化名。宽度对齐 normalize 的 500；超长置空并报 issue"
+        }
+      ],
+      "primary_key": [
+        "movie_id",
+        "language_code"
+      ],
+      "unique_keys": [],
+      "indexes": [
+        {
+          "name": "ix_tmdb_movie_languages_code",
+          "columns": [
+            "language_code",
+            "movie_id"
+          ],
+          "purpose": "语言分布/国家×语言统计"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_movie_languages_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_movie_languages_code",
+          "expression": "CHAR_LENGTH(language_code) BETWEEN 2 AND 16 AND language_code=LOWER(language_code)"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "主题成功时按电影整体替换；与 movies.original_language 互不推导。",
+      "dedup": "主键即去重键。",
+      "null_semantics": "english_name/name 可为 NULL；缺代码的条目只在 field_status_json 记为 MISSING，不伪造语言行。"
+    },
+    {
+      "name": "tmdb_movie_keywords",
+      "role": "R09 电影-关键词关联",
+      "identity": "(movie_id, keyword_id)",
+      "columns": [
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "keyword_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "tmdb_keywords.keyword_id"
+        }
+      ],
+      "primary_key": [
+        "movie_id",
+        "keyword_id"
+      ],
+      "unique_keys": [],
+      "indexes": [
+        {
+          "name": "ix_tmdb_movie_keywords_keyword",
+          "columns": [
+            "keyword_id",
+            "movie_id"
+          ],
+          "purpose": "主题 TOP/国家×主题"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_movie_keywords_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_movie_keywords_keyword",
+          "columns": [
+            "keyword_id"
+          ],
+          "references": {
+            "table": "tmdb_keywords",
+            "columns": [
+              "keyword_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [],
+      "secret_columns": [],
+      "write_semantics": "主题成功时按电影整体替换。",
+      "dedup": "主键即去重键。",
+      "null_semantics": "无（全部必填）。"
+    },
+    {
+      "name": "tmdb_release_records",
+      "role": "R10 地区发行与认证明细",
+      "identity": "release_id 内部自增；record_fingerprint 唯一（去重键）",
+      "columns": [
+        {
+          "name": "release_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "country_iso2",
+          "type": "CHAR(2) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "发行地区，ISO 3166-1 alpha-2 大写"
+        },
+        {
+          "name": "release_type",
+          "type": "TINYINT UNSIGNED",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB type 1..6；未知 NULL"
+        },
+        {
+          "name": "release_date",
+          "type": "DATE",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "可解析的日期；部分日期为 NULL"
+        },
+        {
+          "name": "release_date_raw",
+          "type": "VARCHAR(64)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "上游原始时间串，保留精度与空串语义"
+        },
+        {
+          "name": "certification",
+          "type": "VARCHAR(64)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "分级/认证，可为空串以外的 NULL"
+        },
+        {
+          "name": "note",
+          "type": "VARCHAR(512)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "发行备注"
+        },
+        {
+          "name": "certification_language",
+          "type": "VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "认证/备注语言，小写"
+        },
+        {
+          "name": "source_record_pk",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "来源原始记录，必须属于同一 movie_id"
+        },
+        {
+          "name": "record_fingerprint",
+          "type": "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "标准化指纹 SHA256，去重键"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "release_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_release_records_fingerprint",
+          "columns": [
+            "record_fingerprint"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_release_records_movie",
+          "columns": [
+            "movie_id",
+            "country_iso2",
+            "release_date"
+          ],
+          "purpose": "单片各地区发行时间"
+        },
+        {
+          "name": "ix_tmdb_release_records_country",
+          "columns": [
+            "country_iso2",
+            "movie_id",
+            "release_date"
+          ],
+          "purpose": "国家发行覆盖与时间差"
+        },
+        {
+          "name": "ix_tmdb_release_records_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "purpose": "复合外键索引 + 来源反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_release_records_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_release_records_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "references": {
+            "table": "movie_source_records",
+            "columns": [
+              "id",
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_release_records_iso",
+          "expression": "CHAR_LENGTH(country_iso2)=2 AND country_iso2=UPPER(country_iso2)"
+        },
+        {
+          "name": "ck_tmdb_release_records_type",
+          "expression": "release_type IS NULL OR release_type BETWEEN 1 AND 6"
+        },
+        {
+          "name": "ck_tmdb_release_records_raw",
+          "expression": "release_date_raw IS NULL OR CHAR_LENGTH(release_date_raw) > 0"
+        },
+        {
+          "name": "ck_tmdb_release_records_lang",
+          "expression": "certification_language IS NULL OR (CHAR_LENGTH(certification_language) BETWEEN 2 AND 16 AND certification_language=LOWER(certification_language))"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "主题成功且不旧于当前 fetched_at 时，按指纹 upsert 本次响应中的行（同指纹用 ON DUPLICATE KEY UPDATE 保持 release_id 不变，重放同一 source_record 因此幂等）；只有该主题整体成功（PRESENT 或显式 EMPTY）时才删除该电影本次未再出现的旧指纹行，失败/MISSING 不动旧行。",
+      "dedup": "record_fingerprint = SHA256(canonical(movie_id, country_iso2, release_type, release_date_raw, certification, note, certification_language))，列 NOT NULL + UNIQUE；NULL 在指纹中编码为固定标记，因此不依赖可空复合唯一。",
+      "null_semantics": "release_type/release_date/release_date_raw/certification/note/certification_language 可为 NULL；未知不填 0 或空串。"
+    },
+    {
+      "name": "tmdb_metric_observations",
+      "role": "R11 指标历史观测（评分/票数/热度）",
+      "identity": "observation_id 内部自增；UNIQUE(movie_id, observed_at)",
+      "columns": [
+        {
+          "name": "observation_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "既有电影内部 ID"
+        },
+        {
+          "name": "observed_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "实际采集时刻（UTC），不是 TMDB 数据版本时间"
+        },
+        {
+          "name": "vote_average",
+          "type": "DECIMAL(4,2)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 评分 0..10；未知 NULL"
+        },
+        {
+          "name": "vote_count",
+          "type": "BIGINT",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "票数；有效 0 保留"
+        },
+        {
+          "name": "popularity",
+          "type": "DECIMAL(20,4)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 热度指数；有效 0 保留；上界覆盖 normalize 的 MAX_COUNT=1e15"
+        },
+        {
+          "name": "source_record_pk",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "来源原始记录，必须属于同一 movie_id"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "observation_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_metric_observations_movie_time",
+          "columns": [
+            "movie_id",
+            "observed_at"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_metric_observations_time",
+          "columns": [
+            "observed_at",
+            "movie_id"
+          ],
+          "purpose": "按时间窗口汇总覆盖率/最近观测"
+        },
+        {
+          "name": "ix_tmdb_metric_observations_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "purpose": "复合外键索引 + 来源反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_metric_observations_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_metric_observations_source",
+          "columns": [
+            "source_record_pk",
+            "movie_id"
+          ],
+          "references": {
+            "table": "movie_source_records",
+            "columns": [
+              "id",
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_metric_observations_avg",
+          "expression": "vote_average IS NULL OR (vote_average >= 0 AND vote_average <= 10)"
+        },
+        {
+          "name": "ck_tmdb_metric_observations_votes",
+          "expression": "vote_count IS NULL OR vote_count >= 0"
+        },
+        {
+          "name": "ck_tmdb_metric_observations_pop",
+          "expression": "popularity IS NULL OR popularity >= 0"
+        },
+        {
+          "name": "ck_tmdb_metric_observations_empty",
+          "expression": "vote_count IS NULL OR vote_count <> 0 OR vote_average IS NULL OR vote_average = 0"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "每部电影每次成功采集写一条；同一批次重跑复用同一 observed_at，唯一键使重复插入成为 no-op（INSERT IGNORE 或 ON DUPLICATE KEY UPDATE 不覆盖首次写入）；不同日期的相同数值是新观测，必须插入；需要修正历史点只能写新观测，不改旧行。",
+      "dedup": "唯一键是 (movie_id, observed_at)，与 payload_hash 无关；禁止用 payload_hash/数值组合跨日期去重。",
+      "null_semantics": "未知指标写 NULL；不使用 0 代替未知。vote_count=0 时 vote_average 必须为 NULL 或 0（与既有 movie_ratings_summary 语义一致）。"
+    },
+    {
+      "name": "tmdb_board_snapshots",
+      "role": "R12 榜单快照头",
+      "identity": "snapshot_id 内部自增；UNIQUE(board_channel, captured_at)",
+      "channel_policy": "board_channel 仅允许 recommendation_boards.PUBLIC 的三个 TMDB 官方抓取频道；daily/weekly/top_rated/revenue/because/watchlist/personal 是站内计算频道，不是抓取来源，不得写入快照。",
+      "columns": [
+        {
+          "name": "snapshot_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": true,
+          "default": null,
+          "note": "内部主键"
+        },
+        {
+          "name": "board_channel",
+          "type": "VARCHAR(24) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "popular/trending_day/trending_week（沿用既有词表）"
+        },
+        {
+          "name": "captured_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "实际采集时刻（UTC）；不伪造过去榜单"
+        },
+        {
+          "name": "status",
+          "type": "VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "succeeded/partial/failed"
+        },
+        {
+          "name": "page_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "1",
+          "note": "抓取页数，> 0"
+        },
+        {
+          "name": "entry_count",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": "0",
+          "note": "条目数，>= 0"
+        },
+        {
+          "name": "payload_sha256",
+          "type": "CHAR(64) CHARACTER SET ascii COLLATE ascii_bin",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "原始响应摘要；失败时 NULL"
+        },
+        {
+          "name": "ingest_batch_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "批次审计"
+        },
+        {
+          "name": "created_at",
+          "type": "DATETIME(6)",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "UTC"
+        }
+      ],
+      "primary_key": [
+        "snapshot_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_board_snapshots_channel_time",
+          "columns": [
+            "board_channel",
+            "captured_at"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_board_snapshots_batch",
+          "columns": [
+            "ingest_batch_id"
+          ],
+          "purpose": "外键索引 + 批次反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_board_snapshots_batch",
+          "columns": [
+            "ingest_batch_id"
+          ],
+          "references": {
+            "table": "ingest_batches",
+            "columns": [
+              "batch_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_board_snapshots_channel",
+          "expression": "board_channel IN ('popular','trending_day','trending_week')"
+        },
+        {
+          "name": "ck_tmdb_board_snapshots_status",
+          "expression": "status IN ('succeeded','partial','failed')"
+        },
+        {
+          "name": "ck_tmdb_board_snapshots_counts",
+          "expression": "page_count > 0 AND entry_count >= 0"
+        },
+        {
+          "name": "ck_tmdb_board_snapshots_sha",
+          "expression": "payload_sha256 IS NULL OR CHAR_LENGTH(payload_sha256)=64"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "每次频道采集写一条快照头，再写条目；部分页失败时 status=partial 并只写入已取得的条目。",
+      "dedup": "(board_channel, captured_at) 唯一：同一时刻重跑幂等；不同时刻是不同快照。",
+      "null_semantics": "payload_sha256 在完全失败时为 NULL。"
+    },
+    {
+      "name": "tmdb_board_entries",
+      "role": "R13 榜单条目（原始排名，允许库外）",
+      "identity": "(snapshot_id, tmdb_id)；UNIQUE(snapshot_id, rank_position)",
+      "columns": [
+        {
+          "name": "snapshot_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "tmdb_board_snapshots.snapshot_id"
+        },
+        {
+          "name": "tmdb_id",
+          "type": "BIGINT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "TMDB 电影 ID，> 0；库外也保留"
+        },
+        {
+          "name": "rank_position",
+          "type": "INT",
+          "nullable": false,
+          "auto_increment": false,
+          "default": null,
+          "note": "原始排名，从 1 开始"
+        },
+        {
+          "name": "movie_id",
+          "type": "BIGINT",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "库内电影；库外 NULL，不自动建片"
+        },
+        {
+          "name": "title",
+          "type": "VARCHAR(500)",
+          "nullable": true,
+          "auto_increment": false,
+          "default": null,
+          "note": "榜单当时标题快照，仅展示；宽度对齐 TMDB title 上限 500"
+        }
+      ],
+      "primary_key": [
+        "snapshot_id",
+        "tmdb_id"
+      ],
+      "unique_keys": [
+        {
+          "name": "uq_tmdb_board_entries_rank",
+          "columns": [
+            "snapshot_id",
+            "rank_position"
+          ]
+        }
+      ],
+      "indexes": [
+        {
+          "name": "ix_tmdb_board_entries_tmdb",
+          "columns": [
+            "tmdb_id",
+            "snapshot_id"
+          ],
+          "purpose": "单片的榜单历史"
+        },
+        {
+          "name": "ix_tmdb_board_entries_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "purpose": "外键索引 + 库内电影反查"
+        }
+      ],
+      "foreign_keys": [
+        {
+          "name": "fk_tmdb_board_entries_snapshot",
+          "columns": [
+            "snapshot_id"
+          ],
+          "references": {
+            "table": "tmdb_board_snapshots",
+            "columns": [
+              "snapshot_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        },
+        {
+          "name": "fk_tmdb_board_entries_movie",
+          "columns": [
+            "movie_id"
+          ],
+          "references": {
+            "table": "movies",
+            "columns": [
+              "movie_id"
+            ]
+          },
+          "on_delete": "RESTRICT",
+          "on_update": "RESTRICT"
+        }
+      ],
+      "checks": [
+        {
+          "name": "ck_tmdb_board_entries_rank",
+          "expression": "rank_position > 0"
+        },
+        {
+          "name": "ck_tmdb_board_entries_tmdb",
+          "expression": "tmdb_id > 0"
+        }
+      ],
+      "secret_columns": [],
+      "write_semantics": "先经 movie_external_ids(source='tmdb') 解析 movie_id；解析不到则写 NULL，不创建电影、不按标题猜测。",
+      "dedup": "主键 (snapshot_id, tmdb_id) 防重复条目；UNIQUE(snapshot_id, rank_position) 防同快照排名冲突。",
+      "null_semantics": "movie_id 可 NULL（库外）；title 可 NULL。"
+    }
+  ],
+  "rollback": {
+    "automatic": false,
+    "scripts_generated": false,
+    "scope": "仅本文件新增的 12 张表",
+    "precondition": "回退前必须先保留新增表数据（行数与校验和）并确认不再需要；禁止在未保留数据时删除。",
+    "order": [
+      "tmdb_board_entries",
+      "tmdb_board_snapshots",
+      "tmdb_metric_observations",
+      "tmdb_release_records",
+      "tmdb_movie_keywords",
+      "tmdb_movie_languages",
+      "tmdb_movie_companies",
+      "tmdb_movie_countries",
+      "tmdb_movie_metadata",
+      "tmdb_keywords",
+      "tmdb_companies",
+      "tmdb_supplement_jobs"
+    ],
+    "forbidden": [
+      "DROP DATABASE / DROP SCHEMA",
+      "删除或改写原 16 表及其数据",
+      "CASCADE 级联删除",
+      "TRUNCATE 原表",
+      "自动执行任何删除脚本"
+    ]
+  },
+  "forbidden_statements": [
+    "CREATE DATABASE",
+    "CREATE SCHEMA",
+    "ALTER TABLE",
+    "DROP TABLE",
+    "DROP DATABASE",
+    "TRUNCATE",
+    "GRANT",
+    "REVOKE",
+    "RENAME TABLE",
+    "SET FOREIGN_KEY_CHECKS",
+    "SET GLOBAL",
+    "DELETE FROM",
+    "UPDATE ... SET",
+    "INSERT INTO",
+    "REPLACE INTO",
+    "CREATE USER",
+    "LOAD DATA",
+    "CREATE INDEX",
+    "CREATE VIEW",
+    "CREATE TRIGGER",
+    "CREATE PROCEDURE",
+    "CREATE FUNCTION",
+    "LOCK TABLES",
+    "CALL"
+  ],
+  "verification": {
+    "offline_test": "backend/m6_checks/test_tmdb_supplement_schema.py",
+    "method": [
+      "词法切分 schema.sql（去注释、按顶层分号），只接受 CREATE TABLE，拒绝 IF NOT EXISTS 与任何禁用语句。",
+      "把每条 CREATE TABLE 解析为结构模型（列/类型/可空/默认/自增、主键、唯一键、普通索引、外键、CHECK），与 manifest.tables 做逐项结构比对。",
+      "用已安装 SQLAlchemy 2.0 MySQL dialect 把解析结果重建为 Table 并编译 CreateTable；外键目标必须存在于 models.py 的 16 表元数据或更早的新表，且被引用列必须是主键或唯一键。",
+      "对 manifest 自身重算表结构指纹，并要求与 preflight.fingerprints 一致。",
+      "校验 models.py 的 SHA256 仍等于 m6_frozen_authority.json 的冻结哈希（证明原 16 表草案未被改动）。"
+    ],
+    "not_verified": [
+      "真实 MySQL 执行（未连接实例、未启动临时 mysqld）",
+      "真实 SHOW CREATE TABLE 差异",
+      "写入方的事务/幂等/旧版本保护行为"
+    ]
+  },
+  "topic_state_model": {
+    "topics": [
+      "base",
+      "countries",
+      "companies",
+      "spoken_languages",
+      "keywords",
+      "releases",
+      "credits",
+      "metrics"
+    ],
+    "topic_source": "normalize.normalize_movie(...).field_status 的键；本文件由静态测试与 normalize.py 实际输出比对",
+    "status_vocabulary": [
+      "NOT_FETCHED",
+      "MISSING",
+      "EMPTY",
+      "PRESENT",
+      "FAILED"
+    ],
+    "fields": {
+      "attempt_status": "field_status_json",
+      "attempt_provenance": "last_attempt_json",
+      "retained_fact_provenance": "provenance_json",
+      "retained_fact_success_time": "*_at",
+      "global_high_water": "fetched_at",
+      "attempt_conflict_details": "last_attempt_json[topic].conflict_details（仅 TOPIC_VERSION_CONFLICT）"
+    },
+    "success_time_columns": {
+      "base": "base_at",
+      "countries": "countries_at",
+      "companies": "companies_at",
+      "spoken_languages": "spoken_languages_at",
+      "keywords": "keywords_at",
+      "releases": "releases_at",
+      "credits": "credits_at",
+      "metrics": "metrics_at"
+    },
+    "rules": {
+      "per_topic_comparison": "每个主题独立比较：incoming.fetched_at 与该主题 provenance_json[topic].fetched_at（冗余列 *_at）比较；不得用全局 fetched_at 作为主题门禁。尝试层另按 attempt_at 单调更新，两套时间互不替代。",
+      "example_not_short_circuit": "companies 已到 t20、countries 仅 t10 时，t15 的 countries 成功必须写入并把 countries_at 推进到 t15，即使 t15 < 全局 fetched_at(t20)。",
+      "replace_rule": "incoming.fetched_at 严格大于该主题已保留 fetched_at 且状态为 PRESENT 时：按业务键 upsert 该主题关系行，推进 topic_at，写 provenance_json[topic]。",
+      "empty_rule": "状态 EMPTY（上游成功的空集合）且时间更新时：清空该主题关系行，state 记 EMPTY，推进 topic_at 与 provenance。",
+      "equal_time_same_payload": "同一主题同一 fetched_at 且 payload_sha256 相同 => no-op（同批重跑幂等）。",
+      "equal_time_different_payload": "同一主题、同一 fetched_at 但 payload_sha256 不同：不引入第六态、不改关系、不改 provenance、不推进 *_at。记一次失败尝试：field_status_json[topic]='FAILED'，last_attempt_json[topic]={status:'FAILED', error_code:'TOPIC_VERSION_CONFLICT', conflict_details:{retained_payload_sha256,incoming_payload_sha256,retained_source_record_pk,incoming_source_record_pk,attempt_at}, attempt_at, source_record_pk, payload_sha256}；已保留事实与 provenance_json[topic] 原样不动，不静默覆盖。",
+      "older_response": "incoming.fetched_at 不大于该主题已保留成功时间 => 该主题不替换、不推进（成功主题独立比较）；尝试层只在 incoming.attempt_at 严格大于 last_attempt_json[topic].attempt_at 时写入。",
+      "failure_rule": "FAILED/MISSING/NOT_FETCHED 只更新 field_status_json[topic] 与 last_attempt_json[topic]；不得清空关系行、不得改写 provenance_json[topic]、不得推进 *_at；失败不得被伪标为该主题的新来源或把已保留的成功事实标成失败。",
+      "global_fetched_at_rule": "fetched_at = max(现有 fetched_at, 本次 attempt 的 fetched_at)；只作最近尝试/响应高水位，永不倒退，且不表示全部主题已更新。",
+      "attempt_monotonic": "field_status_json/last_attempt_json 只按 attempt_at 单调更新：incoming.attempt_at 严格大于已记录 attempt_at 才写；相等视为同一次尝试（payload 不同按 TOPIC_VERSION_CONFLICT 记）；更旧的尝试直接忽略，不得回退状态、不得覆盖较新尝试的来源或错误码。",
+      "partial_facts_policy": "normalize 的 FAILED 即使携带部分可用 facts（_partial issue），也只保留既有原件与该次 issues：不更新关系行、不推进成功时间、不写 provenance_json；不存在“可选部分接受”路径（fail-closed）。"
+    },
+    "provenance_entry_schema": {
+      "source_record_pk": "BIGINT，指向 movie_source_records.id，且必须属于同一 movie_id",
+      "payload_sha256": "CHAR(64) 小写十六进制，规范化 payload 的 SHA256",
+      "fetched_at": "DATETIME(6) UTC，该主题成功响应的 fetched_at",
+      "state": "PRESENT | EMPTY"
+    },
+    "last_attempt_entry_schema": {
+      "status": "NOT_FETCHED | MISSING | EMPTY | PRESENT | FAILED",
+      "attempt_at": "DATETIME(6) UTC",
+      "source_record_pk": "BIGINT 或 null（上游失败可能没有记录）",
+      "payload_sha256": "CHAR(64) 或 null",
+      "error_code": "稳定错误码或 null；版本冲突固定为 TOPIC_VERSION_CONFLICT；不得写入秘密",
+      "conflict_details": "仅 error_code=TOPIC_VERSION_CONFLICT 时出现的对象，见 conflict_signal.details_shape"
+    },
+    "separation_note": "provenance_json 只描述“当前保留的事实来自哪次成功响应”，field_status_json/last_attempt_json 描述“最近一次尝试”；两者不可互相覆盖。尝试层只按 attempt_at 单调更新；成功主题仍按各自 *_at 独立比较。",
+    "no_partial_acceptance": true,
+    "conflict_signal": {
+      "attempt_status": "FAILED",
+      "error_code": "TOPIC_VERSION_CONFLICT",
+      "details_field": "last_attempt_json[topic].conflict_details",
+      "details_shape": {
+        "retained_payload_sha256": "既有已保留事实的 payload_sha256",
+        "incoming_payload_sha256": "本次响应的 payload_sha256",
+        "retained_source_record_pk": "既有已保留事实的 source_record_pk",
+        "incoming_source_record_pk": "本次响应的 source_record_pk 或 null",
+        "attempt_at": "本次尝试时间，DATETIME(6) UTC"
+      },
+      "retained_provenance_unchanged": true,
+      "note": "版本冲突不是状态值：不得写进 field_status_json，也不得挂到 provenance_json[topic]；只以 FAILED + error_code=TOPIC_VERSION_CONFLICT + conflict_details 出现在尝试层。"
+    }
+  },
+  "release_dedupe": {
+    "normalize_key": "normalize._releases 产出的 item.dedupe_key",
+    "normalize_key_inputs": [
+      "iso_3166_1",
+      "type",
+      "release_date_raw",
+      "certification",
+      "note",
+      "iso_639_1"
+    ],
+    "normalize_canonicalization": "json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',',':'), allow_nan=False) 后取 SHA256(utf-8) 小写十六进制",
+    "includes_movie_id": false,
+    "risk": "normalize 的 dedupe_key 不含 movie_id：两片若有完全相同的发行元组会得到同一 key，直接把它当全局唯一键会把跨片发行合并成一条。",
+    "record_fingerprint_formula": "sha256_hex(utf8(str(movie_id) + '\u001f' + dedupe_key))",
+    "movie_id_encoding": "十进制有符号整数的 str(int)（无补零、无符号字符）",
+    "separator": "\u001f",
+    "separator_name": "U+001F UNIT SEPARATOR",
+    "encoding": "UTF-8",
+    "hex_case": "lowercase",
+    "column": "tmdb_release_records.record_fingerprint CHAR(64) NOT NULL UNIQUE",
+    "writer_requirements": [
+      "必须用 movie_id 与 normalize 的 dedupe_key 组合后重算 record_fingerprint，禁止只写 dedupe_key。",
+      "分隔符必须是单个 U+001F，不得用下划线/冒号等可能与数据混淆的字符拼接。",
+      "同一 movie_id + 同一 dedupe_key 的重算结果恒定，因此同批重跑为 no-op；不同 movie_id 必然得到不同指纹，不会跨片合并。"
+    ],
+    "idempotency": "content-idempotent by (movie_id, dedupe_key)；不依赖可空列，也不依赖全局自增 release_id。"
+  },
+  "inbound_width_limits": {
+    "policy": "新增表列宽必须覆盖 normalize.py 的入站上限，超长由 normalizer 报 issue 并丢弃元素或置空，写入方不得静默截断。原 16 表的名称/图片列宽不在本清单内，由写入前校验并报 issue，禁止 ALTER 原表。",
+    "entries": [
+      {
+        "field": "job_id",
+        "normalize_limit": 128,
+        "normalize_note": "JOB_RE 1..128",
+        "table": "tmdb_supplement_jobs",
+        "column": "job_ref",
+        "ddl_type": "VARCHAR(128) CHARACTER SET ascii COLLATE ascii_bin",
+        "on_overflow": "normalize 直接抛 INVALID_JOB_ID，不写库"
+      },
+      {
+        "field": "production_countries[].name",
+        "normalize_limit": 255,
+        "normalize_note": "_countries len(name) > 255",
+        "table": "tmdb_movie_countries",
+        "column": "country_name",
+        "ddl_type": "VARCHAR(255)",
+        "on_overflow": "normalizer 置 name=None 并报 INVALID_COUNTRY_NAME，代码身份保留"
+      },
+      {
+        "field": "production_companies[].name",
+        "normalize_limit": 255,
+        "normalize_note": "_companies len(name) > 255",
+        "table": "tmdb_companies",
+        "column": "name",
+        "ddl_type": "VARCHAR(255)",
+        "on_overflow": "normalizer 置 name=None 并报 INVALID_COMPANY_NAME，公司行仍按 id 保留"
+      },
+      {
+        "field": "keywords[].name",
+        "normalize_limit": 500,
+        "normalize_note": "_keywords len(name) > 500",
+        "table": "tmdb_keywords",
+        "column": "name",
+        "ddl_type": "VARCHAR(500)",
+        "on_overflow": "normalizer 丢弃该关键词元素并报 INVALID_KEYWORD_NAME"
+      },
+      {
+        "field": "spoken_languages[].english_name",
+        "normalize_limit": 500,
+        "normalize_note": "_optional_text 默认 max_len=500",
+        "table": "tmdb_movie_languages",
+        "column": "english_name",
+        "ddl_type": "VARCHAR(500)",
+        "on_overflow": "normalizer 置空并报 INVALID_BASE_FIELD"
+      },
+      {
+        "field": "spoken_languages[].name",
+        "normalize_limit": 500,
+        "normalize_note": "_optional_text 默认 max_len=500",
+        "table": "tmdb_movie_languages",
+        "column": "name",
+        "ddl_type": "VARCHAR(500)",
+        "on_overflow": "normalizer 置空并报 INVALID_BASE_FIELD"
+      },
+      {
+        "field": "metrics.popularity",
+        "normalize_limit": null,
+        "normalize_note": "normalize 上界 MAX_COUNT=10^15（有限数值）",
+        "table": "tmdb_metric_observations",
+        "column": "popularity",
+        "ddl_type": "DECIMAL(20,4)",
+        "on_overflow": "normalizer 报 INVALID_POPULARITY；DECIMAL(20,4) 可承载 16 位整数，覆盖 10^15，不静默截断"
+      },
+      {
+        "field": "release_dates[].note",
+        "normalize_limit": 500,
+        "normalize_note": "len(note) > 500 置空",
+        "table": "tmdb_release_records",
+        "column": "note",
+        "ddl_type": "VARCHAR(512)",
+        "on_overflow": "normalizer 置空并报 INVALID_RELEASE_NOTE"
+      },
+      {
+        "field": "release_dates[].certification",
+        "normalize_limit": 64,
+        "normalize_note": "len(cert) > 64 置空",
+        "table": "tmdb_release_records",
+        "column": "certification",
+        "ddl_type": "VARCHAR(64)",
+        "on_overflow": "normalizer 置空并报 INVALID_RELEASE_CERTIFICATION"
+      },
+      {
+        "field": "production_companies[].logo_path",
+        "normalize_limit": null,
+        "normalize_note": "normalize 只校验图片路径格式，不限制长度",
+        "table": "tmdb_companies",
+        "column": "logo_path",
+        "ddl_type": "VARCHAR(500)",
+        "on_overflow": "写入方必须在写库前按 500 校验并报 issue；不得截断"
+      },
+      {
+        "field": "TMDB title",
+        "normalize_limit": 500,
+        "normalize_note": "base.title 与榜单标题同源字段",
+        "table": "tmdb_board_entries",
+        "column": "title",
+        "ddl_type": "VARCHAR(500)",
+        "on_overflow": "normalizer/写入方校验；榜单标题仅展示"
+      }
+    ]
+  }
+}

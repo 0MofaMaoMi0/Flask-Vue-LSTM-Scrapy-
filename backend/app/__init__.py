@@ -78,6 +78,8 @@ def create_app(overrides=None):
         install_feedback(app)
         from catalog.admin_import_api import install as install_imports
         install_imports(app)
+        from catalog.tmdb_supplement_api import install as install_tmdb_supplement
+        install_tmdb_supplement(app)
     @app.get('/api/v1/health')
     def health(): return jsonify(code=0, message='ok', data={'status':'ok'})
     if app.config.get('M6_ISOLATED') is True:
