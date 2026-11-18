@@ -55,6 +55,73 @@ class MySQLBehaviorRepository:
             return {'duplicate':False,'version':version}
 
 
+def production_country_rows(engine):
+    """Current-state production countries for every active movie (legacy fallback).
+
+    Countries come from the ``countries`` topic attribution only, so a base
+    capture that happens to contain countries cannot override a newer countries
+    capture.  FAILED keeps the retained success (provenance is not replaced);
+    EMPTY is a real "no countries" answer and does not fall back to history.
+    Movies without any supplement capture (e.g. the 114 unmapped titles) keep the
+    newest valid legacy/TMDB record so no title drops out.
+    """
+    from . import current_state
+    from .recommendation_data import _ordered_source_snapshots
+    md=CatalogBase.metadata
+    movies=md.tables['movies']
+    records=md.tables['movie_source_records']
+    external=md.tables['movie_external_ids']
+    items=[]
+    with engine.connect() as connection:
+        active=[int(row[0]) for row in connection.execute(
+            select(movies.c.movie_id).where(movies.c.catalog_status=='active').order_by(movies.c.movie_id))]
+        mappings=dict(connection.execute(
+            select(external.c.movie_id,external.c.external_id).where(external.c.source=='tmdb')).all())
+        current={}
+        if current_state.has_metadata_table(engine):
+            current={mid:entry for mid,entry in current_state.load_topics(connection).items()
+                     if mid in set(active)}
+        wanted=[entry['topics'][current_state.COUNTRIES_TOPIC]['source_record_pk']
+                for entry in current.values()
+                if entry['topics'].get(current_state.COUNTRIES_TOPIC)]
+        fetched=current_state.fetch_countries(connection,wanted)
+        countries={}
+        pending=[]
+        for movie_id in active:
+            entry=current.get(movie_id)
+            fact=(entry or {}).get('topics',{}).get(current_state.COUNTRIES_TOPIC)
+            if not fact or fact.get('state') not in current_state.SUCCESS_STATES:
+                pending.append(movie_id)
+                continue
+            if fact.get('state')=='EMPTY':
+                countries[movie_id]=[]
+                continue
+            record=fetched.get(fact.get('source_record_pk'))
+            mapping=mappings.get(movie_id)
+            if not current_state.countries_ok(movie_id,(entry or {}).get('tmdb_id'),mapping,record):
+                pending.append(movie_id)
+                continue
+            row={}
+            current_state.apply_countries(row,{'production_countries':record[1]},
+                                          fact.get('fetched_at'))
+            countries[movie_id]=[{'iso2':item['iso2'],'name':item['name']}
+                                 for item in row['production_countries']]
+        if pending:
+            for movie_id,payload,source_at,source in _ordered_source_snapshots(
+                    connection,records,movies,source_names=('tmdb','legacy_movies2'),
+                    order_by_movie=True,movie_ids=pending,include_source=True):
+                movie_id=int(movie_id)
+                if movie_id in countries or not isinstance(payload,dict):continue
+                if source=='tmdb' and (not mappings.get(movie_id) or str(payload.get('id'))!=str(mappings[movie_id])):continue
+                row={}
+                current_state.apply_countries(row,payload,None)
+                countries[movie_id]=[{'iso2':item['iso2'],'name':item['name']}
+                                     for item in row['production_countries']]
+        for movie_id in active:
+            items.append({'movie_id':movie_id,'countries':countries.get(movie_id,[])})
+    return items
+
+
 def install_m6_business(app):
     engine=app.extensions['auth_engine']
     from .api_read import create_read_blueprint
@@ -88,6 +155,17 @@ def install_m6_business(app):
         md=CatalogBase.metadata;g=md.tables['genres'];links=md.tables['movie_genres'];movies=md.tables['movies']
         statement=select(g.c.genre_id,g.c.name_zh,g.c.name_en).join(links,links.c.genre_id==g.c.genre_id).join(movies,movies.c.movie_id==links.c.movie_id).where(movies.c.catalog_status=='active').distinct().order_by(g.c.genre_id).limit(500)
         return response({'items':[dict(row) for row in executor(statement)]})
+    @bp.get('/api/catalog/languages')
+    def languages():
+        if request.args:return response(status=400,code='INVALID_INPUT')
+        md=CatalogBase.metadata;movies=md.tables['movies']
+        total=func.count().label('count')
+        statement=(select(movies.c.original_language.label('code'),total)
+                   .where(movies.c.catalog_status=='active',movies.c.original_language.isnot(None),movies.c.original_language!='')
+                   .group_by(movies.c.original_language)
+                   .order_by(total.desc(),movies.c.original_language)
+                   .limit(100))
+        return response({'items':[{'code':row.code,'count':int(row.count)} for row in executor(statement)]})
     @bp.get('/api/catalog/behavior')
     def behavior():
         user=identity()
@@ -102,25 +180,8 @@ def install_m6_business(app):
 
     @bp.get('/api/catalog/production-countries')
     def production_countries():
-        md=CatalogBase.metadata;movies=md.tables['movies'];records=md.tables['movie_source_records']
-        statement=(select(records.c.movie_id,records.c.metadata_json)
-                   .join(movies,movies.c.movie_id==records.c.movie_id)
-                   .where(movies.c.catalog_status=='active',records.c.source.in_(('tmdb','legacy_movies2')))
-                   .order_by(records.c.movie_id))
-        with engine.connect() as connection:
-            rows=connection.execute(statement).all()
-        items=[];seen=set()
-        for movie_id,payload in rows:
-            if int(movie_id) in seen:continue
-            seen.add(int(movie_id))
-            countries=[]
-            for entry in (payload or {}).get('production_countries') or []:
-                if not isinstance(entry,dict):continue
-                iso2=entry.get('iso_3166_1')
-                if not iso2 or any(c['iso2']==iso2 for c in countries):continue
-                countries.append({'iso2':iso2,'name':entry.get('name')})
-            items.append({'movie_id':int(movie_id),'countries':countries})
-        return response({'items':items,'source':'tmdb_metadata'})
+        return response({'items':production_country_rows(engine),
+                         'source':'tmdb_current_state'})
     @bp.post('/api/catalog/behavior')
     def record():
         try:

@@ -20,7 +20,7 @@ EVENT_LABELS = {
 }
 COUNTRIES_SQL = text("""
 WITH ranked AS (
-    SELECT s.movie_id, s.metadata_json,
+    SELECT s.id, s.movie_id,
            ROW_NUMBER() OVER (
                PARTITION BY s.movie_id
                ORDER BY CASE WHEN s.source = 'tmdb' THEN 0 ELSE 1 END,
@@ -32,7 +32,8 @@ WITH ranked AS (
 ), valid_countries AS (
     SELECT DISTINCT r.movie_id, UPPER(j.iso2) AS iso2
     FROM ranked r
-    JOIN JSON_TABLE(r.metadata_json, '$.production_countries[*]'
+    JOIN movie_source_records s ON s.id = r.id
+    JOIN JSON_TABLE(s.metadata_json, '$.production_countries[*]'
         COLUMNS (iso2 VARCHAR(8) PATH '$.iso_3166_1' NULL ON EMPTY NULL ON ERROR)
     ) AS j ON TRUE
     WHERE r.source_rank = 1 AND j.iso2 REGEXP '^[A-Za-z]{2}$'
