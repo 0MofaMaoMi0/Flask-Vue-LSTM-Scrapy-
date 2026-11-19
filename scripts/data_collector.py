@@ -27,7 +27,9 @@ from catalog.ingest_hub import (  # noqa: E402
     HubError,
     HubInputError,
     HubRejected,
+    build_douban_archive,
     commit_archive,
+    load_douban_raw,
     load_plan,
     run_capture,
     select_targets,
@@ -329,9 +331,47 @@ def _cmd_pipeline_preview(args):
     return EXIT_OK
 
 
+def _cmd_convert_douban(args):
+    validate_archive_dir(args.archive, must_exist=False, create=False)
+    raw_items = load_douban_raw(args.input)
+    built = build_douban_archive(
+        raw_items,
+        args.archive,
+        job_id=args.job_id,
+        license_status=args.license_status,
+        license_ref=args.license_ref,
+        imported_at=args.imported_at,
+        source_input_path=args.input,
+    )
+    receipt = verify_archive(built['archive_dir'], source='local_envelope')
+    if args.summary_only:
+        compact = summary_envelope(receipt)
+        compact['archive_dir'] = built['archive_dir']
+        compact['supplementary_counts'] = {
+            'persons': built['counts']['persons'],
+            'comments': built['counts']['comments'],
+        }
+        pretty = json.dumps(compact, ensure_ascii=False, sort_keys=True, indent=2)
+        if pretty.count('\n') + 1 < 30:
+            print(pretty)
+        else:
+            print(json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+    else:
+        _print_result({
+            'contract': HUB_CONTRACT,
+            'rule_version': RULE_VERSION,
+            'command': 'convert-douban',
+            'archive': built,
+            'verify': receipt,
+        }, summary_only=False)
+    if args.strict and receipt.get('status') != 'READY_TO_COMMIT':
+        return EXIT_INCOMPLETE
+    return EXIT_OK
+
+
 def _add_select_options(parser, *, required_source=True):
     parser.add_argument('--source', choices=SUPPORTED_SOURCES, required=required_source)
-    parser.add_argument('--scope', help='missing | explicit | stale | boards | catalog | envelope')
+    parser.add_argument('--scope', help='missing | explicit | stale | boards | catalog | envelope | douban')
     parser.add_argument('--job-id', required=required_source, help='stable job identifier')
     parser.add_argument('--targets', nargs='+', help='explicit movie_id:tmdb_id pairs or JSON file path')
     parser.add_argument('--tmdb-ids', nargs='+', help='1..20 TMDB IDs for tmdb_catalog')
@@ -341,7 +381,7 @@ def _add_select_options(parser, *, required_source=True):
     parser.add_argument('--before', help='UTC ISO-8601 cutoff for stale scope')
     parser.add_argument('--pages', type=int, default=2, choices=(1, 2), help='pages per channel for trending')
     parser.add_argument('--language', default='zh-CN')
-    parser.add_argument('--input', help='local JSON/CSV path for local_envelope')
+    parser.add_argument('--input', help='local JSON/CSV/JSONL path for local_envelope or douban_archive')
     parser.add_argument('--metadata', help='metadata JSON path for CSV local_envelope')
     parser.add_argument('--documents', help='offline normalized docs JSON path for select without DB')
     parser.add_argument('--dsn-env', help='environment variable name holding read-only DSN')
@@ -390,6 +430,16 @@ def build_parser():
     p_prev.add_argument('--token-env', default='TMDB_READ_TOKEN')
     p_prev.add_argument('--summary-only', action='store_true')
 
+    p_douban = sub.add_parser('convert-douban', help='convert raw Douban JSON/JSONL to standard archive and verify')
+    p_douban.add_argument('--input', required=True, help='raw Douban .json or .jsonl path')
+    p_douban.add_argument('--job-id', required=True, help='stable job identifier')
+    p_douban.add_argument('--archive', required=True, help='non-C: absolute archive root directory')
+    p_douban.add_argument('--license-status', default='allowed', choices=('allowed', 'unknown', 'restricted'))
+    p_douban.add_argument('--license-ref', default='douban-academic-local-archive')
+    p_douban.add_argument('--imported-at', help='optional UTC ISO-8601 imported_at timestamp')
+    p_douban.add_argument('--strict', action='store_true', help='exit 3 unless status == READY_TO_COMMIT')
+    p_douban.add_argument('--summary-only', action='store_true')
+
     return parser
 
 
@@ -406,6 +456,8 @@ def main(argv=None):
             return _cmd_verify(args)
         if args.command == 'commit':
             return _cmd_commit(args)
+        if args.command == 'convert-douban':
+            return _cmd_convert_douban(args)
         return _cmd_pipeline_preview(args)
     except HubRejected as exc:
         return _failure(exc, exit_code=EXIT_INCOMPLETE)

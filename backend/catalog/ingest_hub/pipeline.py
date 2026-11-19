@@ -350,6 +350,53 @@ def _capture_local_envelope(plan, archive_path, *, execute):
     }
 
 
+def _capture_douban_archive(plan, archive_path, *, execute):
+    job_id = plan['job_id']
+    target = plan['targets'][0]
+    input_path = target['input_path']
+    job_dir = archive_path / job_id
+
+    if not execute:
+        return {
+            'contract': HUB_CONTRACT,
+            'rule_version': RULE_VERSION,
+            'source': 'douban_archive',
+            'job_id': job_id,
+            'mode': 'dry-run',
+            'status': 'DRY_RUN',
+            'archive_dir': str(job_dir),
+            'input_path': input_path,
+            'requests_planned': 0,
+            'request_budget': 0,
+            'plan_digest': plan.get('plan_digest'),
+        }
+
+    from .douban_adapter import build_douban_archive, load_douban_raw
+
+    raw_items = load_douban_raw(input_path)
+    built = build_douban_archive(
+        raw_items,
+        archive_path,
+        job_id=job_id,
+        source_input_path=input_path,
+    )
+    atomic_write_json(job_dir / 'hub-plan.json', plan)
+    return {
+        'contract': HUB_CONTRACT,
+        'rule_version': RULE_VERSION,
+        'source': 'douban_archive',
+        'job_id': job_id,
+        'mode': 'execute',
+        'status': 'COMPLETED',
+        'archive_dir': built['archive_dir'],
+        'counts': built['counts'],
+        'supplementary': built['supplementary'],
+        'requests_used': 0,
+        'request_budget': 0,
+        'plan_digest': plan.get('plan_digest'),
+    }
+
+
 def run_capture(
     plan=None,
     *,
@@ -499,6 +546,9 @@ def run_capture(
             reuse_connection=reuse_connection,
         )
 
+    if source == 'douban_archive':
+        return _capture_douban_archive(plan_obj, archive_path, execute=execute)
+
     return _capture_local_envelope(plan_obj, archive_path, execute=execute)
 
 
@@ -631,6 +681,7 @@ def _verify_tmdb_trending(job_dir, *, now=None):
 def _verify_local_envelope(job_dir, *, plan=None):
     manifest_path = job_dir / 'manifest.json'
     envelope_path = job_dir / 'envelope.json'
+    manifest = None
     if manifest_path.is_file():
         manifest = _read_json_safe(manifest_path, 'INVALID_MANIFEST')
         if manifest.get('schema') != LOCAL_ENVELOPE_MANIFEST_SCHEMA:
@@ -684,6 +735,19 @@ def _verify_local_envelope(job_dir, *, plan=None):
     else:
         status = 'READY_TO_COMMIT'
 
+    preview = {
+        'batch_id': built['batch_id'],
+        'content_hash': built['content_hash'],
+        'missing_year': int(quality['missing_year']),
+    }
+    if isinstance(manifest, dict):
+        if manifest.get('adapter'):
+            preview['adapter'] = manifest['adapter']
+        if isinstance(manifest.get('supplementary'), dict):
+            preview['supplementary'] = manifest['supplementary']
+        if isinstance(manifest.get('counts'), dict):
+            preview['archive_counts'] = manifest['counts']
+
     return {
         'job_id': str(job_id),
         'status': status,
@@ -697,11 +761,7 @@ def _verify_local_envelope(job_dir, *, plan=None):
         },
         'error_breakdown': dict(sorted(errors.items())),
         'anomaly_samples': anomalies[:MAX_ANOMALY_SAMPLES],
-        'preview': {
-            'batch_id': built['batch_id'],
-            'content_hash': built['content_hash'],
-            'missing_year': int(quality['missing_year']),
-        },
+        'preview': preview,
     }
 
 
@@ -833,7 +893,7 @@ def verify_archive(
             details = _verify_tmdb_supplement(job_dir, now=now)
         elif resolved_source == 'tmdb_trending':
             details = _verify_tmdb_trending(job_dir, now=now)
-        elif resolved_source == 'local_envelope':
+        elif resolved_source in ('local_envelope', 'douban_archive'):
             details = _verify_local_envelope(job_dir, plan=loaded_plan)
         else:
             details = _verify_tmdb_catalog(

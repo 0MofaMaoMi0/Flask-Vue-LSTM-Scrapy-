@@ -15,6 +15,7 @@ SUPPORTED_SOURCES = (
     'tmdb_trending',
     'tmdb_catalog',
     'local_envelope',
+    'douban_archive',
 )
 
 JOB_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')

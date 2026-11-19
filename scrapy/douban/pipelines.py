@@ -2,8 +2,11 @@
 # -*- coding: utf-8 -*-
 
 import hashlib
+import os
+import sys
 from datetime import datetime, timezone
 from io import BytesIO
+from pathlib import Path
 from urllib.parse import quote, urlsplit
 
 import douban.database as db
@@ -12,6 +15,27 @@ from scrapy import Request
 from scrapy.exceptions import DropItem
 from scrapy.pipelines.images import ImagesPipeline
 from scrapy.utils.python import to_bytes
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+_BACKEND_DIR = _PROJECT_ROOT / 'backend'
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ('1', 'true', 'yes', 'on')
+
+
+def _load_ingest_hub_helpers():
+    backend_str = str(_BACKEND_DIR)
+    if backend_str not in sys.path:
+        sys.path.insert(0, backend_str)
+    from catalog.ingest_hub.contracts import validate_archive_dir, validate_job_id
+    from catalog.ingest_hub.douban_adapter import build_douban_archive
+
+    return validate_archive_dir, validate_job_id, build_douban_archive
 
 
 class DoubanPipeline:
@@ -30,7 +54,36 @@ class DoubanPipeline:
         'movies': {'avg_score': 0.0, 'imdb_score': 0.0},
     }
 
+    def __init__(self, archive_only=None):
+        self._configured_archive_only = archive_only
+        self._archive_only = False
+        self.connection = None
+        self.cursor = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        setting = crawler.settings.getbool('DOUBAN_ARCHIVE_ONLY', False)
+        env_flag = _truthy(os.environ.get('MI2_DOUBAN_ARCHIVE_ONLY'))
+        return cls(archive_only=bool(setting or env_flag))
+
+    def _is_archive_only(self, spider):
+        if self._configured_archive_only is not None:
+            return bool(self._configured_archive_only)
+        spider_settings = getattr(spider, 'settings', None)
+        if spider_settings is not None:
+            try:
+                if _truthy(spider_settings.get('DOUBAN_ARCHIVE_ONLY')):
+                    return True
+            except Exception:
+                pass
+        return _truthy(os.environ.get('MI2_DOUBAN_ARCHIVE_ONLY'))
+
     def open_spider(self, spider):
+        self._archive_only = self._is_archive_only(spider)
+        if self._archive_only:
+            self.connection = None
+            self.cursor = None
+            return
         self.connection = db.get_connection()
         self.cursor = self.connection.cursor()
 
@@ -78,6 +131,9 @@ class DoubanPipeline:
         self.cursor.execute(sql, values + (key_value,))
 
     def process_item(self, item, spider):
+        if getattr(self, '_archive_only', False):
+            return item
+
         target = next(
             (config for item_type, config in self.ITEM_TARGETS.items()
              if isinstance(item, item_type)),
@@ -271,3 +327,134 @@ class CoverPipeline(ImagesPipeline):
         else:
             item['cover'] = source_url
         return item
+
+
+class ArchiveEnvelopePipeline:
+    """Optional offline local_envelope archive pipeline for Scrapy crawls.
+
+    Enabled when ``MI2_DOUBAN_ARCHIVE_DIR`` or Scrapy setting ``DOUBAN_ARCHIVE_DIR``
+    is configured to an existing absolute non-C: directory without symlinks/reparse points.
+    """
+
+    def __init__(
+        self,
+        archive_dir=None,
+        job_id=None,
+        license_status='allowed',
+        license_ref='douban-academic-local-archive',
+    ):
+        self.configured_archive_dir = archive_dir
+        self.configured_job_id = job_id
+        self.license_status = license_status
+        self.license_ref = license_ref
+        self.enabled = False
+        self.archive_dir = None
+        self.job_id = None
+        self._collected = []
+        self.last_result = None
+
+    @classmethod
+    def from_crawler(cls, crawler):
+        settings = crawler.settings
+        archive_dir = (
+            settings.get('DOUBAN_ARCHIVE_DIR')
+            or os.environ.get('MI2_DOUBAN_ARCHIVE_DIR')
+            or ''
+        ).strip()
+        job_id = (
+            settings.get('DOUBAN_ARCHIVE_JOB_ID')
+            or os.environ.get('MI2_DOUBAN_ARCHIVE_JOB_ID')
+            or ''
+        ).strip() or None
+        license_status = (settings.get('DOUBAN_ARCHIVE_LICENSE_STATUS') or 'allowed').strip()
+        license_ref = (settings.get('DOUBAN_ARCHIVE_LICENSE_REF') or 'douban-academic-local-archive').strip()
+        pipeline = cls(
+            archive_dir=archive_dir or None,
+            job_id=job_id,
+            license_status=license_status,
+            license_ref=license_ref,
+        )
+        if pipeline.configured_archive_dir:
+            validate_archive_dir, validate_job_id, _ = _load_ingest_hub_helpers()
+            validate_archive_dir(pipeline.configured_archive_dir, must_exist=True)
+            if pipeline.configured_job_id:
+                validate_job_id(pipeline.configured_job_id)
+        return pipeline
+
+    @staticmethod
+    def _default_job_id(spider):
+        spider_name = ''.join(
+            ch if (ch.isalnum() or ch in '._-') else '-'
+            for ch in str(getattr(spider, 'name', 'douban') or 'douban')
+        ).strip('._-') or 'douban'
+        stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+        return f'{spider_name}-{stamp}'[:64]
+
+    def open_spider(self, spider):
+        raw_dir = self.configured_archive_dir
+        if not raw_dir:
+            spider_settings = getattr(spider, 'settings', None)
+            if spider_settings is not None:
+                try:
+                    raw_dir = spider_settings.get('DOUBAN_ARCHIVE_DIR')
+                except Exception:
+                    raw_dir = None
+        if not raw_dir:
+            raw_dir = os.environ.get('MI2_DOUBAN_ARCHIVE_DIR')
+
+        raw_dir = str(raw_dir).strip() if raw_dir else ''
+        if not raw_dir:
+            self.enabled = False
+            self.archive_dir = None
+            return
+
+        validate_archive_dir, validate_job_id, _ = _load_ingest_hub_helpers()
+        validated_dir = validate_archive_dir(raw_dir, must_exist=True)
+
+        job_id = (
+            self.configured_job_id
+            or getattr(spider, 'archive_job_id', None)
+            or os.environ.get('MI2_DOUBAN_ARCHIVE_JOB_ID')
+            or self._default_job_id(spider)
+        )
+        validate_job_id(str(job_id))
+
+        self.archive_dir = validated_dir
+        self.job_id = str(job_id)
+        self.enabled = True
+        self._collected = []
+        self.last_result = None
+
+    def process_item(self, item, spider):
+        if not self.enabled:
+            return item
+        payload = dict(item)
+        cls_name = type(item).__name__
+        if cls_name in ('MovieMeta', 'PersonMeta', 'Comment', 'Subject', 'BookMeta'):
+            payload.setdefault('__item_type__', cls_name)
+        self._collected.append(payload)
+        return item
+
+    def close_spider(self, spider):
+        if not self.enabled or self.archive_dir is None:
+            return None
+        _, _, build_douban_archive = _load_ingest_hub_helpers()
+        result = build_douban_archive(
+            self._collected,
+            self.archive_dir,
+            job_id=self.job_id,
+            license_status=self.license_status,
+            license_ref=self.license_ref,
+        )
+        self.last_result = result
+        logger = getattr(spider, 'logger', None)
+        if logger is not None:
+            logger.info(
+                'Douban archive written: job_id=%s dir=%s counts=%s hashes=%s',
+                result['job_id'],
+                result['archive_dir'],
+                result['counts'],
+                result['file_hashes'],
+            )
+        return result
+

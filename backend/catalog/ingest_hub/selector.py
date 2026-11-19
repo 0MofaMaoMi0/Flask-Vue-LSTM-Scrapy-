@@ -480,6 +480,22 @@ def select_targets(
         plan['estimated_requests'] = min(len(ids), budget)
         plan['selection'] = {'selected_count': len(ids)}
 
+    elif source == 'douban_archive':
+        scope = scope or 'douban'
+        if scope not in ('douban', 'envelope'):
+            raise HubInputError('INVALID_SCOPE', f'invalid scope for douban_archive: {scope}')
+        if not input_path:
+            raise HubInputError('INPUT_PATH_REQUIRED', 'douban_archive requires input_path')
+        safe_input = validate_safe_file(input_path, allow_c_read=True, must_exist=True)
+        suffix = safe_input.suffix.lower()
+        if suffix not in ('.json', '.jsonl', '.ndjson'):
+            raise HubInputError('INPUT_FORMAT_INVALID', 'douban_archive supports .json, .jsonl, or .ndjson only')
+        plan['scope'] = scope
+        plan['request_budget'] = 0
+        plan['estimated_requests'] = 0
+        plan['targets'] = [{'input_path': str(safe_input), 'format': suffix.lstrip('.')}]
+        plan['selection'] = {'selected_count': 1}
+
     else:  # local_envelope
         scope = scope or 'envelope'
         if scope != 'envelope':
