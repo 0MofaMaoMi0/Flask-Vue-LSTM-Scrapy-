@@ -190,21 +190,32 @@ def _cmd_capture(args):
     return EXIT_INCOMPLETE
 
 
+def _catalog_config_from_env(conn):
+    from sqlalchemy import text
+    from app.m6_database import environment_config
+
+    cfg = environment_config(os.environ)
+    if not cfg.get('M6_SCHEMA'):
+        schema = conn.execute(text('SELECT DATABASE()')).scalar()
+        if schema:
+            cfg['M6_SCHEMA'] = schema
+    return cfg
+
+
 def _cmd_verify(args):
     validate_archive_dir(args.archive, must_exist=True)
     dsn_env = getattr(args, 'dsn_env', None)
     if dsn_env:
         engine = _connect_sqlalchemy(dsn_env)
         try:
-            from sqlalchemy import text
             with engine.connect() as conn:
-                schema = os.environ.get('MI2_M6_SCHEMA') or conn.execute(text('SELECT DATABASE()')).scalar()
+                cfg = _catalog_config_from_env(conn)
                 receipt = verify_archive(
                     args.archive,
                     source=args.source,
                     plan=args.plan,
                     connection=conn,
-                    catalog_config={'M6_SCHEMA': schema} if schema else None,
+                    catalog_config=cfg if cfg.get('M6_SCHEMA') else None,
                 )
         finally:
             engine.dispose()
@@ -240,16 +251,15 @@ def _cmd_commit(args):
     engine = _connect_sqlalchemy(args.dsn_env)
     try:
         if source == 'tmdb_catalog':
-            from sqlalchemy import text
             with engine.connect() as conn:
-                schema = os.environ.get('MI2_M6_SCHEMA') or conn.execute(text('SELECT DATABASE()')).scalar()
+                cfg = _catalog_config_from_env(conn)
             result = commit_archive(
                 args.archive,
                 source=source,
                 execute=True,
                 seal=args.seal,
                 connection=engine,
-                catalog_config={'M6_SCHEMA': schema} if schema else {},
+                catalog_config=cfg,
                 job_ref=args.job_ref,
             )
         else:
