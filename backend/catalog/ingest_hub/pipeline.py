@@ -1536,7 +1536,13 @@ def convert_catalog_to_supplement(
     if (sup_job_dir / 'checkpoint.json').is_file() and (sup_job_dir / 'manifest.json').is_file():
         state = _read_json_safe(sup_job_dir / 'checkpoint.json', 'ARCHIVE_CORRUPT')
         completed = state.get('completed') or {}
-        if state.get('status') == 'COMPLETED' and all(str(p['tmdb_id']) in completed for p in pairs):
+        if state.get('status') in ('COMPLETED', 'PARTIAL') and all(
+            isinstance(completed.get(str(p['tmdb_id'])), dict)
+            and completed[str(p['tmdb_id'])].get('movie_id') == p['movie_id']
+            and isinstance(completed[str(p['tmdb_id'])].get('normalized_path'), str)
+            and bool(completed[str(p['tmdb_id'])].get('normalized_path'))
+            for p in pairs
+        ):
             already_captured = True
 
     if not already_captured:
@@ -1581,7 +1587,18 @@ def convert_catalog_to_supplement(
             raise HubInputError(exc.code, str(exc)) from None
 
         cov = cap.get('coverage') or {}
-        if cap.get('status') != 'COMPLETED' or cov.get('failed', 0) != 0 or cov.get('uncovered_total', 0) != 0:
+        targets_out = cap.get('targets') or []
+        all_normalized = len(targets_out) == len(pairs) and all(
+            isinstance(item.get('normalized_path'), str) and bool(item.get('normalized_path'))
+            for item in targets_out
+        )
+        if (
+            cap.get('status') not in ('COMPLETED', 'PARTIAL')
+            or cov.get('failed', 0) != 0
+            or cov.get('uncovered_total', 0) != 0
+            or cov.get('covered_total', 0) != len(pairs)
+            or not all_normalized
+        ):
             raise HubInputError('SUPPLEMENT_CAPTURE_INCOMPLETE', 'offline supplement conversion failed')
 
     return verify_archive(sup_job_dir, source='tmdb_supplement', now=now)
