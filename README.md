@@ -39,6 +39,8 @@ scripts\windows\start-frontend.cmd --check  :: 离线自检，不启动、不发
 scripts\windows\check-backend.cmd --help    :: 查看后端检查入口
 ```
 
+> 入口分工：`启动项目.cmd` 负责一键拉起/检查受控 SSH 隧道、启动前端并打开浏览器（详见 `启动说明.md`）；`scripts/windows/start-frontend.cmd` 仅负责前端启动/复用与健康检查，不拉起隧道。
+
 也可以从项目根目录使用既有 `start-latest.ps1`（工作区外兼容入口，转发到仓库内统一入口）：
 
 ```powershell
@@ -51,7 +53,7 @@ scripts\windows\check-backend.cmd --help    :: 查看后端检查入口
 
 ## 脚本与配置边界
 
-- `scripts/launch_frontend.py` 只读取隧道 JSON 的 `local_port` 与 `remote_target`；默认文件为 `F:/M6-VM-control-20261106-183615/m6-implementation/http-tunnel.json`，可用 `--tunnel-json` 覆盖。
+- `scripts/launch_frontend.py` 只读取隧道 JSON 的 `local_port` 与 `remote_target`；默认文件为 `../运行配置/Ubuntu/http-tunnel.json`，可用 `--tunnel-json` 覆盖。
 - 运行日志、TEMP、STATE 与 Node 编译缓存统一写入仓库 `.local-cache/startup/` 的明确子目录，不写旧报告目录，也不与运行中的 Vite 缓存混用。
 - `start-frontend.cmd` 默认启动/复用前端；`--check` 只做离线参数核对；`--dry-run` 只打印启动计划。`check-backend.cmd` 默认只读健康，`--check` 做离线核对。
 - 不执行 `npm install`，不新增 Python 环境，不使用 `ExecutionPolicy Bypass`；前端复用 `F:/Node/node.exe` 与既有 `movie-web/node_modules`，Python 复用 `.local-cache/auth-venv`。

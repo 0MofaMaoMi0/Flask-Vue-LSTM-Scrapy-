@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -35,9 +36,27 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-TUNNEL_JSON = Path("F:/M6-VM-control-20261106-183615/m6-implementation/http-tunnel.json")
+TUNNEL_JSON = REPO_ROOT.parent / "运行配置" / "Ubuntu" / "http-tunnel.json"
 MOVIE_WEB = REPO_ROOT / "movie-web"
-NODE_EXE = Path("F:/Node/node.exe")
+DEFAULT_NODE_EXE = Path("F:/Node/node.exe")
+
+
+def resolve_node_exe() -> Path:
+    env_node = os.environ.get("MI2_NODE_EXE", "").strip()
+    if env_node:
+        return Path(env_node)
+    if DEFAULT_NODE_EXE.is_file():
+        return DEFAULT_NODE_EXE
+    found = shutil.which("node")
+    return Path(found) if found else DEFAULT_NODE_EXE
+
+
+def _node_exe() -> Path:
+    env_node = os.environ.get("MI2_NODE_EXE", "").strip()
+    return Path(env_node) if env_node else NODE_EXE
+
+
+NODE_EXE = resolve_node_exe()
 VITE_BIN = MOVIE_WEB / "node_modules/vite/bin/vite.js"
 FRONTEND_HOST = "127.0.0.1"
 FRONTEND_PORT = 5174
@@ -194,7 +213,7 @@ def probe_frontend() -> dict:
 def check_prerequisites(settings: dict) -> dict:
     checks = {
         "movie_web_exists": MOVIE_WEB.is_dir(),
-        "node_exists": NODE_EXE.is_file(),
+        "node_exists": _node_exe().is_file(),
         "vite_exists": VITE_BIN.is_file(),
         "tunnel_settings_exists": Path(settings["path"]).is_file(),
         "frontend_port_listening": tcp_open(FRONTEND_HOST, FRONTEND_PORT),
@@ -219,7 +238,7 @@ def build_env(settings: dict) -> dict:
 
 
 def build_command() -> list[str]:
-    return [str(NODE_EXE), str(VITE_BIN), "--host", FRONTEND_HOST,
+    return [str(_node_exe()), str(VITE_BIN), "--host", FRONTEND_HOST,
             "--port", str(FRONTEND_PORT), "--strictPort"]
 
 

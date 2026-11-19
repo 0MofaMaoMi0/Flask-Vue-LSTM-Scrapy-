@@ -68,8 +68,10 @@ def main(argv=None) -> int:
               {"local_port": valid["local_port"]})
         check("api_target_is_loopback_tunnel_port",
               valid["api_target"] == "http://127.0.0.1:3629")
+        extra = settings_doc({"local_port": valid["local_port"],
+                              "remote_target": valid["remote_target"], "health": {}, "pid": 1})
         check("only_two_settings_keys_used",
-              valid["ignored_keys"] == ["health", "pid"], valid["ignored_keys"])
+              extra["ignored_keys"] == ["health", "pid"], extra["ignored_keys"])
         check("remote_target_is_loopback", valid["remote_host"] == "127.0.0.1")
         check("remote_port_is_real", valid["remote_port"] == 5000)
 
