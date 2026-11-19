@@ -7,6 +7,7 @@ from flask import Blueprint,request,jsonify
 from sqlalchemy.sql.selectable import Select
 from . import read_queries as queries
 from .media_urls import asset_url
+from .tmdb_heat import heat_for, NOT_FOUND as HEAT_NOT_FOUND
 
 class InputError(ValueError):
     pass
@@ -25,8 +26,20 @@ def value(v):
 
 def dto(row,fields):return {k:value(row[k]) for k in fields if k in row}
 
-def create_read_blueprint(executor=None,personal_ids=None):
+def create_read_blueprint(executor=None,personal_ids=None,*,heat_reader=None,heat_now=None):
     bp=Blueprint('catalog_read',__name__)
+    def tmdb_id_from(rows):
+        for row in rows:
+            if row.get('source')!='tmdb':continue
+            raw=row.get('external_id')
+            if type(raw) is int:value=raw
+            elif isinstance(raw,str) and raw.isascii() and raw.isdecimal() and len(raw)<=10:value=int(raw)
+            else:continue
+            if value>=1:return value
+        return None
+    def heat(tmdb_id):
+        try:return heat_for(tmdb_id,read_snapshot=heat_reader,now=heat_now)
+        except Exception:return None
     def reply(data=None,status=200,code='OK'):
         return jsonify({'code':code,'data':data}),status
     def arguments(allowed):
@@ -96,6 +109,21 @@ def create_read_blueprint(executor=None,personal_ids=None):
             if name=='assets':
                 for asset in data[name]:asset['url']=asset_url(asset)
             if name=='credits':data['credits_has_more']=len(related_rows)>RELATION_LIMIT
+        data['tmdb_heat']=None
+        mapped=tmdb_id_from(data.get('external_ids',[]))
+        if mapped is not None:
+            observed=heat(mapped)
+            if observed and observed.get('status')!=HEAT_NOT_FOUND:data['tmdb_heat']=observed
+        return reply(data)
+    @bp.get('/api/catalog/tmdb/<int:tmdb_id>/heat')
+    @guarded
+    def tmdb_heat(tmdb_id):
+        arguments(())
+        if tmdb_id<1:raise InputError('Invalid TMDB ID')
+        data=heat(tmdb_id)
+        if data is None:raise LookupError('Snapshot unavailable')
+        if data['status']==HEAT_NOT_FOUND:
+            return jsonify({'code':'TMDB_HEAT_NOT_FOUND','data':data}),404
         return reply(data)
     @bp.get('/api/catalog/movies/<int:movie_id>/credits')
     @guarded
