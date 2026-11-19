@@ -27,7 +27,7 @@ router.beforeEach(async to=>{
  return true
 })
 router.afterEach(to=>{
- const titles={'/':'MovieInsight','/login':'登录 · MovieInsight','/register':'注册 · MovieInsight','/home':'影院首页 · MovieInsight','/ai':'AI 探索 · MovieInsight','/settings':'全局设置 · MovieInsight','/movies':'电影库 · MovieInsight','/admin':'数据驾驶舱 · MovieInsight','/insights':'数据洞察 · MovieInsight'} as Record<string,string>
+ const titles={'/':'MovieInsight','/login':'登录 · MovieInsight','/register':'注册 · MovieInsight','/home':'影院首页 · MovieInsight','/recommendations':'推荐频道 · MovieInsight','/ai':'AI 探索 · MovieInsight','/settings':'全局设置 · MovieInsight','/movies':'电影库 · MovieInsight','/admin':'数据驾驶舱 · MovieInsight','/insights':'数据洞察 · MovieInsight'} as Record<string,string>
  document.title=to.path==='/movies'&&to.hash==='#behavior'?'我的电影 · MovieInsight':titles[to.path]||'MovieInsight'
 })
 createApp(App).use(pinia).use(router).use(createVuetify()).mount('#app')
