@@ -37,6 +37,14 @@ Depth items that the v1 document contract does not carry (watch providers,
 budget/revenue depth analysis, collection membership) are reported as
 unavailable rather than fabricated.
 
+Two views share this kernel: :func:`aggregate_movies` (global/country/comparison
+and a bounded detail page) and :func:`aggregate_quality` (the five-state topic
+counts, per-dimension missing severity and the paginated problem list).  The
+``details`` block additionally accepts detail-only narrowing parameters
+(``keyword``/``company``/``missing``/``sort``/``order``/``overlap``); they never
+change the global/country/comparison aggregates, and each row exposes
+``missing_fields`` with the per-topic reason.
+
 Wiring note for the server side (not part of the payload): this kernel maps to
 SQL as ``tmdb_movie_countries``/``tmdb_movie_languages``/``tmdb_movie_keywords``
 /``tmdb_movie_companies`` grouped by ``movie_id`` with ``COUNT(DISTINCT
@@ -61,6 +69,9 @@ from datetime import datetime, timezone
 
 __all__ = [
     'aggregate_movies',
+    'aggregate_quality',
+    'prepare_documents',
+    'PreparedDocuments',
     'AnalyticsInputError',
     'IdentityConflictError',
     'SCHEMA_VERSION',
@@ -68,6 +79,11 @@ __all__ = [
     'STATUSES',
     'DEFAULT_MIN_VOTES',
     'MAX_COMPARE_COUNTRIES',
+    'DETAIL_MISSING_TOPICS',
+    'DETAIL_SORT_KEYS',
+    'QUALITY_CONTRACT',
+    'QUALITY_DENOMINATORS',
+    'QUALITY_TOPICS',
 ]
 
 SCHEMA_VERSION = 'tmdb-supplement-v1'
@@ -102,7 +118,41 @@ FILTER_KEYS = frozenset((
     'country', 'countries', 'genre', 'genres', 'decade', 'decades',
     'year_from', 'year_to', 'observed_from', 'observed_to', 'country_known',
     'limit', 'offset', 'top', 'country_offset', 'country_limit',
+    # Detail-only filters (they narrow ``details`` and never change other blocks).
+    'detail_country', 'keyword', 'company', 'missing', 'sort', 'order', 'overlap',
 ))
+
+# ``details`` narrowing dimensions.  ``poster``/``overview`` are base sub-assets,
+# not contract topics; ``tmdb_identity`` is only produced by the quality view.
+DETAIL_MISSING_TOPICS = (
+    'countries', 'keywords', 'companies', 'credits', 'poster', 'overview',
+    'releases', 'spoken_languages',
+)
+DETAIL_SORT_KEYS = ('title', 'year', 'rating', 'votes', 'popularity')
+DETAIL_ORDERS = ('asc', 'desc')
+
+QUALITY_CONTRACT = 'tmdb-supplement-quality-v1'
+QUALITY_DENOMINATORS = ('active', 'mapped')
+QUALITY_TOPICS = TOPICS
+QUALITY_PROBLEM_TOPICS = TOPICS + ('poster', 'overview', 'tmdb_identity')
+QUALITY_CATEGORIES = STATUSES + ('UNMAPPED',)
+MAX_QUALITY_TOP = 50
+MAX_QUALITY_PROBLEM_LIMIT = 100
+MAX_QUALITY_PROBLEM_OFFSET = 100000
+SEVERITY_TOPICS = (
+    'base', 'countries', 'companies', 'spoken_languages', 'keywords',
+    'releases', 'credits', 'metrics', 'poster', 'overview',
+)
+
+# Runtime buckets are half-open on the lower bound: 0–59, 60–89, ... 180+.
+_RUNTIME_BUCKETS = (
+    ('0–59', 1, 59),
+    ('60–89', 60, 89),
+    ('90–119', 90, 119),
+    ('120–149', 120, 149),
+    ('150–179', 150, 179),
+    ('180+', 180, None),
+)
 _SYNONYMS = (('country', 'countries'), ('genre', 'genres'), ('decade', 'decades'))
 
 _ISO2 = re.compile(r'^[A-Z]{2}$')
@@ -735,6 +785,32 @@ def _load(documents, cutoff, log):
     return movies, len(entries), duplicates, skipped
 
 
+class PreparedDocuments:
+    """Normalized movie snapshot reusable across read-only aggregates."""
+
+    __slots__ = ('movies', 'seen_documents', 'duplicates', 'skipped', 'issue_counts')
+
+    def __init__(self, movies, seen_documents, duplicates, skipped, issue_counts):
+        self.movies = movies
+        self.seen_documents = seen_documents
+        self.duplicates = duplicates
+        self.skipped = skipped
+        self.issue_counts = issue_counts
+
+
+def prepare_documents(documents=None):
+    """Normalize and merge ``tmdb-supplement-v1`` documents once for reuse."""
+    log = _IssueLog()
+    movies, seen_documents, duplicates, skipped = _load(documents, None, log)
+    return PreparedDocuments(
+        movies=movies,
+        seen_documents=seen_documents,
+        duplicates=duplicates,
+        skipped=skipped,
+        issue_counts=dict(log._counts),
+    )
+
+
 # --------------------------------------------------------------- filters
 
 def _iso2_list(value, label):
@@ -815,6 +891,8 @@ def _resolve_filters(filters):
         'genres': (set(), set()), 'decades': set(),
         'limit': DEFAULT_DETAIL_LIMIT, 'offset': 0, 'top': DEFAULT_TOP,
         'country_limit': MAX_COUNTRY_ROWS, 'country_offset': 0,
+        'detail_country': [], 'keyword': None, 'company': None, 'missing': (),
+        'sort': None, 'order': None, 'overlap': [],
     }
     raw_countries = filters.get('countries', filters.get('country'))
     if raw_countries is not None:
@@ -876,7 +954,67 @@ def _resolve_filters(filters):
                 or not 0 <= country_offset <= MAX_COUNTRY_OFFSET):
             raise AnalyticsInputError('Invalid country_offset')
         resolved['country_offset'] = country_offset
+
+    if 'detail_country' in filters:
+        raw_detail_country = filters['detail_country']
+        if isinstance(raw_detail_country, str):
+            raw_detail_country = [part for part in raw_detail_country.split(',') if part.strip()]
+        detail_country = _iso2_list(raw_detail_country, 'detail detail_country')
+        if not detail_country or len(detail_country) > MAX_COMPARE_COUNTRIES:
+            raise AnalyticsInputError('Invalid detail detail_country')
+        resolved['detail_country'] = detail_country
+
+    for key in ('keyword', 'company'):
+        if key in filters:
+            value = filters[key]
+            if type(value) is not int or not 1 <= value <= 1000000000:
+                raise AnalyticsInputError('Invalid detail ' + key)
+            resolved[key] = value
+
+    if 'missing' in filters:
+        resolved['missing'] = _detail_missing_terms(filters['missing'])
+
+    if 'sort' in filters:
+        sort = filters['sort']
+        if not isinstance(sort, str) or sort.strip().lower() not in DETAIL_SORT_KEYS:
+            raise AnalyticsInputError('Invalid detail sort')
+        resolved['sort'] = sort.strip().lower()
+    if 'order' in filters:
+        order = filters['order']
+        if not isinstance(order, str) or order.strip().lower() not in DETAIL_ORDERS:
+            raise AnalyticsInputError('Invalid detail order')
+        resolved['order'] = order.strip().lower()
+        if resolved['sort'] is None:
+            raise AnalyticsInputError('detail order requires sort')
+    if 'overlap' in filters:
+        raw_overlap = filters['overlap']
+        if isinstance(raw_overlap, str):
+            raw_overlap = [part for part in raw_overlap.split(',') if part.strip()]
+        overlap = _iso2_list(raw_overlap, 'detail overlap')
+        if not overlap or len(overlap) > MAX_COMPARE_COUNTRIES:
+            raise AnalyticsInputError('Invalid detail overlap')
+        resolved['overlap'] = overlap
     return resolved
+
+
+def _detail_missing_terms(value):
+    """Validate the ``missing`` detail filter into an ordered, deduped tuple."""
+    if isinstance(value, str):
+        value = value.split(',')
+    if not isinstance(value, (list, tuple)):
+        raise AnalyticsInputError('Invalid detail missing')
+    terms = []
+    for item in value:
+        if not isinstance(item, str):
+            raise AnalyticsInputError('Invalid detail missing')
+        token = item.strip().lower()
+        if token not in DETAIL_MISSING_TOPICS:
+            raise AnalyticsInputError('Invalid detail missing')
+        if token not in terms:
+            terms.append(token)
+    if not terms:
+        raise AnalyticsInputError('Invalid detail missing')
+    return tuple(terms)
 
 
 def _genre_tokens(movie):
@@ -967,6 +1105,22 @@ def _filter_semantics():
                           'note': '国家速览分页大小（1..200，默认 60）；只影响列表长度，不影响任何统计口径。'},
         'country_offset': {'kind': 'response',
                            'note': '国家速览分页偏移（0..1000）；compact 摘要始终完整，不需要分页即可读全。'},
+        'detail_country': {'kind': 'details',
+                           'note': '仅收窄 details 到指定 ISO2 制作国家的影片（OR 语义，最多 3 国）；'
+                                   '全球/国家/比较统计及分母口径不变。'},
+        'keyword': {'kind': 'details',
+                    'note': '仅收窄 details 到含该 TMDB keyword id 的影片；全球/国家/比较统计不变。'},
+        'company': {'kind': 'details',
+                    'note': '仅收窄 details 到含该 TMDB company id 的影片；统计不变。'},
+        'missing': {'kind': 'details',
+                    'note': '仅收窄 details 到缺失指定主题的影片；可逗号组合，取值 '
+                            + '/'.join(DETAIL_MISSING_TOPICS) + '。'},
+        'sort': {'kind': 'details',
+                 'note': 'details 排序字段：' + '/'.join(DETAIL_SORT_KEYS)
+                         + '；缺值行始终排在末尾。'},
+        'order': {'kind': 'details', 'note': 'details 排序方向 asc/desc；须与 sort 同时给出。'},
+        'overlap': {'kind': 'details',
+                    'note': '仅收窄 details 到同时属于所给 ISO2 国家的合拍片（最多 3 国）。'},
     }
 
 
@@ -1135,22 +1289,29 @@ def _credit_block(movies, limit):
     cast_names = {}
     cast_works = defaultdict(list)
     for movie in covered:
+        title = movie['title'] or 'movie:%d' % movie['movie_id']
+        seen_directors = set()
+        seen_cast = set()
         for credit in movie['credits']:
+            person_id = credit['person_id']
             if credit['role'] == 'crew' and (credit['job'] or '').casefold() == 'director':
-                directors[credit['person_id']] += 1
-                director_names[credit['person_id']] = (credit['name']
-                                                       or 'person:%d' % credit['person_id'])
-                director_works[credit['person_id']].append(
-                    movie['title'] or 'movie:%d' % movie['movie_id'])
+                if person_id not in seen_directors:
+                    seen_directors.add(person_id)
+                    directors[person_id] += 1
+                    director_names[person_id] = (credit['name']
+                                                 or 'person:%d' % person_id)
+                    director_works[person_id].append(title)
             elif credit['role'] == 'cast':
-                cast[credit['person_id']] += 1
-                cast_names[credit['person_id']] = (credit['name']
-                                                   or 'person:%d' % credit['person_id'])
-                cast_works[credit['person_id']].append(
-                    movie['title'] or 'movie:%d' % movie['movie_id'])
+                if person_id not in seen_cast:
+                    seen_cast.add(person_id)
+                    cast[person_id] += 1
+                    cast_names[person_id] = (credit['name']
+                                             or 'person:%d' % person_id)
+                    cast_works[person_id].append(title)
 
     def rows(counter, names, works):
-        ordered = sorted(counter.items(), key=lambda item: (-item[1], names[item[0]]))
+        ordered = sorted(counter.items(),
+                         key=lambda item: (-item[1], names[item[0]], item[0]))
         return [{'person_id': person_id, 'name': names[person_id],
                  'movie_count': count, 'top_movies': works[person_id][:5]}
                 for person_id, count in ordered[:limit]]
@@ -1200,6 +1361,127 @@ def _rating_distribution(movies, min_votes):
     }
 
 
+def _runtime_distribution(movies):
+    counts = Counter()
+    unknown = 0
+    for movie in movies:
+        runtime = movie['base']['runtime']
+        if type(runtime) is not int or runtime <= 0:
+            unknown += 1
+            continue
+        for label, low, high in _RUNTIME_BUCKETS:
+            if runtime >= low and (high is None or runtime <= high):
+                counts[label] += 1
+                break
+    with_runtime = len(movies) - unknown
+    if not movies:
+        status = 'NO_MOVIES'
+    elif not with_runtime:
+        status = 'NO_RUNTIME_DATA'
+    elif unknown:
+        status = 'PARTIAL'
+    else:
+        status = 'COMPLETE'
+    return {
+        'status': status,
+        'movies_total': len(movies),
+        'movies_with_runtime': with_runtime,
+        'unknown': unknown,
+        'buckets': [{'bucket': label, 'min_minutes': low,
+                     'max_minutes': high, 'count': counts.get(label, 0)}
+                    for label, low, high in _RUNTIME_BUCKETS],
+        'note': '时长为 TMDB runtime（分钟），0 或缺失视为未知，不补 0；'
+                '区间左闭合，180+ 无上界。',
+    }
+
+
+def _genre_pairs(movies, limit):
+    counts, labels = _genre_counts(movies)
+    pairs = Counter()
+    movies_with_genres = 0
+    multiple = 0
+    for movie in movies:
+        entries = []
+        seen = set()
+        for genre in movie['genres']:
+            key = _genre_key(genre)
+            if key in seen:
+                continue
+            seen.add(key)
+            entries.append(key)
+        if not entries:
+            continue
+        movies_with_genres += 1
+        if len(entries) < 2:
+            continue
+        multiple += 1
+        entries.sort(key=str)
+        for index, first in enumerate(entries):
+            for second in entries[index + 1:]:
+                pairs[(first, second)] += 1
+    ordered = sorted(pairs.items(), key=lambda item: (-item[1], str(item[0])))
+    rows = []
+    for (first, second), count in ordered[:limit]:
+        rows.append({
+            'genres': [labels[first][0], labels[second][0]],
+            'genre_ids': [labels[first][1], labels[second][1]],
+            'movie_count': count,
+        })
+    if not movies_with_genres:
+        status = 'NO_GENRE_DATA'
+    elif not multiple:
+        status = 'NO_MULTI_GENRE_MOVIES'
+    else:
+        status = 'PRESENT'
+    return {
+        'status': status,
+        'movies_total': len(movies),
+        'movies_with_genres': movies_with_genres,
+        'movies_with_multiple_genres': multiple,
+        'pairs': rows,
+        'denominator': {
+            'movies_with_multiple_genres': multiple,
+            'note': '同一影片每对类型计一次；分母为有 >=2 个类型标签的影片数。',
+        },
+        'note': '类型是多标签字段，共现数只描述库内标签组合，不是因果或真实题材产量。',
+    }
+
+
+def _keyword_block(movies, limit):
+    covered = [movie for movie in movies if movie['keywords']]
+    if not movies:
+        status = 'NO_MOVIES'
+    elif not covered:
+        status = 'NO_KEYWORD_DATA'
+    else:
+        status = 'PRESENT'
+    return {
+        'status': status,
+        'movies_total': len(movies),
+        'movies_with_keywords': len(covered),
+        'items': _keyword_rank(covered, limit),
+        'note': '关键词按 TMDB keyword id 合并，名称只作展示，不用译名聚合不同 id；'
+                '分母为有该资料的影片数。',
+    }
+
+
+def _company_block(movies, limit):
+    covered = [movie for movie in movies if movie['companies']]
+    if not movies:
+        status = 'NO_MOVIES'
+    elif not covered:
+        status = 'NO_COMPANY_DATA'
+    else:
+        status = 'PRESENT'
+    return {
+        'status': status,
+        'movies_total': len(movies),
+        'movies_with_companies': len(covered),
+        'items': _company_rank(covered, limit),
+        'note': '制作公司按 TMDB company id 合并；origin_country 是公司属性，不是影片制作国家。',
+    }
+
+
 def _release_window(movies, iso2):
     covered, samples = 0, []
     for movie in movies:
@@ -1233,6 +1515,7 @@ def _release_window(movies, iso2):
 
 def _movie_row(movie, min_votes):
     observations = movie['observations']
+    missing = _movie_missing_fields(movie)
     return {
         'movie_id': movie['movie_id'],
         'tmdb_id': movie['tmdb_id'],
@@ -1254,22 +1537,120 @@ def _movie_row(movie, min_votes):
         'observed_at': _iso(movie['observed_at']),
         'latest_fetched_at': _iso(movie['latest_fetched_at']),
         'topic_status': dict(movie['topic_status']),
+        'missing_fields': sorted(missing),
+        'missing_reasons': {topic: missing[topic] for topic in sorted(missing)},
     }
 
 
+def _movie_missing_fields(movie):
+    """Topics of one movie without usable data, with the reason per topic.
+
+    ``EMPTY`` (upstream answered with nothing) is still "no data" for a detail
+    table, so it is listed too but keeps its own reason instead of being mixed
+    with a failed or never-fetched topic.  ``poster``/``overview`` are base
+    sub-assets; they are only reported when the base topic itself is usable.
+    """
+    missing = {}
+    for topic in TOPICS:
+        status = movie['topic_status'][topic]
+        if status == 'PRESENT':
+            if topic == 'metrics':
+                metrics = movie['metrics']
+                if (metrics['vote_average'] is None
+                        and metrics['vote_count'] is None):
+                    missing[topic] = 'EMPTY'
+            elif topic == 'base':
+                continue
+            elif not movie[topic]:
+                missing[topic] = 'EMPTY'
+        elif status == 'EMPTY':
+            missing[topic] = 'EMPTY'
+        else:
+            missing[topic] = status
+    if movie['topic_status']['base'] in SUCCESS_STATUSES:
+        if not movie['base']['has_poster']:
+            missing['poster'] = 'EMPTY'
+        if not movie['base']['has_overview']:
+            missing['overview'] = 'EMPTY'
+    return missing
+
+
+def _detail_matches(movie, resolved):
+    detail_country = resolved['detail_country']
+    if detail_country and not any(iso2 in movie['countries'] for iso2 in detail_country):
+        return False
+    keyword = resolved['keyword']
+    if keyword is not None and keyword not in movie['keywords']:
+        return False
+    company = resolved['company']
+    if company is not None and company not in movie['companies']:
+        return False
+    overlap = resolved['overlap']
+    if overlap and not all(iso2 in movie['countries'] for iso2 in overlap):
+        return False
+    terms = resolved['missing']
+    if terms and not any(term in _movie_missing_fields(movie) for term in terms):
+        return False
+    return True
+
+
+def _detail_sort_value(movie, sort):
+    if sort == 'title':
+        return movie['title'].casefold() if movie['title'] else None
+    if sort == 'year':
+        return movie['release_year']
+    if sort == 'rating':
+        return movie['metrics']['vote_average']
+    if sort == 'votes':
+        return movie['metrics']['vote_count']
+    if sort == 'popularity':
+        return movie['metrics']['popularity']
+    return None
+
+
+def _sort_detail_movies(movies, sort, order):
+    """Sort the detail page; rows without the sort value always go last."""
+    if sort is None:
+        return sorted(movies, key=lambda movie: movie['movie_id'])
+    present, absent = [], []
+    for movie in movies:
+        value = _detail_sort_value(movie, sort)
+        if value is None:
+            absent.append(movie)
+        else:
+            present.append((value, movie['movie_id'], movie))
+    present.sort(key=lambda row: (row[0], row[1]), reverse=(order == 'desc'))
+    absent.sort(key=lambda movie: movie['movie_id'])
+    return [row[2] for row in present] + absent
+
+
 def _details(movies, resolved, min_votes):
-    ordered = sorted(movies, key=lambda movie: movie['movie_id'])
+    filtered = [movie for movie in movies if _detail_matches(movie, resolved)]
+    ordered = _sort_detail_movies(
+        filtered, resolved['sort'], resolved['order'] or 'asc')
     offset, limit = resolved['offset'], resolved['limit']
     page = ordered[offset:offset + limit]
     return {
         'total': len(ordered),
+        'total_before_detail_filters': len(movies),
         'limit': limit,
         'offset': offset,
         'returned': len(page),
         'has_more': offset + len(page) < len(ordered),
+        'applied_filters': {
+            'detail_country': list(resolved['detail_country']),
+            'keyword': resolved['keyword'],
+            'company': resolved['company'],
+            'missing': list(resolved['missing']),
+            'sort': resolved['sort'],
+            'order': resolved['order'],
+            'overlap': list(resolved['overlap']),
+        },
         'items': [_movie_row(movie, min_votes) for movie in page],
-        'note': '分页按 movie_id 升序；仅返回有界摘要，不含原始 payload、简介全文或完整演职员；'
-                '评分观测仅列最近 %d 个实际采集点。' % MAX_DETAIL_OBSERVATIONS,
+        'note': '分页与新增的 detail_country/keyword/company/missing/sort/order/overlap 只作用于 details；'
+                '其余区块仍按全局筛选。分页按 movie_id 升序（未给 sort 时）；仅返回有界摘要，'
+                '不含原始 payload、简介全文或完整演职员；评分观测仅列最近 %d 个实际采集点。'
+                % MAX_DETAIL_OBSERVATIONS,
     }
 
 
@@ -1458,16 +1839,27 @@ def _countries_block(rows, matched, resolved):
 
 def _comparison(movies, requested, min_votes, log):
     sets = {}
+    samples = []
     for iso2 in requested:
         member = [movie for movie in movies if iso2 in movie['countries']]
         sets[iso2] = {movie['movie_id'] for movie in member}
         if not member:
             log.bump('COUNTRY_NOT_FOUND')
+        summary = _rating_summary(member, min_votes)
+        samples.append({
+            'country_iso2': iso2,
+            'movie_count_distinct': len(member),
+            'rated_movie_count': summary['valid_samples'],
+            'tmdb_avg_rating': summary,
+        })
     union = set()
     for members in sets.values():
         union |= members
     multi = [movie for movie in movies
              if sum(1 for iso2 in requested if iso2 in movie['countries']) > 1]
+    common = set(sets[requested[0]])
+    for iso2 in requested[1:]:
+        common &= sets[iso2]
     pairs = []
     for index, first in enumerate(requested):
         for second in requested[index + 1:]:
@@ -1485,9 +1877,13 @@ def _comparison(movies, requested, min_votes, log):
         'union_movie_count': len(union),
         'overlap_movie_count': len(multi),
         'overlap_ratio_of_union': round(len(multi) / len(union), 4) if union else None,
+        'all_countries_intersection_movie_count': len(common),
+        'all_countries_intersection_movie_ids': sorted(common)[:20],
+        'country_samples': samples,
         'pairwise': pairs,
         'note': '最多比较 3 国，同一筛选与同一评分口径；合拍片可同时属于多国，'
                 '重合数按 movie_id 去重，并集同样去重。'
+                'country_samples 给出每国有效评分样本数与简单平均，样本不足时不得据此下结论。'
                 ' 每国深度行与 country_analysis.rows 顺序一致，不在此重复。',
     }
 
@@ -1495,7 +1891,8 @@ def _comparison(movies, requested, min_votes, log):
 # ---------------------------------------------------------------- entrypoint
 
 def aggregate_movies(documents=None, *, filters=None, countries=None,
-                     min_votes=DEFAULT_MIN_VOTES, observed_at=None):
+                     min_votes=DEFAULT_MIN_VOTES, observed_at=None,
+                     prepared=None):
     """Aggregate normalized v1 documents into a bounded analytics payload.
 
     ``documents`` is any iterable of ``tmdb-supplement-v1`` mappings (a movie
@@ -1504,7 +1901,8 @@ def aggregate_movies(documents=None, *, filters=None, countries=None,
     :class:`AnalyticsInputError` instead of being silently ignored.
     ``countries`` selects 1..3 ISO 3166-1 codes for the deep/comparison view.
     ``observed_at`` is an optional tz-aware snapshot cutoff applied to
-    ``fetched_at``.
+    ``fetched_at``.  ``prepared`` optionally supplies a reusable
+    :class:`PreparedDocuments` snapshot built by :func:`prepare_documents`.
     """
     if type(min_votes) is not int or not 0 <= min_votes <= 1000000:
         raise AnalyticsInputError('Invalid min_votes')
@@ -1517,7 +1915,16 @@ def aggregate_movies(documents=None, *, filters=None, countries=None,
     top = resolved['top']
 
     log = _IssueLog()
-    movies, seen_documents, duplicates, skipped = _load(documents, cutoff, log)
+    if prepared is not None and cutoff is None:
+        if not isinstance(prepared, PreparedDocuments):
+            raise AnalyticsInputError('Invalid prepared documents')
+        movies = prepared.movies
+        seen_documents = prepared.seen_documents
+        duplicates = prepared.duplicates
+        skipped = prepared.skipped
+        log._counts.update(prepared.issue_counts)
+    else:
+        movies, seen_documents, duplicates, skipped = _load(documents, cutoff, log)
     matched, excluded = _select(movies, resolved)
 
     coverage = _coverage(matched, min_votes)
@@ -1554,6 +1961,12 @@ def aggregate_movies(documents=None, *, filters=None, countries=None,
         'top_popular_movies': top_popular,
         'rating_distribution': _rating_distribution(matched, min_votes),
         'assets': coverage['assets'],
+        # Page 05 depth: all of these carry their own denominator.
+        'top_keywords': _keyword_block(matched, top),
+        'top_companies': _company_block(matched, top),
+        'credits': _credit_block(matched, top),
+        'runtime_distribution': _runtime_distribution(matched),
+        'genre_pairs': _genre_pairs(matched, top),
     }
 
     output = {
@@ -1618,3 +2031,304 @@ def aggregate_movies(documents=None, *, filters=None, countries=None,
             output['comparison'] = _comparison(matched, requested, min_votes, log)
     output['issues'] = log.as_list()
     return output
+
+
+# ------------------------------------------------------------- quality view
+
+QUALITY_NOTES = (
+    '质量状态依据规范化文档的 field_status：PRESENT 有可用事实，EMPTY 为上游成功但无值，'
+    'FAILED 为采集/解析失败，NOT_FETCHED 为尚未采集；四者不合并。',
+    'UNMAPPED 为在架但未关联 TMDB 的影片，不是某一主题的采集失败，单独计数。',
+    '严重度统计 FAILED/MISSING/NOT_FETCHED 这类可行动缺失，以及 base 可用但无海报/简介的资产缺口；其余主题 EMPTY 表示上游已确认无值，不重复报警。',
+    '问题清单为只读定位，不在此触发补采或任何写入；分页上限 100 行。',
+)
+
+
+def _quality_int(value):
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _quality_topic_counts(movies, total, unmapped):
+    topics = {}
+    for topic in TOPICS:
+        counts = {status: 0 for status in STATUSES}
+        for movie in movies:
+            counts[movie['topic_status'][topic]] += 1
+        counts['UNMAPPED'] = unmapped
+        counted = sum(counts.values())
+        topics[topic] = {
+            **counts,
+            'total': total,
+            'counted_movies': counted,
+            'present_ratio': round(counts['PRESENT'] / total, 4) if total else None,
+        }
+    return topics
+
+
+def _severity_bucket(groups, dimension, key, name):
+    bucket = groups[dimension].get(key)
+    if bucket is None:
+        bucket = {'key': key, 'name': name, 'movies': 0,
+                  'missing_movies': 0, 'topics': Counter()}
+        groups[dimension][key] = bucket
+    return bucket
+
+
+def _quality_severity(movies, limit):
+    """Missing severity per country / genre / decade, bounded to the worst groups."""
+    groups = {'country': {}, 'genre': {}, 'decade': {}}
+    unknown_country = 0
+    for movie in movies:
+        missing = _movie_missing_fields(movie)
+        hard = [topic for topic, reason in missing.items()
+                if reason in ('FAILED', 'MISSING', 'NOT_FETCHED')
+                or topic in ('poster', 'overview')]
+        if not movie['countries']:
+            unknown_country += 1
+        for iso2, label in movie['countries'].items():
+            bucket = _severity_bucket(groups, 'country', iso2, label or iso2)
+            bucket['movies'] += 1
+            if hard:
+                bucket['missing_movies'] += 1
+                for topic in hard:
+                    bucket['topics'][topic] += 1
+        for genre in movie['genres']:
+            key = '%s:%s' % _genre_key(genre)
+            label = genre['name'] or 'genre:%d' % genre['genre_id']
+            bucket = _severity_bucket(groups, 'genre', key, label)
+            bucket['movies'] += 1
+            if hard:
+                bucket['missing_movies'] += 1
+                for topic in hard:
+                    bucket['topics'][topic] += 1
+        decade = _decade(movie['release_year'])
+        if decade is not None:
+            bucket = _severity_bucket(groups, 'decade', decade, '%d年代' % decade)
+            bucket['movies'] += 1
+            if hard:
+                bucket['missing_movies'] += 1
+                for topic in hard:
+                    bucket['topics'][topic] += 1
+
+    def rows(dimension):
+        collected = []
+        for bucket in groups[dimension].values():
+            tops = sorted(bucket['topics'].items(), key=lambda item: (-item[1], item[0]))[:3]
+            row = {
+                'name': bucket['name'],
+                'movies': bucket['movies'],
+                'missing_movies': bucket['missing_movies'],
+                'missing_ratio': (round(bucket['missing_movies'] / bucket['movies'], 4)
+                                  if bucket['movies'] else None),
+                'top_missing_topics': [{'topic': topic, 'movies': count}
+                                       for topic, count in tops],
+            }
+            if dimension == 'country':
+                row['country_iso2'] = bucket['key']
+            elif dimension == 'genre':
+                row['genre_key'] = bucket['key']
+            else:
+                row['decade'] = bucket['key']
+            collected.append(row)
+        collected.sort(key=lambda row: (-row['missing_movies'], row['name']))
+        return collected[:limit]
+
+    return {
+        'definition': '缺失=该影片至少一个主题为 FAILED/MISSING/NOT_FETCHED（或 base 可用但无海报/简介）；'
+                      'EMPTY 计为上游确认无值，不进入严重度。',
+        'by_country': rows('country'),
+        'by_genre': rows('genre'),
+        'by_decade': rows('decade'),
+        'unknown_country_movies': unknown_country,
+        'note': '分组缺失影片数按 movie_id 去重；一部合拍片在每个制作国家各计一次；'
+                '仅列缺失数最多的前 %d 组，不表示全量排名。' % limit,
+    }
+
+
+def _quality_problems(movies, unmapped_movies, *, topic, category, limit, offset,
+                      include_unmapped):
+    rows = []
+    for movie in movies:
+        missing = _movie_missing_fields(movie)
+        for topic_name in missing:
+            reason = missing[topic_name]
+            rows.append({
+                'movie_id': movie['movie_id'],
+                'tmdb_id': movie['tmdb_id'],
+                'title': movie['title'],
+                'release_year': movie['release_year'],
+                'topic': topic_name,
+                'category': reason,
+                'actionable': reason in ('FAILED', 'MISSING', 'NOT_FETCHED'),
+                'latest_fetched_at': _iso(movie['latest_fetched_at']),
+                'topic_observed_at': movie['topic_observed_at'].get(topic_name),
+                'source': 'tmdb_supplement',
+            })
+    if include_unmapped:
+        seen = {movie['movie_id'] for movie in movies}
+        for item in unmapped_movies or []:
+            movie_id = item.get('movie_id')
+            if type(movie_id) is not int or movie_id in seen:
+                continue
+            seen.add(movie_id)
+            rows.append({
+                'movie_id': movie_id,
+                'tmdb_id': None,
+                'title': item.get('title'),
+                'release_year': item.get('release_year'),
+                'topic': 'tmdb_identity',
+                'category': 'UNMAPPED',
+                'actionable': True,
+                'latest_fetched_at': None,
+                'topic_observed_at': None,
+                'source': 'catalog',
+            })
+    if topic is not None:
+        rows = [row for row in rows if row['topic'] == topic]
+    if category is not None:
+        rows = [row for row in rows if row['category'] == category]
+    order = {name: index for index, name in enumerate(QUALITY_PROBLEM_TOPICS)}
+    rows.sort(key=lambda row: (row['movie_id'], order.get(row['topic'], 99)))
+    page = rows[offset:offset + limit]
+    return {
+        'total': len(rows),
+        'limit': limit,
+        'offset': offset,
+        'returned': len(page),
+        'has_more': offset + len(page) < len(rows),
+        'topic_filter': topic,
+        'category_filter': category,
+        'items': page,
+        'note': '每条为一部影片的一个缺失主题；actionable=false 表示上游已确认无值（EMPTY），'
+                '不需要补采。tmdb_identity/UNMAPPED 为未关联 TMDB 的在架影片。',
+    }
+
+
+def aggregate_quality(documents=None, *, catalog=None, denominator='active',
+                      top=DEFAULT_TOP, problem_limit=DEFAULT_DETAIL_LIMIT,
+                      problem_offset=0, topic=None, category=None,
+                      unmapped_movies=None, prepared=None):
+    """Read-only quality payload over the same v1 documents as the analytics view.
+
+    ``catalog`` carries the directory counts (``active_movies``/``tmdb_mapped``/
+    ``unmapped``) read separately from the ``movies`` table; this kernel never
+    queries anything itself.  ``denominator`` selects whether the per-topic
+    state counts are divided by all active movies (``active``, includes
+    ``UNMAPPED``) or only by mapped movies with a supplement snapshot
+    (``mapped``).  ``unmapped_movies`` is the bounded catalog list used to add
+    ``tmdb_identity`` rows to the problem list.  ``prepared`` optionally supplies
+    a reusable :class:`PreparedDocuments` snapshot.
+    """
+    if denominator not in QUALITY_DENOMINATORS:
+        raise AnalyticsInputError('Invalid denominator')
+    if type(top) is not int or not 1 <= top <= MAX_QUALITY_TOP:
+        raise AnalyticsInputError('Invalid quality top')
+    if (type(problem_limit) is not int
+            or not 1 <= problem_limit <= MAX_QUALITY_PROBLEM_LIMIT):
+        raise AnalyticsInputError('Invalid problem limit')
+    if (type(problem_offset) is not int
+            or not 0 <= problem_offset <= MAX_QUALITY_PROBLEM_OFFSET):
+        raise AnalyticsInputError('Invalid problem offset')
+    if topic is not None and topic not in QUALITY_PROBLEM_TOPICS:
+        raise AnalyticsInputError('Invalid problem topic')
+    if category is not None and category not in QUALITY_CATEGORIES:
+        raise AnalyticsInputError('Invalid problem category')
+
+    log = _IssueLog()
+    if prepared is not None:
+        if not isinstance(prepared, PreparedDocuments):
+            raise AnalyticsInputError('Invalid prepared documents')
+        movies = prepared.movies
+        seen_documents = prepared.seen_documents
+        log._counts.update(prepared.issue_counts)
+    else:
+        movies, seen_documents, _, _ = _load(documents, None, log)
+
+    catalog = dict(catalog or {})
+    active = _quality_int(catalog.get('active_movies'))
+    mapped = _quality_int(catalog.get('tmdb_mapped'))
+    unmapped = _quality_int(catalog.get('unmapped'))
+    if unmapped is None:
+        unmapped = max(0, (active if active is not None else len(movies)) - len(movies))
+    if active is None:
+        active = len(movies) + unmapped
+    if mapped is None:
+        mapped = len(movies)
+
+    include_unmapped = denominator == 'active'
+    total = active if include_unmapped else len(movies)
+    counted_unmapped = unmapped if include_unmapped else 0
+
+    topics = _quality_topic_counts(movies, total, counted_unmapped)
+
+    base_present = sum(1 for movie in movies
+                       if movie['topic_status']['base'] in SUCCESS_STATUSES)
+    posters = sum(1 for movie in movies
+                  if movie['topic_status']['base'] in SUCCESS_STATUSES
+                  and movie['base']['has_poster'])
+    overviews = sum(1 for movie in movies
+                    if movie['topic_status']['base'] in SUCCESS_STATUSES
+                    and movie['base']['has_overview'])
+    backdrops = sum(1 for movie in movies
+                    if movie['topic_status']['base'] in SUCCESS_STATUSES
+                    and movie['base']['has_backdrop'])
+
+    as_of = None
+    for movie in movies:
+        moment = movie['latest_fetched_at']
+        if moment is not None and (as_of is None or moment > as_of):
+            as_of = moment
+
+    return {
+        'contract': QUALITY_CONTRACT,
+        'consumes': SCHEMA_VERSION,
+        'catalog': {
+            'active_movies': active,
+            'tmdb_mapped': mapped,
+            'unmapped': unmapped,
+            'mapped_documents_loaded': len(movies),
+            'mapped_documents_seen': seen_documents,
+            'source': catalog.get('source') or 'movies+tmdb_movie_metadata',
+            'as_of': catalog.get('as_of'),
+            'note': '在架、已关联、未关联来自目录表的只读计数；mapped_documents_loaded 是本次快照'
+                    '实际加载的补采文档数，两者不一致时以计数说明为准。',
+        },
+        'denominator': {
+            'mode': denominator,
+            'movies': total,
+            'note': ('分母为在架电影数，含未关联 TMDB 的 UNMAPPED。'
+                     if include_unmapped else
+                     '分母为已关联 TMDB 且有补采快照的电影数；未关联影片不计入。'),
+        },
+        'states': {
+            'statuses': list(STATUSES),
+            'unmapped': counted_unmapped,
+            'note': '主题状态五态之外单列 UNMAPPED；UNMAPPED 不是采集失败。',
+        },
+        'topics': topics,
+        'assets': {
+            'movies': len(movies),
+            'movies_with_base': base_present,
+            'poster_present': posters,
+            'poster_missing': base_present - posters,
+            'overview_present': overviews,
+            'overview_missing': base_present - overviews,
+            'backdrop_present': backdrops,
+            'note': '资产覆盖只统计 base 主题可用的影片；base 不可用时海报/简介状态未知，'
+                    '不并入“无海报”。',
+        },
+        'severity': _quality_severity(movies, top),
+        'problems': _quality_problems(
+            movies, unmapped_movies, topic=topic, category=category,
+            limit=problem_limit, offset=problem_offset,
+            include_unmapped=include_unmapped),
+        'as_of': _iso(as_of),
+        'issues': log.as_list(),
+        'notes': list(QUALITY_NOTES),
+    }

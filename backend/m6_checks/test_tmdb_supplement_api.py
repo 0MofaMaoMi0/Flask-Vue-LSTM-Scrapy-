@@ -45,16 +45,47 @@ class FakeResult:
 
 
 class FakeConnection:
-    """Routes each statement to a table by the first ``FROM <table>``."""
+    """Routes each statement to a table by the first ``FROM <table>``.
+
+    The three aggregate statements added for the V2 dashboard (cache watermark,
+    catalog counts, batch counts) are answered from the same fake tables so the
+    API tests do not need a second fake just for ``COUNT(*)``.
+    """
 
     def __init__(self, tables):
         self.tables = {name.lower(): rows for name, rows in tables.items()}
         self.statements = []
 
+    def _aggregate(self, sql):
+        metadata = list(self.tables.get('tmdb_movie_metadata', []))
+        if 'AS document_count' in sql:
+            fetched = [row.get('fetched_at') for row in metadata
+                       if row.get('fetched_at') is not None]
+            return [{
+                'document_count': len(metadata),
+                'max_fetched_at': max(fetched) if fetched else None,
+                'max_updated_at': max(fetched) if fetched else None,
+            }]
+        if 'AS active_movies' in sql:
+            movies = list(self.tables.get('movies', []))
+            active = [row for row in movies
+                      if row.get('catalog_status') == 'active']
+            active_ids = {row.get('movie_id') for row in active}
+            mapped = {row.get('movie_id') for row in metadata
+                      if row.get('movie_id') in active_ids}
+            return [{'active_movies': len(active), 'tmdb_mapped': len(mapped)}]
+        if 'AS total' in sql:
+            rows = self.tables.get('ingest_batches', [])
+            return [{'total': len(rows)}]
+        return None
+
     def execute(self, statement, params=None):
         sql = str(statement)
         params = dict(params or {})
         self.statements.append((sql, params))
+        aggregate = self._aggregate(sql)
+        if aggregate is not None:
+            return FakeResult(aggregate)
         match = re.search(r'FROM\s+([A-Za-z_]+)', sql)
         table = match.group(1).lower() if match else ''
         rows = list(self.tables.get(table, []))
@@ -178,6 +209,9 @@ def build_app(tables, *, username='deepseek'):
     app.config['ADMIN_USERS'] = ['deepseek']
     app.extensions['auth_db'] = FakeAuthDb(FakeUser(username))
     app.extensions['catalog_engine'] = FakeEngine(tables)
+    # Each app gets an empty document cache so one test cannot leak its snapshot
+    # into the next one through the module-level singleton.
+    api_module._DOCUMENT_CACHE = api_module.DocumentCache()
     api_module.install(app)
     return app
 

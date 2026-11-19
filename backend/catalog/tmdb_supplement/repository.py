@@ -35,6 +35,10 @@ __all__ = [
     'load_documents',
     'load_coverage',
     'load_missing_queue',
+    'load_watermark',
+    'load_catalog_counts',
+    'load_unmapped_movies',
+    'load_batches',
     'SCHEMA_VERSION',
     'TOPICS',
     'STATUSES',
@@ -43,6 +47,10 @@ __all__ = [
     'DEFAULT_DOCUMENTS',
     'MAX_MISSING_ROWS',
     'DEFAULT_MISSING_ROWS',
+    'BATCH_STATUSES',
+    'DEFAULT_BATCH_ROWS',
+    'MAX_BATCH_ROWS',
+    'MAX_BATCH_OFFSET',
 ]
 
 SCHEMA_VERSION = 'tmdb-supplement-v1'
@@ -59,6 +67,11 @@ MAX_DOCUMENTS = 5000
 MAX_OFFSET = 1000000
 DEFAULT_MISSING_ROWS = 200
 MAX_MISSING_ROWS = 500
+DEFAULT_BATCH_ROWS = 20
+MAX_BATCH_ROWS = 100
+MAX_BATCH_OFFSET = 100000
+BATCH_STATUSES = ('pending', 'running', 'succeeded', 'partial', 'failed')
+MAX_UNMAPPED_ROWS = 5000
 
 # Base facts are copied field by field: the stored payload is never forwarded.
 BASE_FIELDS = (
@@ -217,6 +230,7 @@ SELECT m.movie_id AS movie_id,
        m.field_status_json AS field_status_json,
        sr.metadata_json AS metadata_json
 FROM tmdb_movie_metadata AS m
+JOIN movies AS mv ON mv.movie_id = m.movie_id
 LEFT JOIN movie_source_records AS sr ON sr.id = m.source_record_pk
 {where}
 ORDER BY m.movie_id
@@ -297,10 +311,15 @@ COVERAGE_SQL = """
 SELECT j.topic AS topic,
        {status} AS status,
        COUNT(*) AS count,
-       (SELECT MAX(fetched_at) FROM tmdb_movie_metadata) AS observed_at
+       (SELECT MAX(m2.fetched_at)
+        FROM tmdb_movie_metadata AS m2
+        JOIN movies AS mv2 ON mv2.movie_id = m2.movie_id
+        WHERE mv2.catalog_status = 'active') AS observed_at
 FROM tmdb_movie_metadata AS m
+JOIN movies AS mv ON mv.movie_id = m.movie_id
 JOIN JSON_TABLE(JSON_KEYS(m.field_status_json),
                 '$[*]' COLUMNS (topic VARCHAR(64) PATH '$')) AS j
+WHERE mv.catalog_status = 'active'
 GROUP BY j.topic, status
 """.format(status=STATUS_EXPR)
 
@@ -316,13 +335,74 @@ SELECT m.movie_id AS movie_id,
            m.last_attempt_json, CONCAT('$.\"', j.topic, '\".error_code'))),
            'null') AS error_code
 FROM tmdb_movie_metadata AS m
+JOIN movies AS mv ON mv.movie_id = m.movie_id
 JOIN JSON_TABLE(JSON_KEYS(m.field_status_json),
                 '$[*]' COLUMNS (topic VARCHAR(64) PATH '$')) AS j
-WHERE {status} IN ({missing})
+WHERE mv.catalog_status = 'active' AND {status} IN ({missing})
 ORDER BY m.movie_id, j.topic
 LIMIT :limit OFFSET :offset
 """.format(status=STATUS_EXPR,
            missing=', '.join("'%s'" % status for status in MISSING_STATUSES))
+
+# One cheap statement: the analytics document cache reloads only when this
+# watermark changes (row count + the two high-water timestamps).
+WATERMARK_SQL = """
+SELECT COUNT(*) AS document_count,
+       MAX(m.fetched_at) AS max_fetched_at,
+       MAX(m.updated_at) AS max_updated_at
+FROM tmdb_movie_metadata AS m
+JOIN movies AS mv ON mv.movie_id = m.movie_id
+WHERE mv.catalog_status = 'active'
+"""
+
+CATALOG_COUNTS_SQL = """
+SELECT
+  (SELECT COUNT(*) FROM movies WHERE catalog_status = 'active') AS active_movies,
+  (SELECT COUNT(*) FROM tmdb_movie_metadata AS m
+     JOIN movies AS mv ON mv.movie_id = m.movie_id
+     WHERE mv.catalog_status = 'active') AS tmdb_mapped
+"""
+
+UNMAPPED_SQL = """
+SELECT mv.movie_id AS movie_id,
+       mv.title AS title,
+       mv.release_year AS release_year
+FROM movies AS mv
+LEFT JOIN tmdb_movie_metadata AS m ON m.movie_id = mv.movie_id
+WHERE mv.catalog_status = 'active' AND m.movie_id IS NULL
+ORDER BY mv.movie_id
+LIMIT :limit
+"""
+
+BATCHES_SQL = """
+SELECT batch_id, source, mode, status, started_at, finished_at,
+       source_snapshot_ref, counts_json, error_summary
+FROM ingest_batches
+WHERE source = :source{extra}
+ORDER BY started_at DESC, batch_id DESC
+LIMIT :limit OFFSET :offset
+"""
+
+BATCHES_COUNT_SQL = """
+SELECT COUNT(*) AS total
+FROM ingest_batches
+WHERE source = :source{extra}
+"""
+
+BATCH_ITEM_STATUS_SQL = """
+SELECT batch_id, status, COUNT(*) AS count
+FROM ingest_items
+WHERE batch_id IN :batch_ids
+GROUP BY batch_id, status
+"""
+
+BATCH_ERRORS_SQL = """
+SELECT batch_id, error_code, COUNT(*) AS count
+FROM ingest_items
+WHERE batch_id IN :batch_ids AND error_code IS NOT NULL
+GROUP BY batch_id, error_code
+ORDER BY batch_id, count DESC, error_code
+"""
 
 
 # ------------------------------------------------------------------ loaders
@@ -342,7 +422,8 @@ def load_documents(connection, *, movie_ids=None, limit=DEFAULT_DOCUMENTS,
     if ids == []:
         return []
 
-    where = 'WHERE m.movie_id IN :movie_ids' if ids is not None else ''
+    where = ("WHERE mv.catalog_status = 'active' AND m.movie_id IN :movie_ids"
+             if ids is not None else "WHERE mv.catalog_status = 'active'")
     rows = _query(connection, DOCUMENTS_SQL.format(where=where), ids,
                   {'limit': limit, 'offset': offset})
     if not rows:
@@ -554,3 +635,223 @@ def load_missing_queue(connection, *, limit=DEFAULT_MISSING_ROWS, offset=0):
             'error_code': row.get('error_code') or None,
         })
     return items
+
+
+# ------------------------------------------------- cache watermark / catalog
+
+def load_watermark(connection):
+    """Cheap change detector for the document cache (one aggregate row).
+
+    The watermark is ``(document_count, max(fetched_at), max(updated_at))``:
+    inserting, deleting or re-fetching one movie changes it, while reading the
+    catalog does not.  It is deliberately not the data itself.
+    """
+    rows = connection.execute(text(WATERMARK_SQL), {}).mappings().all()
+    row = rows[0] if rows else {}
+    count = _non_negative_int(row.get('document_count'))
+    if count is None:
+        raise RepositoryError('watermark unavailable')
+    return {
+        'document_count': count,
+        'max_fetched_at': _iso(row.get('max_fetched_at')),
+        'max_updated_at': _iso(row.get('max_updated_at')),
+    }
+
+
+def load_catalog_counts(connection):
+    """Active / TMDB-mapped / unmapped counts from the sealed catalog tables.
+
+    Read-only and aggregated: no movie row leaves the database.  ``unmapped``
+    is derived as ``active - mapped`` because a mapped movie outside the active
+    scope is not part of the dashboard denominator.
+    """
+    rows = connection.execute(text(CATALOG_COUNTS_SQL), {}).mappings().all()
+    row = rows[0] if rows else {}
+    active = _non_negative_int(row.get('active_movies'))
+    mapped = _non_negative_int(row.get('tmdb_mapped'))
+    if active is None or mapped is None:
+        raise RepositoryError('catalog counts unavailable')
+    mapped = min(mapped, active)
+    return {
+        'active_movies': active,
+        'tmdb_mapped': mapped,
+        'unmapped': active - mapped,
+        'source': 'movies+tmdb_movie_metadata',
+        'as_of': _iso(datetime.now(timezone.utc)),
+        'note': '在架/已关联计数为目录表只读聚合；无独立数据版本号，as_of 为查询时刻。',
+    }
+
+
+def load_unmapped_movies(connection, *, limit=MAX_DOCUMENTS):
+    """Bounded list of active movies without a TMDB supplement row.
+
+    Only identity + display fields are selected, so the quality problem list can
+    name the 114 unmapped movies without reading any payload.
+    """
+    limit = _clamp(limit, MAX_UNMAPPED_ROWS, MAX_UNMAPPED_ROWS)
+    rows = connection.execute(text(UNMAPPED_SQL),
+                              {'limit': limit}).mappings().all()
+    return [{
+        'movie_id': int(row['movie_id']),
+        'title': row.get('title'),
+        'release_year': _non_negative_int(row.get('release_year')),
+    } for row in rows]
+
+
+# --------------------------------------------------------- ingest batches
+
+def _safe_json(value):
+    """Parse a JSON column without turning one bad row into a 503 for the page."""
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, (str, bytes)):
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _sql_instant(value):
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise RepositoryError('instant must be an ISO-8601 string')
+    raw = value.strip()
+    try:
+        moment = datetime.fromisoformat(raw.replace('Z', '+00:00'))
+    except ValueError:
+        raise RepositoryError('invalid instant') from None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(timezone.utc).replace(tzinfo=None)
+    return moment
+
+
+def _query_in(connection, sql, name, values, params=None):
+    statement = text(sql).bindparams(bindparam(name, expanding=True))
+    payload = dict(params or {})
+    payload[name] = list(values)
+    return connection.execute(statement, payload).mappings().all()
+
+
+def load_batches(connection, *, limit=DEFAULT_BATCH_ROWS, offset=0, status=None,
+                 source='tmdb', started_from=None, started_to=None):
+    """Read-only page over ``ingest_batches`` plus item/error distributions.
+
+    ``ingest_batches`` has no per-batch target/success/failure columns; those
+    numbers exist only inside ``counts_json`` for the supplement writer, so a
+    missing key is returned as ``null`` with the field named in
+    ``missing_fields`` instead of being inferred.  Item status and error codes
+    come from ``ingest_items`` and are therefore always a real count when rows
+    exist.
+    """
+    limit = _clamp(limit, DEFAULT_BATCH_ROWS, MAX_BATCH_ROWS)
+    if type(offset) is not int or isinstance(offset, bool) \
+            or not 0 <= offset <= MAX_BATCH_OFFSET:
+        raise RepositoryError('invalid batch offset')
+    if status is not None and status not in BATCH_STATUSES:
+        raise RepositoryError('invalid batch status')
+    if not isinstance(source, str) or not source.strip() or len(source) > 32:
+        raise RepositoryError('invalid batch source')
+
+    conditions, params = [], {'source': source.strip()}
+    if status is not None:
+        conditions.append('status = :status')
+        params['status'] = status
+    start = _sql_instant(started_from)
+    if start is not None:
+        conditions.append('started_at >= :started_from')
+        params['started_from'] = start
+    end = _sql_instant(started_to)
+    if end is not None:
+        conditions.append('started_at <= :started_to')
+        params['started_to'] = end
+    extra = ''.join(' AND ' + item for item in conditions)
+
+    count_rows = connection.execute(
+        text(BATCHES_COUNT_SQL.format(extra=extra)), params).mappings().all()
+    total = _non_negative_int((count_rows[0] if count_rows else {}).get('total'))
+    if total is None:
+        raise RepositoryError('batch count unavailable')
+
+    rows = connection.execute(
+        text(BATCHES_SQL.format(extra=extra)),
+        {**params, 'limit': limit, 'offset': offset}).mappings().all()
+    if not rows:
+        return {'total': total, 'items': [], 'statuses': list(BATCH_STATUSES),
+                'source': params['source']}
+
+    batch_ids = [int(row['batch_id']) for row in rows]
+    item_rows = _query_in(connection, BATCH_ITEM_STATUS_SQL, 'batch_ids', batch_ids)
+    error_rows = _query_in(connection, BATCH_ERRORS_SQL, 'batch_ids', batch_ids)
+
+    items_by_batch = {}
+    for row in item_rows:
+        batch_id = int(row['batch_id'])
+        status_name = row.get('status')
+        count = _non_negative_int(row.get('count')) or 0
+        items_by_batch.setdefault(batch_id, {'counts': {}, 'total': 0})
+        items_by_batch[batch_id]['counts'][status_name] = count
+        items_by_batch[batch_id]['total'] += count
+
+    errors_by_batch = {}
+    for row in error_rows:
+        batch_id = int(row['batch_id'])
+        code = row.get('error_code')
+        count = _non_negative_int(row.get('count')) or 0
+        errors_by_batch.setdefault(batch_id, []).append(
+            {'error_code': code, 'count': count})
+
+    items = []
+    for row in rows:
+        batch_id = int(row['batch_id'])
+        counts = _safe_json(row.get('counts_json')) or {}
+        missing_fields = []
+        reported = {}
+        for output_name, source_key in (
+                ('target_documents', 'documents'),
+                ('success_count', 'success'),
+                ('failed_count', 'failed'),
+                ('skipped_count', 'skipped')):
+            value = _non_negative_int(counts.get(source_key))
+            reported[output_name] = value
+            if value is None:
+                missing_fields.append(output_name)
+        reported['executed_operations'] = _non_negative_int(
+            counts.get('executed_operations'))
+        if reported['executed_operations'] is None:
+            missing_fields.append('executed_operations')
+
+        distribution = items_by_batch.get(batch_id)
+        item_status = None
+        if distribution is not None:
+            statuses = {name: distribution['counts'].get(name, 0)
+                        for name in ('inserted', 'updated', 'skipped', 'review', 'error')}
+            statuses['total'] = distribution['total']
+            item_status = statuses
+        else:
+            missing_fields.append('item_status')
+
+        error_codes = (errors_by_batch.get(batch_id, [])
+                       if distribution is not None else None)
+
+        items.append({
+            'batch_id': batch_id,
+            'source': row.get('source'),
+            'mode': row.get('mode'),
+            'status': row.get('status'),
+            'started_at': _iso(row.get('started_at')),
+            'finished_at': _iso(row.get('finished_at')),
+            'source_snapshot_ref': row.get('source_snapshot_ref'),
+            'reported_counts': reported,
+            'counts_source': 'ingest_batches.counts_json',
+            'item_status': item_status,
+            'error_codes': error_codes,
+            'error_summary': row.get('error_summary') or None,
+            'missing_fields': missing_fields,
+            'note': 'reported_counts 只取自 counts_json，缺键即 null；item_status/error_codes '
+                    '来自 ingest_items 实际行，无明细行时为 null，不补 0。',
+        })
+    return {'total': total, 'items': items, 'statuses': list(BATCH_STATUSES),
+            'source': params['source']}
