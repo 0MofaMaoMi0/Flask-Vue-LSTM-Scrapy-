@@ -28,20 +28,26 @@ def normalized(value):
     if len(key)>User.__table__.c.username_normalized.type.length:raise ValueError()
     return name, key
 
-def limiter(action, account=None):
+def limiter(action, account=None, *, db=None):
     now=int(time.time()); period=current_app.config['RATE_WINDOW']; window=now//period
     keys=[(action+':ip:'+ (request.remote_addr or 'unknown'),current_app.config['CSRF_RATE_LIMIT'] if action=='csrf' else current_app.config['RATE_LIMIT'])]
     if account is not None: keys.append((action+':account:'+account,current_app.config['RATE_LIMIT']))
     limited=False
     # DB upsert + row lock makes the counter shared across workers and atomic.
-    with current_app.extensions['auth_db'].begin() as db:
+    def apply(session):
+        nonlocal limited
         for key,limit in keys:
             key=hashed(key)
             stmt=insert(Throttle).values(key_hash=key,window=window,count=1,expires_at=datetime.utcfromtimestamp((window+1)*period))
             stmt=stmt.on_duplicate_key_update([('count',case((Throttle.window==window,Throttle.count+1),else_=1)),('window',window),('expires_at',stmt.inserted.expires_at)])
-            db.execute(stmt)
-            count=db.scalar(select(Throttle.count).where(Throttle.key_hash==key).with_for_update())
+            session.execute(stmt)
+            count=session.scalar(select(Throttle.count).where(Throttle.key_hash==key).with_for_update())
             limited |= count>limit
+    if db is not None:
+        apply(db)
+    else:
+        with current_app.extensions['auth_db'].begin() as session:
+            apply(session)
     if limited:
         response,status=reply(42910,'too many requests',status=429)
         response.headers['Retry-After']=str(period-now%period)
@@ -122,7 +128,7 @@ def credentials():
         except ValueError:return reply(40010,'invalid username',status=400)
         password=data['password']
         if not isinstance(password,str) or not 6<=len(password)<=128:return reply(40010,'password must contain 6 to 128 characters',status=400)
-        limited=limiter(action,key)
+        limited=limiter(action,key,db=db)
         if limited:return limited
         user=db.scalar(select(User).where(User.username_normalized==key))
         if action=='register':

@@ -27,7 +27,7 @@ def create_app(overrides=None):
         IDLE_SECONDS=int(os.environ.get('MI2_IDLE_SECONDS', '7200')),
         ABSOLUTE_SECONDS=int(os.environ.get('MI2_ABSOLUTE_SECONDS', '86400')),
         RATE_LIMIT=10, RATE_WINDOW=int(os.environ.get('MI2_RATE_WINDOW','300')), CSRF_RATE_LIMIT=60, MAX_CONTENT_LENGTH=8192,
-        ADMIN_USERS=[x.strip() for x in os.environ.get('MI2_ADMIN_USERS','zhang').split(',') if x.strip()],
+        ADMIN_USERS=[x.strip() for x in os.environ.get('MI2_ADMIN_USERS','zhang,deepseek,codex').split(',') if x.strip()],
         MEDIA_CACHE_DIR=os.environ.get('MI2_MEDIA_CACHE','/tmp/mi2-media'),
         TRENDING_CACHE_DIR=os.environ.get('MI2_TRENDING_CACHE','/var/lib/movieinsight-m6-realcopy/appdata/trending'))
     if overrides: app.config.update(overrides)

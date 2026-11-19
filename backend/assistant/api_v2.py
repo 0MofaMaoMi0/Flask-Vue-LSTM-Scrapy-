@@ -1,8 +1,9 @@
 """V2 BYOK API. No platform key or global paid-approval gate."""
 import json,re,time,hashlib,secrets
 from pathlib import Path
-from flask import Blueprint,request,jsonify,Response,stream_with_context
-from app.auth import session_row,csrf_ok
+from flask import Blueprint,request,jsonify,Response,stream_with_context,g
+from app.auth import session_row,csrf_ok,is_admin
+from app.models import User
 from .store import connect_store,tables
 from .reader import CatalogReader
 from .byok_vault import Vault,MODELS,redact
@@ -27,18 +28,19 @@ def install(app):
             row=session_row(db)
             if not row or row.user_id is None:return None,None
             if request.method!='GET' and not csrf_ok(row):raise PermissionError()
-            return row.user_id,row.sid_hash
+            # This is the same server-side authenticated User that session_row
+            # just checked for status='active'; no body/header/query admin flag.
+            return db.get(User,row.user_id),row.sid_hash
     @bp.before_request
     def guard():
-        from flask import g
         try:user,binding=identity()
         except PermissionError:return reply(code='REQUEST_VERIFICATION_FAILED',status=403)
         if user is None:return reply(code='AUTHENTICATION_REQUIRED',status=401)
-        g.m7_user=user;g.m7_binding=binding
-        if request.method!='GET' and request.path.rsplit('/',1)[-1] not in ('cancel','disconnect'):
+        g.m7_user=user.id;g.m7_binding=binding;g.m7_business_exempt=is_admin(user)
+        if request.method!='GET' and request.path.rsplit('/',1)[-1] not in ('cancel','disconnect') and not g.m7_business_exempt:
             from sqlalchemy import select
             from sqlalchemy.dialects.mysql import insert as upsert
-            budget=md.tables['budgets'];key='byok-rate:'+str(int(time.time())//60)+':'+str(user)
+            budget=md.tables['budgets'];key='byok-rate:'+str(int(time.time())//60)+':'+str(user.id)
             with engine.begin() as c:
                 stmt=upsert(budget).values(id=key,calls=1);c.execute(stmt.on_duplicate_key_update(calls=budget.c.calls+1));count=c.execute(select(budget.c.calls).where(budget.c.id==key).with_for_update()).scalar_one()
             if count>60:return reply(code='RATE_LIMITED',status=429)
@@ -54,9 +56,9 @@ def install(app):
     def status():
         from datetime import datetime
         from sqlalchemy import select
-        user,binding=who();config=vault.status(user,binding);budget=md.tables['budgets']
+        user,binding=who();config=vault.status(user,binding);budget=md.tables['budgets'];exempt=bool(g.get('m7_business_exempt',False))
         with engine.connect() as c:used=c.execute(select(budget.c.calls).where(budget.c.id=='byok:'+datetime.utcnow().date().isoformat()+':'+str(user))).scalar_one_or_none() or 0
-        return reply(dict(config,daily_calls_used=used,daily_calls_remaining=max(0,config['daily_calls']-used) if config['daily_calls'] is not None else None,local_available=True,cloud_available=config['configured'] and config['enabled'] and config['verification'] not in ('KEY_REJECTED','MODEL_UNAVAILABLE'),degraded=not config['enabled'],reason='BYOK_CONNECTED_UNVERIFIED' if config['enabled'] else 'BYOK_NOT_CONNECTED',models=list(MODELS),billing='USER_PROVIDER_ACCOUNT',server_mode='ACCOUNT_ENCRYPTED_DATABASE' if vault.store else 'SINGLE_PROCESS_EPHEMERAL_CUSTODY'))
+        return reply(dict(config,daily_calls_used=used,daily_calls_remaining=None if exempt or config['daily_calls'] is None else max(0,config['daily_calls']-used),business_quota_exempt=exempt,local_available=True,cloud_available=config['configured'] and config['enabled'] and config['verification'] not in ('KEY_REJECTED','MODEL_UNAVAILABLE'),degraded=not config['enabled'],reason='BYOK_CONNECTED_UNVERIFIED' if config['enabled'] else 'BYOK_NOT_CONNECTED',models=list(MODELS),billing='USER_PROVIDER_ACCOUNT',server_mode='ACCOUNT_ENCRYPTED_DATABASE' if vault.store else 'SINGLE_PROCESS_EPHEMERAL_CUSTODY'))
     @bp.post('/config')
     def configure():
         user,binding=who()
@@ -99,7 +101,7 @@ def install(app):
         ledger.cleanup()
         try:key,state,new=ledger.claim(user,binding,rid,fingerprint)
         except Conflict:return reply(code='REQUEST_ID_CONFLICT',status=409)
-        if new:service.launch(key,user,binding,message,cid,kind,movie_id)
+        if new:service.launch(key,user,binding,message,cid,kind,movie_id,business_exempt=bool(g.get('m7_business_exempt',False)))
         if b.get('stream'):return stream(key,not new)
         end=time.monotonic()+100
         while time.monotonic()<end:

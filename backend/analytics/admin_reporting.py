@@ -95,10 +95,22 @@ def import_audit(app,start,end,page,size,status):
                                   counts=safe_counts(receipt[2]) if receipt else {},error_code=d.get('error_code') if re.fullmatch(r'[A-Z_]{1,64}',str(d.get('error_code') or '')) else None))
             except (ValueError,KeyError,TypeError):unreadable+=1
         legacy_count=int(c.scalar(select(func.count()).select_from(t).where(where)) or 0)
-        offset=(page-1)*size;skip=max(0,offset-len(files))
-        rows=c.execute(select(t.c.batch_id,t.c.source,t.c.mode,t.c.status,t.c.started_at,t.c.finished_at,t.c.counts_json).where(where).order_by(dt.desc(),t.c.batch_id.desc()).offset(skip).limit(len(files)+size)).all()
-    legacy=[dict(id='batch:'+str(bid),job_id=None,batch_id=bid,at=(finished or started).isoformat()+'Z',actor='历史批次未记录操作者',source=source,kind='DATABASE_BATCH',status=state.upper(),commit_state=state.upper(),movie_count=None,movies=[],counts=safe_counts(counts),error_code=None) for bid,source,mode,state,started,finished,counts in rows]
-    merged=sorted(files+legacy,key=lambda d:(d['at'],d['id']),reverse=True)
-    total=legacy_count+len(files)
-    return dict(items=merged[offset-skip:offset-skip+size],total=total,page=page,page_size=size,pages=max(1,(total+size-1)//size),unreadable_task_records=unreadable,
+        total=legacy_count+len(files)
+        offset=(page-1)*size
+        if offset>=total:
+            page_keys=[]
+        else:
+            key_rows=c.execute(select(t.c.batch_id,t.c.started_at,t.c.finished_at).where(where).order_by(dt.desc(),t.c.batch_id.desc()).limit(offset+size)).all()
+            candidates=[(d['at'],d['id'],'file',idx) for idx,d in enumerate(files)]
+            candidates.extend((((finished or started).isoformat()+'Z'),'batch:'+str(bid),'db',bid) for bid,started,finished in key_rows)
+            candidates.sort(key=lambda item:(item[0],item[1]),reverse=True)
+            page_keys=candidates[offset:offset+size]
+        selected_bids=[item[3] for item in page_keys if item[2]=='db']
+        db_map={}
+        if selected_bids:
+            rows=c.execute(select(t.c.batch_id,t.c.source,t.c.mode,t.c.status,t.c.started_at,t.c.finished_at,t.c.counts_json).where(t.c.batch_id.in_(selected_bids))).all()
+            for bid,source,mode,state,started,finished,counts in rows:
+                db_map[bid]=dict(id='batch:'+str(bid),job_id=None,batch_id=bid,at=(finished or started).isoformat()+'Z',actor='历史批次未记录操作者',source=source,kind='DATABASE_BATCH',status=state.upper(),commit_state=state.upper(),movie_count=None,movies=[],counts=safe_counts(counts),error_code=None)
+    items=[files[item[3]] if item[2]=='file' else db_map[item[3]] for item in page_keys]
+    return dict(items=items,total=total,page=page,page_size=size,pages=max(1,(total+size-1)//size),unreadable_task_records=unreadable,
                 notes=['这是当前任务状态及数据库批次审计，不是每次按钮操作的不可变事件日志。','文件任务与数据库批次按任务 ID 合并；历史批次未记录的操作者保持未知。','不返回来源载荷、密钥、SQL、对话或备份文件路径。'])
