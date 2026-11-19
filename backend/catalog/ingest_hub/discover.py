@@ -18,7 +18,9 @@ from .contracts import (
     RULE_VERSION,
     HubInputError,
     HubSecurityError,
+    atomic_write_json,
     is_positive_int,
+    validate_archive_dir,
     validate_env_name,
     validate_job_id,
     validate_safe_file,
@@ -85,7 +87,11 @@ def _load_existing_ids_from_connection(connection):
     if connection is None:
         return known
     sql = "SELECT external_id FROM movie_external_ids WHERE source = 'tmdb'"
-    if hasattr(connection, 'execute'):
+    if hasattr(connection, 'connect') and not hasattr(connection, 'execute'):
+        with connection.connect() as conn:
+            res = conn.execute(text(sql))
+            rows = res.fetchall()
+    elif hasattr(connection, 'execute'):
         try:
             res = connection.execute(text(sql))
             rows = res.fetchall()
@@ -419,4 +425,37 @@ def discover_catalog_targets(
     return out
 
 
-__all__ = ['DISCOVER_PRESETS', 'build_discover_request', 'discover_catalog_targets']
+def export_existing_tmdb_ids(connection, output_path=None):
+    """Export sorted, deduplicated integer TMDB IDs from movie_external_ids."""
+    if connection is None:
+        raise HubInputError('CONNECTION_REQUIRED', 'database connection is required')
+    dest = None
+    if output_path is not None:
+        dest = validate_safe_file(output_path, allow_c_read=False, must_exist=False)
+        validate_archive_dir(dest.parent, must_exist=False, create=False)
+
+    ids = sorted(_load_existing_ids_from_connection(connection))
+    if dest is not None:
+        atomic_write_json(dest, ids)
+
+    result = {
+        'contract': HUB_CONTRACT,
+        'rule_version': RULE_VERSION,
+        'command': 'export-existing-ids',
+        'status': 'EXPORTED' if dest is not None else 'OK',
+        'count': len(ids),
+        'min_id': ids[0] if ids else None,
+        'max_id': ids[-1] if ids else None,
+        'output_path': str(dest) if dest is not None else None,
+    }
+    if dest is None:
+        result['tmdb_ids'] = ids
+    return result
+
+
+__all__ = [
+    'DISCOVER_PRESETS',
+    'build_discover_request',
+    'discover_catalog_targets',
+    'export_existing_tmdb_ids',
+]

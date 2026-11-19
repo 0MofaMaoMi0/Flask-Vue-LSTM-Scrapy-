@@ -10,6 +10,8 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
+from sqlalchemy import bindparam, text
+
 from catalog import admin_importer as _admin_importer
 from catalog import data_pipeline as _data_pipeline
 from catalog.tmdb_supplement import board_ingest as _board_ingest
@@ -888,6 +890,140 @@ def _verify_local_envelope(job_dir, *, plan=None):
     }
 
 
+def _readonly_catalog_conflict_check(connection, candidates):
+    """Read-only SQL pre-check for TMDB/IMDb IDENTITY_CONFLICT and MOVIE_NOT_ACTIVE."""
+    if not candidates:
+        return [], [], []
+
+    def _run(conn):
+        tids = sorted({str(tid) for tid, _, _ in candidates})
+        imdbs = sorted({
+            row['external_ids']['imdb']
+            for _, _, row in candidates
+            if row['external_ids'].get('imdb')
+        })
+
+        ext_owners = {}
+        res_tmdb = conn.execute(
+            text(
+                "SELECT movie_id, external_id FROM movie_external_ids "
+                "WHERE source = 'tmdb' AND external_id IN :tids"
+            ).bindparams(bindparam('tids', expanding=True)),
+            {'tids': tids},
+        )
+        for row in res_tmdb.fetchall():
+            ext_owners.setdefault(('tmdb', str(row[1])), set()).add(int(row[0]))
+
+        if imdbs:
+            res_imdb = conn.execute(
+                text(
+                    "SELECT movie_id, external_id FROM movie_external_ids "
+                    "WHERE source = 'imdb' AND external_id IN :imdbs"
+                ).bindparams(bindparam('imdbs', expanding=True)),
+                {'imdbs': imdbs},
+            )
+            for row in res_imdb.fetchall():
+                ext_owners.setdefault(('imdb', str(row[1])), set()).add(int(row[0]))
+
+        matched_mids = sorted({
+            mid
+            for tid, _, _ in candidates
+            for mid in ext_owners.get(('tmdb', str(tid)), set())
+        })
+        movies_info = {}
+        mid_sources = {}
+        if matched_mids:
+            res_movies = conn.execute(
+                text(
+                    'SELECT movie_id, catalog_status, release_year FROM movies '
+                    'WHERE movie_id IN :mids'
+                ).bindparams(bindparam('mids', expanding=True)),
+                {'mids': matched_mids},
+            )
+            for row in res_movies.fetchall():
+                movies_info[int(row[0])] = {
+                    'catalog_status': row[1],
+                    'release_year': row[2],
+                }
+            res_mid_ext = conn.execute(
+                text(
+                    "SELECT movie_id, source, external_id FROM movie_external_ids "
+                    "WHERE movie_id IN :mids AND source IN ('tmdb', 'imdb')"
+                ).bindparams(bindparam('mids', expanding=True)),
+                {'mids': matched_mids},
+            )
+            for row in res_mid_ext.fetchall():
+                mid_sources.setdefault((int(row[0]), str(row[1])), set()).add(str(row[2]))
+        return ext_owners, movies_info, mid_sources
+
+    if hasattr(connection, 'connect') and not hasattr(connection, 'execute'):
+        with connection.connect() as conn:
+            ext_owners, movies_info, mid_sources = _run(conn)
+    elif hasattr(connection, 'execute'):
+        ext_owners, movies_info, mid_sources = _run(connection)
+    else:
+        raise HubInputError('CONNECTION_INVALID', 'connection must support execute()')
+
+    imdb_batch_owners = {}
+    for tid, _, row in candidates:
+        imdb_val = row['external_ids'].get('imdb')
+        if imdb_val:
+            imdb_batch_owners.setdefault(imdb_val, set()).add(tid)
+
+    plans = []
+    valid_payloads = []
+    issues = []
+    for tid, payload, row in candidates:
+        tmdb_mids = ext_owners.get(('tmdb', str(tid)), set())
+        conflict_code = None
+        mid = None
+        if len(tmdb_mids) > 1:
+            conflict_code = 'IDENTITY_CONFLICT'
+        elif len(tmdb_mids) == 1:
+            mid = next(iter(tmdb_mids))
+
+        if conflict_code is None and payload.get('metadata_only') and not mid:
+            conflict_code = 'METADATA_REQUIRES_EXISTING_IDENTITY'
+
+        if conflict_code is None and mid is not None:
+            info = movies_info.get(mid)
+            if not info or info.get('catalog_status') != 'active':
+                conflict_code = 'MOVIE_NOT_ACTIVE'
+            elif info.get('release_year') and row.get('release_year') and info['release_year'] != row['release_year']:
+                conflict_code = 'YEAR_REQUIRES_REVIEW'
+
+        if conflict_code is None:
+            for source, eid in row['external_ids'].items():
+                owners = ext_owners.get((source, eid), set())
+                other_owners = owners - ({mid} if mid is not None else set())
+                if other_owners:
+                    conflict_code = 'IDENTITY_CONFLICT'
+                    break
+                if mid is not None:
+                    priors = mid_sources.get((mid, source), set())
+                    if priors and eid not in priors:
+                        conflict_code = 'IDENTITY_CONFLICT'
+                        break
+                if source == 'imdb' and len(imdb_batch_owners.get(eid, set())) > 1:
+                    conflict_code = 'IDENTITY_CONFLICT'
+                    break
+
+        if conflict_code is not None:
+            issues.append((tid, conflict_code))
+            continue
+
+        plans.append({
+            'tmdb_id': tid,
+            'movie_id': mid,
+            'title': row['title'],
+            'year': row['release_year'],
+            'action': 'supplement' if mid else 'append',
+        })
+        valid_payloads.append(payload)
+
+    return plans, valid_payloads, issues
+
+
 def _verify_tmdb_catalog(job_dir, *, connection=None, importer=None, catalog_config=None):
     manifest = _read_json_safe(job_dir / 'manifest.json', 'INVALID_MANIFEST')
     if manifest.get('schema') != CATALOG_MANIFEST_SCHEMA:
@@ -910,6 +1046,7 @@ def _verify_tmdb_catalog(job_dir, *, connection=None, importer=None, catalog_con
         engine = getattr(connection, 'engine', connection)
         active_importer = _admin_importer.CatalogImporter(engine, catalog_config)
 
+    readonly_candidates = []
     for entry in items:
         tid = entry.get('tmdb_id')
         if tid in seen_tids:
@@ -930,7 +1067,7 @@ def _verify_tmdb_catalog(job_dir, *, connection=None, importer=None, catalog_con
             raise HubInputError('ARCHIVE_CORRUPT', f'normalized artifact hash mismatch for tmdb_id={tid}')
         payload = json.loads(norm_bytes.decode('utf-8'))
         try:
-            _admin_importer.validate(payload)
+            adapted = _admin_importer.validate(payload)
         except (_admin_importer.ImportRejected, ValueError, TypeError) as exc:
             code = str(exc) or 'INVALID_PAYLOAD'
             errors[code] += 1
@@ -958,8 +1095,26 @@ def _verify_tmdb_catalog(job_dir, *, connection=None, importer=None, catalog_con
                 if len(anomalies) < MAX_ANOMALY_SAMPLES:
                     anomalies.append({'kind': kind, 'tmdb_id': tid, 'reason': code})
                 continue
+            valid_payloads.append(payload)
+        elif connection is not None:
+            readonly_candidates.append((tid, payload, adapted))
+        else:
+            valid_payloads.append(payload)
 
-        valid_payloads.append(payload)
+    if active_importer is None and connection is not None and readonly_candidates:
+        ro_plans, ro_payloads, ro_issues = _readonly_catalog_conflict_check(connection, readonly_candidates)
+        plans.extend(ro_plans)
+        valid_payloads.extend(ro_payloads)
+        for tid, code in ro_issues:
+            errors[code] += 1
+            if code == 'IDENTITY_CONFLICT':
+                quarantined += 1
+                kind = 'quarantined'
+            else:
+                needs_review += 1
+                kind = 'review'
+            if len(anomalies) < MAX_ANOMALY_SAMPLES:
+                anomalies.append({'kind': kind, 'tmdb_id': tid, 'reason': code})
 
     valid_count = len(valid_payloads)
     if quarantined > 0 or needs_review > 0:
@@ -1256,11 +1411,188 @@ def commit_archive(
     return receipt
 
 
+def convert_catalog_to_supplement(
+    catalog_archive,
+    *,
+    out_archive,
+    job_id=None,
+    connection=None,
+    execute=False,
+    now=None,
+):
+    """Offline conversion of verified tmdb_catalog raw/*.json into a tmdb_supplement archive."""
+    if type(execute) is not bool:
+        raise HubInputError('EXECUTE_FLAG_INVALID', 'execute must be a boolean')
+    cat_dir = validate_archive_dir(catalog_archive, must_exist=True)
+    out_root = validate_archive_dir(out_archive, must_exist=False, create=False)
+
+    manifest = _read_json_safe(cat_dir / 'manifest.json', 'INVALID_MANIFEST')
+    if manifest.get('schema') != CATALOG_MANIFEST_SCHEMA:
+        raise HubInputError('INVALID_MANIFEST_SCHEMA', 'unexpected tmdb_catalog manifest schema')
+    language = manifest.get('language', 'zh-CN')
+
+    if job_id is not None:
+        target_job_id = validate_job_id(job_id)
+    else:
+        base_id = str(manifest.get('job_id') or cat_dir.name)
+        target_job_id = validate_job_id(base_id[:60] + '-sup')
+
+    raw_bytes_map = {}
+    ordered_tids = []
+    for entry in manifest.get('items') or []:
+        if not isinstance(entry, dict) or entry.get('status') != 'HTTP_200':
+            continue
+        tid = entry.get('tmdb_id')
+        if not is_positive_int(tid):
+            raise HubInputError('ARCHIVE_CORRUPT', 'invalid tmdb_id in tmdb_catalog manifest')
+        if tid in raw_bytes_map:
+            continue
+        raw_path = cat_dir / 'raw' / f'{tid}.json'
+        if is_reparse(raw_path):
+            raise HubSecurityError('ARCHIVE_REPARSE_POINT', 'symlink/reparse file rejected')
+        raw_bytes = raw_path.read_bytes() if raw_path.is_file() else b''
+        if not raw_path.is_file() or sha256_bytes(raw_bytes) != entry.get('raw_sha256'):
+            raise HubInputError('ARCHIVE_CORRUPT', f'raw artifact hash mismatch for tmdb_id={tid}')
+        raw_bytes_map[tid] = raw_bytes
+        ordered_tids.append(tid)
+
+    if not ordered_tids:
+        raise HubRejected('ARCHIVE_REJECTED', 'no valid HTTP_200 raw items in tmdb_catalog archive')
+
+    movie_id_map = {}
+    receipt_path = cat_dir / 'commit-receipt.json'
+    if receipt_path.is_file():
+        receipt = _read_json_safe(receipt_path, 'COMMIT_RECEIPT_INVALID')
+        if receipt.get('status') == 'COMMITTED':
+            for item in (receipt.get('writer_summary') or {}).get('items') or []:
+                tid_val = item.get('tmdb_id')
+                mid_val = item.get('movie_id')
+                if is_positive_int(tid_val) and is_positive_int(mid_val):
+                    movie_id_map[tid_val] = mid_val
+
+    missing_tids = [tid for tid in ordered_tids if tid not in movie_id_map]
+    if missing_tids and connection is not None:
+        stmt = text(
+            "SELECT movie_id, external_id FROM movie_external_ids "
+            "WHERE source = 'tmdb' AND external_id IN :tids"
+        ).bindparams(bindparam('tids', expanding=True))
+        params = {'tids': [str(tid) for tid in missing_tids]}
+        if hasattr(connection, 'connect') and not hasattr(connection, 'execute'):
+            with connection.connect() as conn:
+                rows = conn.execute(stmt, params).fetchall()
+        elif hasattr(connection, 'execute'):
+            rows = connection.execute(stmt, params).fetchall()
+        else:
+            raise HubInputError('CONNECTION_INVALID', 'connection must support execute()')
+        for row in rows:
+            mid_val = int(row[0])
+            tid_str = str(row[1]).strip()
+            if tid_str.isdigit():
+                tid_val = int(tid_str)
+                if tid_val in raw_bytes_map:
+                    movie_id_map[tid_val] = mid_val
+
+    still_missing = [tid for tid in ordered_tids if tid not in movie_id_map]
+    sup_job_dir = out_root / target_job_id
+
+    if not execute:
+        return {
+            'contract': HUB_CONTRACT,
+            'rule_version': RULE_VERSION,
+            'command': 'convert-catalog-supplement',
+            'source': 'tmdb_supplement',
+            'mode': 'dry-run',
+            'status': 'DRY_RUN',
+            'catalog_archive': str(cat_dir),
+            'archive_dir': str(sup_job_dir),
+            'job_id': target_job_id,
+            'counts': {
+                'total_input': len(ordered_tids),
+                'valid': len(ordered_tids),
+                'mapped': len(ordered_tids) - len(still_missing),
+                'unmapped': len(still_missing),
+                'rejected': 0,
+                'quarantined': 0,
+                'needs_review': 0,
+                'duplicates': 0,
+            },
+            'requests_planned': 0,
+            'request_budget': 0,
+        }
+
+    if still_missing:
+        raise HubRejected(
+            'MOVIE_ID_MAPPING_MISSING',
+            f'missing movie_id for {len(still_missing)} tmdb_ids; commit tmdb_catalog or pass --dsn-env',
+        )
+
+    out_root = validate_archive_dir(out_archive, must_exist=False, create=True)
+    pairs = sorted(
+        [{'movie_id': int(movie_id_map[tid]), 'tmdb_id': int(tid)} for tid in ordered_tids],
+        key=lambda item: item['tmdb_id'],
+    )
+
+    already_captured = False
+    if (sup_job_dir / 'checkpoint.json').is_file() and (sup_job_dir / 'manifest.json').is_file():
+        state = _read_json_safe(sup_job_dir / 'checkpoint.json', 'ARCHIVE_CORRUPT')
+        completed = state.get('completed') or {}
+        if state.get('status') == 'COMPLETED' and all(str(p['tmdb_id']) in completed for p in pairs):
+            already_captured = True
+
+    if not already_captured:
+        start_epoch = now.timestamp() if isinstance(now, datetime) else time.time()
+        clock_val = [float(start_epoch)]
+
+        def fake_clock():
+            return clock_val[0]
+
+        def fake_sleep(sec):
+            clock_val[0] += float(sec)
+
+        def local_fetch(req):
+            url = req['url']
+            tid = int(url.split('/movie/')[1].split('?')[0])
+            body = raw_bytes_map.get(tid)
+            if body is None:
+                return {'status': 404, 'headers': {}, 'body': b'{}', 'url': url}
+            return {
+                'status': 200,
+                'headers': {'Content-Type': 'application/json'},
+                'body': body,
+                'url': url,
+            }
+
+        try:
+            cap = _capture.capture_movies(
+                pairs,
+                fetch=local_fetch,
+                archive_dir=str(out_root),
+                job_id=target_job_id,
+                max_requests=len(pairs),
+                execute=True,
+                language=language,
+                token_provider=lambda: 'OFFLINE_LOCAL_RAW_CONVERSION_0123456789',
+                clock=fake_clock,
+                sleep=fake_sleep,
+            )
+        except _capture.CaptureSecurityError as exc:
+            raise HubSecurityError(exc.code, str(exc)) from None
+        except _capture.CaptureError as exc:
+            raise HubInputError(exc.code, str(exc)) from None
+
+        cov = cap.get('coverage') or {}
+        if cap.get('status') != 'COMPLETED' or cov.get('failed', 0) != 0 or cov.get('uncovered_total', 0) != 0:
+            raise HubInputError('SUPPLEMENT_CAPTURE_INCOMPLETE', 'offline supplement conversion failed')
+
+    return verify_archive(sup_job_dir, source='tmdb_supplement', now=now)
+
+
 __all__ = [
     'CATALOG_MANIFEST_SCHEMA',
     'LOCAL_ENVELOPE_MANIFEST_SCHEMA',
     'MAX_ANOMALY_SAMPLES',
     'commit_archive',
+    'convert_catalog_to_supplement',
     'run_capture',
     'summary_envelope',
     'verify_archive',

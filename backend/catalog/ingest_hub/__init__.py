@@ -21,6 +21,7 @@ from .douban_adapter import (
 
 _PIPELINE_EXPORTS = frozenset((
     'commit_archive',
+    'convert_catalog_to_supplement',
     'run_capture',
     'summary_envelope',
     'verify_archive',
@@ -31,6 +32,7 @@ _SELECTOR_EXPORTS = frozenset((
 ))
 _DISCOVER_EXPORTS = frozenset((
     'discover_catalog_targets',
+    'export_existing_tmdb_ids',
 ))
 
 
@@ -59,8 +61,10 @@ __all__ = [
     'build_douban_archive',
     'classify_douban_item',
     'commit_archive',
+    'convert_catalog_to_supplement',
     'discover_catalog_targets',
     'douban_item_to_envelope_record',
+    'export_existing_tmdb_ids',
     'load_douban_raw',
     'load_plan',
     'run_capture',

@@ -29,7 +29,9 @@ from catalog.ingest_hub import (  # noqa: E402
     HubRejected,
     build_douban_archive,
     commit_archive,
+    convert_catalog_to_supplement,
     discover_catalog_targets,
+    export_existing_tmdb_ids,
     load_douban_raw,
     load_plan,
     run_capture,
@@ -37,8 +39,10 @@ from catalog.ingest_hub import (  # noqa: E402
     summary_envelope,
     validate_archive_dir,
     validate_env_name,
+    validate_job_id,
     verify_archive,
 )
+from catalog.ingest_hub.contracts import validate_safe_file  # noqa: E402
 
 def _configure_stdio():
     for stream in (sys.stdout, sys.stderr):
@@ -190,12 +194,21 @@ def _cmd_capture(args):
     return EXIT_INCOMPLETE
 
 
+def _has_isolated_m6_config(cfg):
+    return bool(
+        cfg.get('M6_ISOLATED')
+        and cfg.get('M6_SCHEMA')
+        and cfg.get('M6_APP_USER')
+        and cfg.get('M6_SERVER_UUID')
+    )
+
+
 def _catalog_config_from_env(conn):
     from sqlalchemy import text
     from app.m6_database import environment_config
 
     cfg = environment_config(os.environ)
-    if not cfg.get('M6_SCHEMA'):
+    if not cfg.get('M6_SCHEMA') and getattr(conn.dialect, 'name', '') != 'sqlite':
         schema = conn.execute(text('SELECT DATABASE()')).scalar()
         if schema:
             cfg['M6_SCHEMA'] = schema
@@ -215,7 +228,7 @@ def _cmd_verify(args):
                     source=args.source,
                     plan=args.plan,
                     connection=conn,
-                    catalog_config=cfg if cfg.get('M6_SCHEMA') else None,
+                    catalog_config=cfg if _has_isolated_m6_config(cfg) else None,
                 )
         finally:
             engine.dispose()
@@ -453,6 +466,47 @@ def _cmd_discover(args):
     return EXIT_INCOMPLETE
 
 
+def _cmd_export_existing_ids(args):
+    validate_env_name(args.dsn_env, 'dsn_env')
+    dest = validate_safe_file(args.out, allow_c_read=False, must_exist=False)
+    validate_archive_dir(dest.parent, must_exist=False, create=False)
+    engine = _connect_sqlalchemy(args.dsn_env)
+    try:
+        with engine.connect() as conn:
+            result = export_existing_tmdb_ids(conn, output_path=dest)
+    finally:
+        engine.dispose()
+    _print_result(result, summary_only=args.summary_only)
+    return EXIT_OK
+
+
+def _cmd_convert_catalog_supplement(args):
+    validate_archive_dir(args.catalog_archive, must_exist=True)
+    validate_archive_dir(args.out_archive, must_exist=False, create=False)
+    if args.job_id:
+        validate_job_id(args.job_id)
+
+    kwargs = {
+        'out_archive': args.out_archive,
+        'job_id': args.job_id,
+        'execute': bool(args.execute),
+    }
+    if args.dsn_env:
+        engine = _connect_sqlalchemy(args.dsn_env)
+        try:
+            with engine.connect() as conn:
+                result = convert_catalog_to_supplement(args.catalog_archive, connection=conn, **kwargs)
+        finally:
+            engine.dispose()
+    else:
+        result = convert_catalog_to_supplement(args.catalog_archive, **kwargs)
+
+    _print_result(result, summary_only=args.summary_only)
+    if args.execute and args.strict and result.get('status') != 'READY_TO_COMMIT':
+        return EXIT_INCOMPLETE
+    return EXIT_OK
+
+
 def _add_select_options(parser, *, required_source=True):
     parser.add_argument('--source', choices=SUPPORTED_SOURCES, required=required_source)
     parser.add_argument('--scope', help='missing | explicit | stale | boards | catalog | envelope | douban')
@@ -546,6 +600,20 @@ def build_parser():
     p_douban.add_argument('--strict', action='store_true', help='exit 3 unless status == READY_TO_COMMIT')
     p_douban.add_argument('--summary-only', action='store_true')
 
+    p_exp = sub.add_parser('export-existing-ids', help='export sorted deduplicated TMDB IDs from DB to JSON')
+    p_exp.add_argument('--dsn-env', required=True, help='environment variable name holding read-only DSN')
+    p_exp.add_argument('--out', required=True, help='non-C: absolute output JSON file path')
+    p_exp.add_argument('--summary-only', action='store_true')
+
+    p_sup = sub.add_parser('convert-catalog-supplement', help='offline convert verified tmdb_catalog archive into tmdb_supplement archive')
+    p_sup.add_argument('--catalog-archive', required=True, help='non-C: absolute tmdb_catalog archive job directory')
+    p_sup.add_argument('--out-archive', required=True, help='non-C: absolute tmdb_supplement archive root directory')
+    p_sup.add_argument('--job-id', help='optional target supplement job identifier (defaults to <catalog_job_id>-sup)')
+    p_sup.add_argument('--dsn-env', help='optional read-only DSN env var for movie_id fallback lookup')
+    p_sup.add_argument('--execute', action='store_true', help='required to write supplement archive and verify')
+    p_sup.add_argument('--strict', action='store_true', help='exit 3 unless status == READY_TO_COMMIT when executing')
+    p_sup.add_argument('--summary-only', action='store_true')
+
     return parser
 
 
@@ -566,6 +634,10 @@ def main(argv=None):
             return _cmd_commit(args)
         if args.command == 'convert-douban':
             return _cmd_convert_douban(args)
+        if args.command == 'export-existing-ids':
+            return _cmd_export_existing_ids(args)
+        if args.command == 'convert-catalog-supplement':
+            return _cmd_convert_catalog_supplement(args)
         return _cmd_pipeline_preview(args)
     except HubRejected as exc:
         return _failure(exc, exit_code=EXIT_INCOMPLETE)

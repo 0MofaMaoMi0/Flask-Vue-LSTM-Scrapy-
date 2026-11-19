@@ -28,7 +28,9 @@ from catalog.ingest_hub import (  # noqa: E402
     HubRejected,
     HubSecurityError,
     commit_archive,
+    convert_catalog_to_supplement,
     discover_catalog_targets,
+    export_existing_tmdb_ids,
     load_plan,
     run_capture,
     select_targets,
@@ -64,8 +66,8 @@ def non_c_archive():
         shutil.rmtree(root, ignore_errors=True)
 
 
-def _tmdb_movie_payload(tmdb_id, *, title='合成电影', release_date='2022-05-01'):
-    return {
+def _tmdb_movie_payload(tmdb_id, *, title='合成电影', release_date='2022-05-01', imdb_id=None):
+    payload = {
         'id': tmdb_id,
         'adult': False,
         'title': title,
@@ -121,6 +123,9 @@ def _tmdb_movie_payload(tmdb_id, *, title='合成电影', release_date='2022-05-
             ],
         },
     }
+    if imdb_id is not None:
+        payload['imdb_id'] = imdb_id
+    return payload
 
 
 def _envelope_record(idx, *, douban_id=None, tmdb_id=None, title=None, year=2020, bad=False):
@@ -547,11 +552,15 @@ def test_commit_requires_execute_flag_and_blocks_seal_tampering(monkeypatch):
 # ------------------------------------------------------------------ 5. CLI e2e
 
 
-def _run_cli(args):
+def _run_cli(args, *, extra_env=None):
     script = REPO / 'scripts' / 'data_collector.py'
     env = dict(os.environ)
     env.pop('TMDB_READ_TOKEN', None)
     env.pop('MI2_DATABASE_URL', None)
+    for key in ('MI2_M6_ISOLATED', 'MI2_M6_SCHEMA', 'MI2_M6_APP_USER', 'MI2_M6_SERVER_UUID'):
+        env.pop(key, None)
+    if extra_env:
+        env.update(extra_env)
     env['PYTHONIOENCODING'] = 'utf-8'
     return subprocess.run(
         [sys.executable, str(script)] + list(args),
@@ -1045,5 +1054,277 @@ def test_cli_discover_dry_run_summary_under_30_lines():
         ])
         assert r_bad_c.returncode == 2
         assert 'ARCHIVE_ON_SYSTEM_DRIVE' in r_bad_c.stderr
+
+
+# ------------------------------------------------------------------ 7. S4 engineering optimizations
+
+
+def _build_sqlite_catalog_db(db_path):
+    engine = create_engine(f'sqlite+pysqlite:///{db_path}')
+    md = MetaData()
+    movies = Table(
+        'movies',
+        md,
+        Column('movie_id', Integer, primary_key=True),
+        Column('catalog_status', String(16)),
+        Column('release_year', Integer),
+    )
+    ext = Table(
+        'movie_external_ids',
+        md,
+        Column('movie_id', Integer),
+        Column('source', String(16)),
+        Column('external_id', String(32)),
+    )
+    md.create_all(engine)
+    return engine, movies, ext
+
+
+def test_verify_tmdb_catalog_readonly_conflict_precheck_api_and_cli(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    with non_c_archive() as root:
+        db_path = root / 'catalog_ro.sqlite'
+        engine, movies, ext = _build_sqlite_catalog_db(db_path)
+        with engine.begin() as conn:
+            conn.execute(insert(movies), [
+                {'movie_id': 10, 'catalog_status': 'active', 'release_year': 2022},
+                {'movie_id': 11, 'catalog_status': 'hidden', 'release_year': 2022},
+                {'movie_id': 12, 'catalog_status': 'active', 'release_year': 2022},
+            ])
+            conn.execute(insert(ext), [
+                # movie_id=10: existing active tmdb=9101 with matching imdb tt9101001
+                {'movie_id': 10, 'source': 'tmdb', 'external_id': '9101'},
+                {'movie_id': 10, 'source': 'imdb', 'external_id': 'tt9101001'},
+                # movie_id=11: hidden tmdb=9102
+                {'movie_id': 11, 'source': 'tmdb', 'external_id': '9102'},
+                # movie_id=12: owns imdb tt9103001 (no tmdb mapped -> collides with new tmdb=9103!)
+                {'movie_id': 12, 'source': 'imdb', 'external_id': 'tt9103001'},
+                # movie_id=10 also collides if another tmdb=9104 tries to claim imdb tt9101001,
+                # or if existing tmdb=9101 tries to use a different imdb
+            ])
+
+        def fake_fetch(req):
+            tid = int(req['url'].split('/movie/')[1].split('?')[0])
+            imdb_map = {
+                9101: 'tt9101001',   # active supplement OK
+                9102: 'tt9102001',   # MOVIE_NOT_ACTIVE
+                9103: 'tt9103001',   # DB IMDb IDENTITY_CONFLICT
+                9104: 'tt9104999',   # intra-batch IMDb collision with 9105
+                9105: 'tt9104999',   # intra-batch IMDb collision with 9104
+                9106: 'tt9106001',   # clean append OK
+            }
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(_tmdb_movie_payload(tid, imdb_id=imdb_map[tid]), ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        plan_conflict = select_targets(
+            source='tmdb_catalog',
+            job_id='ro-conflict-01',
+            tmdb_ids=[9101, 9102, 9103, 9104, 9105, 9106],
+        )
+        cap = run_capture(plan_conflict, archive_dir=str(root), execute=True, token_env='HUB_TEST_TMDB_TOKEN', fetch=fake_fetch)
+        assert cap['status'] == 'COMPLETED'
+
+        with engine.connect() as conn:
+            receipt = verify_archive(cap['archive_dir'], connection=conn)
+        assert receipt['status'] == 'NEEDS_REVIEW'
+        assert receipt['counts']['valid'] == 2  # 9101 + 9106
+        assert receipt['counts']['quarantined'] == 3  # 9103, 9104, 9105
+        assert receipt['counts']['needs_review'] == 1  # 9102
+        assert receipt['error_breakdown'] == {
+            'IDENTITY_CONFLICT': 3,
+            'MOVIE_NOT_ACTIVE': 1,
+        }
+        actions = {a['tmdb_id']: a['action'] for a in receipt['preview']['actions']}
+        assert actions == {9101: 'supplement', 9106: 'append'}
+
+        # Also check CLI verify --dsn-env --strict --summary-only with SQLite DSN
+        dsn_url = f'sqlite+pysqlite:///{db_path.as_posix()}'
+        r_ver = _run_cli(
+            ['verify', '--archive', cap['archive_dir'], '--dsn-env', 'HUB_TEST_RO_DSN', '--strict', '--summary-only'],
+            extra_env={'HUB_TEST_RO_DSN': dsn_url},
+        )
+        assert r_ver.returncode == 3
+        ver_json = json.loads(r_ver.stdout)
+        assert ver_json['status'] == 'NEEDS_REVIEW'
+        assert ver_json['error_breakdown']['IDENTITY_CONFLICT'] == 3
+
+        # Clean subset (9101 + 9106) -> READY_TO_COMMIT via CLI --dsn-env --strict
+        plan_clean = select_targets(source='tmdb_catalog', job_id='ro-clean-01', tmdb_ids=[9101, 9106])
+        cap_clean = run_capture(plan_clean, archive_dir=str(root), execute=True, token_env='HUB_TEST_TMDB_TOKEN', fetch=fake_fetch)
+        r_clean = _run_cli(
+            ['verify', '--archive', cap_clean['archive_dir'], '--dsn-env', 'HUB_TEST_RO_DSN', '--strict', '--summary-only'],
+            extra_env={'HUB_TEST_RO_DSN': dsn_url},
+        )
+        assert r_clean.returncode == 0, r_clean.stderr
+        assert json.loads(r_clean.stdout)['status'] == 'READY_TO_COMMIT'
+        engine.dispose()
+
+
+def test_export_existing_tmdb_ids_api_and_cli():
+    with non_c_archive() as root:
+        db_path = root / 'export_ids.sqlite'
+        engine, _, ext = _build_sqlite_catalog_db(db_path)
+        with engine.begin() as conn:
+            conn.execute(insert(ext), [
+                {'movie_id': 1, 'source': 'tmdb', 'external_id': '300'},
+                {'movie_id': 2, 'source': 'tmdb', 'external_id': '100'},
+                {'movie_id': 3, 'source': 'tmdb', 'external_id': '300'},  # dup
+                {'movie_id': 4, 'source': 'tmdb', 'external_id': 'bad'},  # non-numeric ignored
+                {'movie_id': 5, 'source': 'imdb', 'external_id': '999'},  # non-tmdb ignored
+            ])
+
+        out_api = root / 'api-existing.json'
+        with engine.connect() as conn:
+            res = export_existing_tmdb_ids(conn, output_path=str(out_api))
+        assert res['status'] == 'EXPORTED'
+        assert res['count'] == 2
+        assert res['min_id'] == 100
+        assert res['max_id'] == 300
+        assert json.loads(out_api.read_text(encoding='utf-8')) == [100, 300]
+
+        # C: drive must be blocked
+        with pytest.raises(HubSecurityError):
+            with engine.connect() as conn:
+                export_existing_tmdb_ids(conn, output_path=r'C:\bad\existing.json')
+
+        engine.dispose()
+
+        # CLI export-existing-ids --summary-only
+        out_cli = root / 'cli-existing.json'
+        dsn_url = f'sqlite+pysqlite:///{db_path.as_posix()}'
+        r_exp = _run_cli(
+            ['export-existing-ids', '--dsn-env', 'HUB_TEST_EXP_DSN', '--out', str(out_cli), '--summary-only'],
+            extra_env={'HUB_TEST_EXP_DSN': dsn_url},
+        )
+        assert r_exp.returncode == 0, r_exp.stderr
+        lines = [line for line in r_exp.stdout.strip().splitlines() if line.strip()]
+        assert len(lines) < 30
+        exp_json = json.loads(r_exp.stdout)
+        assert exp_json['count'] == 2
+        assert json.loads(out_cli.read_text(encoding='utf-8')) == [100, 300]
+
+        # CLI rejects C: drive --out and missing DSN env cleanly
+        r_bad_c = _run_cli(
+            ['export-existing-ids', '--dsn-env', 'HUB_TEST_EXP_DSN', '--out', r'C:\bad\ids.json'],
+            extra_env={'HUB_TEST_EXP_DSN': dsn_url},
+        )
+        assert r_bad_c.returncode == 2
+        assert 'FILE_ON_SYSTEM_DRIVE' in r_bad_c.stderr
+
+        r_no_dsn = _run_cli(['export-existing-ids', '--dsn-env', 'MISSING_EXPORT_DSN', '--out', str(out_cli)])
+        assert r_no_dsn.returncode == 2
+        assert 'DSN_ENV_MISSING' in r_no_dsn.stderr
+
+
+def test_convert_catalog_to_supplement_offline_e2e_and_cli(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    with non_c_archive() as root:
+        plan = select_targets(source='tmdb_catalog', job_id='cat-sup-src', tmdb_ids=[5101, 5102])
+
+        def fake_fetch(req):
+            tid = int(req['url'].split('/movie/')[1].split('?')[0])
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(_tmdb_movie_payload(tid, imdb_id=f'tt510{tid}'), ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        cap = run_capture(plan, archive_dir=str(root), execute=True, token_env='HUB_TEST_TMDB_TOKEN', fetch=fake_fetch)
+        cat_dir = Path(cap['archive_dir'])
+        verify_archive(cat_dir)
+
+        out_sup_root = root / 'sup-archives'
+        # 1) Dry-run before commit -> writes nothing, reports unmapped=2
+        dry = convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=False, now=NOW)
+        assert dry['status'] == 'DRY_RUN'
+        assert dry['counts']['total_input'] == 2
+        assert dry['counts']['unmapped'] == 2
+        assert not out_sup_root.exists()
+
+        # 2) Execute without commit-receipt or DB -> MOVIE_ID_MAPPING_MISSING
+        with pytest.raises(HubRejected) as exc_map:
+            convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=True, now=NOW)
+        assert exc_map.value.code == 'MOVIE_ID_MAPPING_MISSING'
+
+        # 3) Commit catalog via adapter -> writes commit-receipt.json with movie_id mapping
+        class _MapCatalogAdapter(_FakeCatalogAdapter):
+            def apply(self, jobid, payloads, backup, expected_plans=None):
+                backup({'movies': []})
+                return {
+                    'batch_id': 77,
+                    'items': [{'tmdb_id': p['id'], 'movie_id': 3000 + idx} for idx, p in enumerate(payloads)],
+                    'replayed': False,
+                }
+
+        commit_archive(cat_dir, execute=True, importer=_MapCatalogAdapter())
+
+        # Guarantee zero network calls during conversion
+        import urllib.request
+        monkeypatch.setattr(urllib.request, 'urlopen', lambda *a, **kw: (_ for _ in ()).throw(AssertionError('no HTTP allowed')))
+
+        # 4) Execute conversion via commit-receipt.json -> READY_TO_COMMIT + idempotent replay + commit_archive
+        sup_receipt = convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=True, now=NOW)
+        assert sup_receipt['status'] == 'READY_TO_COMMIT'
+        assert sup_receipt['source'] == 'tmdb_supplement'
+        assert sup_receipt['job_id'] == 'cat-sup-src-sup'
+        assert sup_receipt['counts']['valid'] == 2
+        assert len(sup_receipt['commit_seal']) == 64
+
+        sup_dir = Path(sup_receipt['archive_dir'])
+        sup_replayed = convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=True, now=NOW)
+        assert sup_replayed['commit_seal'] == sup_receipt['commit_seal']
+
+        sup_conn = FakeSupplementConnection()
+        sup_commit = commit_archive(sup_dir, execute=True, seal=sup_receipt['commit_seal'], connection=sup_conn, now=NOW)
+        assert sup_commit['status'] == 'COMMITTED'
+        assert len(sup_conn.batches) == 1
+
+        # 5) DB fallback (without commit-receipt.json) + CLI --summary-only --strict
+        (cat_dir / 'commit-receipt.json').unlink()
+        db_path = root / 'map_fallback.sqlite'
+        engine, movies, ext = _build_sqlite_catalog_db(db_path)
+        with engine.begin() as conn:
+            conn.execute(insert(movies), [
+                {'movie_id': 4001, 'catalog_status': 'active', 'release_year': 2022},
+                {'movie_id': 4002, 'catalog_status': 'active', 'release_year': 2022},
+            ])
+            conn.execute(insert(ext), [
+                {'movie_id': 4001, 'source': 'tmdb', 'external_id': '5101'},
+                {'movie_id': 4002, 'source': 'tmdb', 'external_id': '5102'},
+            ])
+        engine.dispose()
+
+        dsn_url = f'sqlite+pysqlite:///{db_path.as_posix()}'
+        r_conv = _run_cli(
+            [
+                'convert-catalog-supplement',
+                '--catalog-archive', str(cat_dir),
+                '--out-archive', str(out_sup_root),
+                '--job-id', 'cat-sup-db',
+                '--dsn-env', 'HUB_TEST_MAP_DSN',
+                '--execute',
+                '--strict',
+                '--summary-only',
+            ],
+            extra_env={'HUB_TEST_MAP_DSN': dsn_url},
+        )
+        assert r_conv.returncode == 0, r_conv.stderr
+        lines = [line for line in r_conv.stdout.strip().splitlines() if line.strip()]
+        assert len(lines) < 30
+        conv_json = json.loads(r_conv.stdout)
+        assert conv_json['status'] == 'READY_TO_COMMIT'
+        assert conv_json['counts']['valid'] == 2
+        assert len(conv_json['commit_seal']) == 64
+
+        # 6) Tampered raw/*.json must raise ARCHIVE_CORRUPT even on dry-run
+        (cat_dir / 'raw' / '5101.json').write_text('{"id": 5101, "tampered": true}\n', encoding='utf-8')
+        with pytest.raises(HubInputError) as exc_corrupt:
+            convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=False)
+        assert exc_corrupt.value.code == 'ARCHIVE_CORRUPT'
 
 
