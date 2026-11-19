@@ -2,6 +2,7 @@
 import {ref,onMounted,onBeforeUnmount,computed,watch} from 'vue'
 import {useRoute} from 'vue-router'
 import {useAuthStore} from '../stores/auth'
+import {consumeInternalBehaviorEvent,movieBehavior} from '../services/movieBehavior'
 import AccountMenu from './AccountMenu.vue'
 const route=useRoute()
 function active(to:string){if(to==='/movies')return route.path==='/movies'&&!route.hash;if(to.includes('#behavior'))return route.path==='/movies'&&route.hash==='#behavior';return route.path===to}
@@ -10,12 +11,28 @@ const emit=defineEmits<{(e:'expanded-change',value:boolean):void}>()
 const counts=ref<{seen:number,favorite:number,want:number}>({seen:0,favorite:0,want:0})
 const onMovies=computed(()=>route.path==='/movies'&&route.hash==='#behavior')
 const view=computed(()=>String(route.query.view||'globe'))
-async function loadCounts(){
-  try{const r=await fetch('/api/catalog/behavior',{credentials:'same-origin'});if(!r.ok)return;const s=(await r.json()).data.state||{};const c={seen:0,favorite:0,want:0};for(const v of Object.values(s) as any[]){if(v?.watched)c.seen++;if(v?.favorite)c.favorite++;if(v?.want)c.want++}counts.value=c}catch{}
+let countsController:AbortController|null=null
+function applyBehaviorSnapshot(s:Record<string,any>){
+  const c={seen:0,favorite:0,want:0}
+  for(const v of Object.values(s||{})){if(v?.watched)c.seen++;if(v?.favorite)c.favorite++;if(v?.want)c.want++}
+  counts.value=c
 }
-onMounted(()=>{emit('expanded-change',expanded.value);loadCounts();window.addEventListener('mi2-behavior-changed',loadCounts);window.addEventListener('focus',loadCounts)})
-onBeforeUnmount(()=>{window.removeEventListener('mi2-behavior-changed',loadCounts);window.removeEventListener('focus',loadCounts)})
-watch(()=>route.fullPath,loadCounts)
+async function loadCounts(){
+  countsController?.abort()
+  const ac=new AbortController()
+  countsController=ac
+  try{
+    const r=await fetch('/api/catalog/behavior',{credentials:'same-origin',signal:ac.signal})
+    if(!r.ok)return
+    let body:any=null;try{body=await r.json()}catch{body=null}
+    if(ac.signal.aborted||countsController!==ac||body?.code!=='OK')return
+    applyBehaviorSnapshot(body?.data?.state||{})
+  }catch{}
+}
+function onBehaviorChanged(){if(consumeInternalBehaviorEvent())return;void loadCounts()}
+watch(()=>movieBehavior.version,()=>{const uid=auth.user?.id||0;if(uid&&movieBehavior.owner===uid&&movieBehavior.loaded)applyBehaviorSnapshot(movieBehavior.movies)})
+onMounted(()=>{emit('expanded-change',expanded.value);const uid=auth.user?.id||0;if(uid&&movieBehavior.owner===uid&&movieBehavior.loaded){applyBehaviorSnapshot(movieBehavior.movies)}else{void loadCounts()}window.addEventListener('mi2-behavior-changed',onBehaviorChanged);window.addEventListener('focus',loadCounts)})
+onBeforeUnmount(()=>{countsController?.abort();countsController=null;window.removeEventListener('mi2-behavior-changed',onBehaviorChanged);window.removeEventListener('focus',loadCounts)})
 function toggle(){expanded.value=!expanded.value;localStorage.setItem('mi2_nav_expanded',String(expanded.value));emit('expanded-change',expanded.value)}
 const baseLinks=[{to:'/home',label:'首页',icon:'M3 10l9-7 9 7v10H3z M9 20v-7h6v7'}, {to:'/movies',label:'电影库',icon:'M4 3h16v18H4z M4 8h16 M4 16h16 M8 3v18 M16 3v18'}, {to:'/recommendations',label:'推荐频道',icon:'M3 6h18M3 12h18M3 18h18M8 3v6M16 9v6M10 15v6'}, {to:'/ai',label:'AI 探索',icon:'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5z'}, {to:'/movies#behavior',label:'我的电影',icon:'M5 4h14v17l-7-5-7 5z'}]
 const links=computed(()=>auth.user?.is_admin?[...baseLinks,{to:'/admin',label:'数据驾驶舱',icon:'M4 20V11 M10 20V5 M16 20v-7 M21 20H3'}]:baseLinks)
@@ -32,18 +49,18 @@ const subItems=[
 </div><div class="sidebar-footer"><AccountMenu :collapsed="!expanded"/></div></aside></div></template>
 <style scoped>
 /* P7.3 sidebar and P8.4 palette copied from the supplied shell. */
-.sidebar{position:fixed;inset:0 auto 0 0;width:var(--expanded);height:100vh;display:flex;flex-direction:column;z-index:30;overflow:hidden;background:linear-gradient(180deg,#151526 0%,#131323 55%,#11111d 100%);border-right:1px solid rgba(203,166,255,.09);box-shadow:8px 0 34px rgba(0,0,0,.18);transition:width .25s ease}
-.sidebar-head{min-height:87px;padding:18px 12px 12px 18px;display:flex;align-items:flex-start;gap:8px}.sidebar-brand{display:flex;flex-direction:column;min-width:0;white-space:nowrap;overflow:hidden;padding:3px 0 0 0;flex:1}.sidebar-brand strong{font:800 21px/1.14 Georgia,'Times New Roman',serif;letter-spacing:-.6px;color:#f2ecff}.sidebar-brand strong span{color:#bd92ff}.sidebar-brand small{color:#a49bb8;font-size:8.5px;letter-spacing:1.1px;margin-top:4px}.sidebar-toggle{height:42px;width:42px;min-width:42px;border-radius:12px;display:grid;place-items:center;border:1px solid transparent;background:transparent;color:#c2a8ec;transition:background .2s,border-color .2s,transform .2s}.sidebar-toggle:hover{background:#2a2340;border-color:#76599f}.sidebar-toggle svg{transition:transform .22s ease}.sidebar-toggle:active svg{transform:scale(.88)}
-.sidebar-content{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#453454 transparent;padding:0 9px 8px}
+.sidebar{position:fixed;inset:0 auto 0 0;width:var(--expanded);height:100vh;display:flex;flex-direction:column;z-index:30;overflow:hidden;background:#101113;border-right:1px solid rgba(255,255,255,.1);box-shadow:8px 0 34px rgba(0,0,0,.18);transition:width .25s ease}
+.sidebar-head{min-height:87px;padding:18px 12px 12px 18px;display:flex;align-items:flex-start;gap:8px}.sidebar-brand{display:flex;flex-direction:column;min-width:0;white-space:nowrap;overflow:hidden;padding:3px 0 0 0;flex:1}.sidebar-brand strong{font:800 21px/1.14 Georgia,'Times New Roman',serif;letter-spacing:-.6px;color:#fff}.sidebar-brand strong span{color:#fff}.sidebar-brand small{color:#c2c4cb;font-size:8.5px;letter-spacing:1.1px;margin-top:4px}.sidebar-toggle{height:42px;width:42px;min-width:42px;border-radius:12px;display:grid;place-items:center;border:1px solid transparent;background:transparent;color:#fff;transition:background .2s,border-color .2s,transform .2s}.sidebar-toggle:hover{background:#202125;border-color:#ffffff40}.sidebar-toggle svg{transition:transform .22s ease}.sidebar-toggle:active svg{transform:scale(.88)}
+.sidebar-content{flex:1;min-height:0;overflow-y:auto;overflow-x:hidden;scrollbar-width:thin;scrollbar-color:#55565c transparent;padding:0 9px 8px}
 .primary-nav,.context-nav{display:flex;flex-direction:column;gap:4px}
-.nav-item,.sub-item,.footer-item{display:flex;align-items:center;gap:12px;min-height:43px;padding:10px 12px;background:transparent;border:1px solid transparent;border-radius:13px;text-align:left;white-space:nowrap;color:#c3bdd4;transition:background .16s,color .16s,border-color .16s}
-.nav-item{width:100%;font-size:14px;font-weight:550}.nav-item:hover,.sub-item:hover,.footer-item:hover{background:rgba(196,157,255,.07);color:#fff}.nav-item.is-active,.sub-item.is-active{color:#f9f6ff;background:linear-gradient(100deg,#34274eaa,#29223888);border-color:rgba(196,156,255,.16)}
-.nav-icon{width:22px;min-width:22px;height:22px;display:grid;place-items:center;color:#bba0ec}.nav-icon svg{display:block;width:20px;height:20px}.nav-item.is-active .nav-icon,.sub-item.is-active .nav-icon{color:#e1c9ff}.item-label{overflow:hidden;text-overflow:ellipsis}
-.route-context{margin:17px 0 8px;opacity:1}.route-context-title{font-size:10px;color:#8d82a6;letter-spacing:1px;font-weight:750;display:flex;align-items:center;gap:8px;padding:9px 10px 7px}.context-tag{font-size:9px;letter-spacing:.4px;color:#a996c9;background:#2a2340;border:1px solid #4b3b6b;border-radius:99px;padding:2px 6px;font-weight:600}.sub-item{width:100%;min-height:40px;font-size:12px;gap:10px;padding:9px 10px}.sub-item .nav-icon{width:20px;min-width:20px}.sub-count{margin-left:auto;font-size:11px;font-weight:700;color:#d0b3f3;border-radius:20px;padding:3px 7px;background:#302842}
-.sidebar-footer{padding:10px 9px 14px;display:flex;flex-direction:column;gap:5px}.footer-item{width:100%;min-height:42px;font-size:13px}.footer-item.is-active{background:rgba(177,140,244,.12);color:#eee0ff}.nav-icon.profile{background:#3a2b58;border-radius:50%;color:#dfceff}
+.nav-item,.sub-item,.footer-item{display:flex;align-items:center;gap:12px;min-height:43px;padding:10px 12px;background:transparent;border:1px solid transparent;border-radius:13px;text-align:left;white-space:nowrap;color:#fff;transition:background .16s,color .16s,border-color .16s}
+.nav-item{width:100%;font-size:14px;font-weight:550}.nav-item:hover,.sub-item:hover,.footer-item:hover{background:rgba(255,255,255,.06);color:#fff}.nav-item.is-active,.sub-item.is-active{color:#fff;background:#202125;border-color:rgba(255,255,255,.2)}
+.nav-icon{width:22px;min-width:22px;height:22px;display:grid;place-items:center;color:#fff}.nav-icon svg{display:block;width:20px;height:20px}.nav-item.is-active .nav-icon,.sub-item.is-active .nav-icon{color:#fff}.item-label{overflow:hidden;text-overflow:ellipsis}
+.route-context{margin:17px 0 8px;opacity:1}.route-context-title{font-size:10px;color:#c2c4cb;letter-spacing:1px;font-weight:750;display:flex;align-items:center;gap:8px;padding:9px 10px 7px}.context-tag{font-size:9px;letter-spacing:.4px;color:#fff;background:#202125;border:1px solid #ffffff26;border-radius:99px;padding:2px 6px;font-weight:600}.sub-item{width:100%;min-height:40px;font-size:12px;gap:10px;padding:9px 10px}.sub-item .nav-icon{width:20px;min-width:20px}.sub-count{margin-left:auto;font-size:11px;font-weight:700;color:#fff;border-radius:20px;padding:3px 7px;background:#202125}
+.sidebar-footer{padding:10px 9px 14px;display:flex;flex-direction:column;gap:5px}.footer-item{width:100%;min-height:42px;font-size:13px}.footer-item.is-active{background:rgba(255,255,255,.08);color:#fff}.nav-icon.profile{background:#202125;border-radius:50%;color:#fff}
 
- .is-collapsed .sidebar{width:var(--collapsed)} .is-collapsed .sidebar-head{min-height:72px;padding:8px 0 10px;justify-content:center} .is-collapsed .sidebar-brand{display:none} .is-collapsed .sidebar-toggle{height:44px;width:42px;min-width:42px;margin:auto;border:1px solid rgba(198,165,255,.72);background:rgba(46,35,72,.28);border-radius:13px}
+ .is-collapsed .sidebar{width:var(--collapsed)} .is-collapsed .sidebar-head{min-height:72px;padding:8px 0 10px;justify-content:center} .is-collapsed .sidebar-brand{display:none} .is-collapsed .sidebar-toggle{height:44px;width:42px;min-width:42px;margin:auto;border:1px solid rgba(255,255,255,.32);background:rgba(255,255,255,.04);border-radius:13px}
  .is-collapsed .sidebar-content{padding:0 3px 8px} .is-collapsed .nav-item, .is-collapsed .sub-item, .is-collapsed .footer-item{justify-content:center;gap:0;width:44px;max-width:44px;min-height:43px;padding:10px 0;border-radius:12px;margin:0 auto} .is-collapsed .nav-item .item-label, .is-collapsed .sub-item .item-label, .is-collapsed .footer-item .item-label, .is-collapsed .sub-count{display:none} .is-collapsed .route-context{display:none!important} .is-collapsed .sidebar-footer{padding:8px 3px 12px}
 
-.sidebar-scope{--collapsed:52.5px;--expanded:280px}.sidebar{background:linear-gradient(180deg,#141624 0%,#111320 58%,#0d101c 100%)}.sidebar a{text-decoration:none}.sidebar svg{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.sidebar-brand{color:inherit}.sidebar-brand:focus-visible,.nav-item:focus-visible,.sidebar-toggle:focus-visible{outline:2px solid #c2a6f4;outline-offset:-2px}.nav-item.is-active{background:rgba(140,105,190,.19);border-color:rgba(197,163,244,.19)}@media(prefers-reduced-motion:reduce){.sidebar,.nav-item,.sidebar-toggle{transition:none}}
+.sidebar-scope{--collapsed:52.5px;--expanded:280px}.sidebar{background:#101113}.sidebar a{text-decoration:none}.sidebar svg{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}.sidebar-brand{color:inherit}.sidebar-brand:focus-visible,.nav-item:focus-visible,.sidebar-toggle:focus-visible{outline:2px solid #c8a46a;outline-offset:-2px}.nav-item.is-active{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.2)}@media(prefers-reduced-motion:reduce){.sidebar,.nav-item,.sidebar-toggle{transition:none}}
 </style>

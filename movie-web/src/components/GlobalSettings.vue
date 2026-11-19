@@ -58,7 +58,7 @@ async function openCrop(){cropOpen.value=true;cropImage=null;cropZoom.value=3;cr
 function chooseAvatarFile(){sourceNode<HTMLInputElement>('cropFileInput')?.click()}
 function resetCrop(){cropZoom.value=3;cropX=0;cropY=0;drawCrop()}
 function cropParams(){if(!cropImage)return null;const scale=Math.max(40/cropImage.naturalWidth,40/cropImage.naturalHeight)*cropZoom.value;const w=cropImage.naturalWidth*scale,h=cropImage.naturalHeight*scale;cropX=Math.max(-(w-40)/2,Math.min((w-40)/2,cropX));cropY=Math.max(-(h-40)/2,Math.min((h-40)/2,cropY));return {w,h,x:(240-w)/2+cropX,y:(240-h)/2+cropY}}
-function drawCrop(){const canvas=sourceNode<HTMLCanvasElement>('cropCanvas'),ctx=canvas?.getContext('2d');if(!ctx)return;ctx.clearRect(0,0,480,480);ctx.save();ctx.scale(2,2);ctx.fillStyle='#191923';ctx.fillRect(0,0,240,240);const p=cropParams();if(cropImage&&p)ctx.drawImage(cropImage,p.x,p.y,p.w,p.h);ctx.fillStyle='#05050ac4';ctx.fillRect(0,0,240,100);ctx.fillRect(0,100,100,40);ctx.fillRect(140,100,100,40);ctx.fillRect(0,140,240,100);ctx.strokeStyle='#c5b5e8';ctx.lineWidth=1.4;ctx.strokeRect(100.7,100.7,38.6,38.6);ctx.restore();if(cropImage&&p){const out=document.createElement('canvas');out.width=128;out.height=128;out.getContext('2d')?.drawImage(cropImage,(p.x-100)*3.2,(p.y-100)*3.2,p.w*3.2,p.h*3.2);cropPreview.value=out.toDataURL('image/png')}}
+function drawCrop(){const canvas=sourceNode<HTMLCanvasElement>('cropCanvas'),ctx=canvas?.getContext('2d');if(!ctx)return;ctx.clearRect(0,0,480,480);ctx.save();ctx.scale(2,2);ctx.fillStyle='#141519';ctx.fillRect(0,0,240,240);const p=cropParams();if(cropImage&&p)ctx.drawImage(cropImage,p.x,p.y,p.w,p.h);ctx.fillStyle='#05050ac4';ctx.fillRect(0,0,240,100);ctx.fillRect(0,100,100,40);ctx.fillRect(140,100,100,40);ctx.fillRect(0,140,240,100);ctx.strokeStyle='#c8a46a';ctx.lineWidth=1.4;ctx.strokeRect(100.7,100.7,38.6,38.6);ctx.restore();if(cropImage&&p){const out=document.createElement('canvas');out.width=128;out.height=128;out.getContext('2d')?.drawImage(cropImage,(p.x-100)*3.2,(p.y-100)*3.2,p.w*3.2,p.h*3.2);cropPreview.value=out.toDataURL('image/png')}}
 function loadAvatar(e:Event){const file=(e.target as HTMLInputElement).files?.[0];if(!file)return;if(!['image/png','image/jpeg','image/webp'].includes(file.type)||file.size>8*1024*1024){error.value='请选择 8MB 以内的 PNG、JPEG 或 WebP';return}const url=URL.createObjectURL(file),img=new Image();img.onload=()=>{URL.revokeObjectURL(url);if(img.naturalWidth*img.naturalHeight>40000000){error.value='图片尺寸过大';return}cropImage=img;resetCrop()};img.onerror=()=>{URL.revokeObjectURL(url);error.value='图片无法读取'};img.src=url}
 function startCrop(e:PointerEvent){cropDrag={x:e.clientX,y:e.clientY};(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)}
 function moveCrop(e:PointerEvent){if(!cropDrag)return;cropX+=e.clientX-cropDrag.x;cropY+=e.clientY-cropDrag.y;cropDrag={x:e.clientX,y:e.clientY};drawCrop()}
@@ -99,8 +99,8 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 <div class="gs-card"><h2>个人资料入口</h2><p>当前账户来自服务端登录身份；本页不修改认证机制。</p></div>
 </section>
 <section aria-label="全站外观与布局" class="gs-panel" :id="uid('gs-display')" data-source-id="gs-display" v-show="settingsTab==='display'">
-<div class="gs-card"><h2>外观与布局</h2><p>沿用已确认的深色紫黑视觉，阅读与动效偏好同步到两个 AI 窗口。</p>
-<div class="gs-setting-row"><div><h3>站点色彩</h3><p>V12-A / V13 深色紫黑品牌基线。</p></div><span class="gs-pill">保持原配色</span></div>
+<div class="gs-card"><h2>外观与布局</h2><p>沿用全站深炭黑视觉基线，阅读与动效偏好同步到两个 AI 窗口。</p>
+<div class="gs-setting-row"><div><h3>站点色彩</h3><p>深炭黑与暖金点缀的全站统一基线。</p></div><span class="gs-pill">保持原配色</span></div>
 <div class="gs-setting-row"><div><h3>阅读字体</h3><p>影响 AI 消息文字与用户消息的阅读大小。</p></div><select :value="aiWorkspace.large?'large':'normal'" @change="aiWorkspace.large=($event.target as HTMLSelectElement).value==='large'" class="gs-select" :id="uid('gsTextSize')" data-source-id="gsTextSize"><option value="normal">标准</option><option value="large">较大</option></select></div>
 <div class="gs-setting-row"><div><h3>动效偏好</h3><p>降低动画时精灵球与窗口过渡会减少动态效果。</p></div><select :value="aiWorkspace.reduced?'reduce':'normal'" @change="aiWorkspace.reduced=($event.target as HTMLSelectElement).value==='reduce'" class="gs-select" :id="uid('gsMotion')" data-source-id="gsMotion"><option value="normal">标准动画</option><option value="reduce">减少动态效果</option></select></div>
 <div class="gs-setting-row"><div><h3>AI 默认打开方式</h3><p>默认悬浮大窗口；可在设置中改为全屏起始。</p></div><select :value="aiWorkspace.startFull?'fullscreen':'floating'" @change="aiWorkspace.startFull=($event.target as HTMLSelectElement).value==='fullscreen'" class="gs-select" :id="uid('gsStartMode')" data-source-id="gsStartMode"><option value="floating">悬浮窗口（当前默认）</option><option value="fullscreen">全屏工作区</option></select></div>
@@ -136,7 +136,7 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 </section>
 <div aria-label="选择头像显示范围" aria-modal="true" class="crop-overlay" :id="uid('avatarCropOverlay')" data-source-id="avatarCropOverlay" role="dialog" v-if="cropOpen">
 <div class="crop-dialog"><div class="crop-head"><div><h2>调整头像显示范围</h2><p>只有中心 40×40 像素的方框是头像选区。可拖动图片调整构图、缩放图片，框外部分不会被选中；PNG、WebP 透明区域不会填底。</p></div><button @click="cropOpen=false" aria-label="取消裁剪" class="crop-close" :id="uid('cropClose')" data-source-id="cropClose" type="button">×</button></div>
-<div class="crop-content"><div class="crop-work"><div @pointercancel="stopCrop" @pointerdown="startCrop" @pointermove="moveCrop" @pointerup="stopCrop" class="crop-viewport" :id="uid('cropViewport')" data-source-id="cropViewport" style="touch-action:none"><canvas height="480" :id="uid('cropCanvas')" data-source-id="cropCanvas" width="480"></canvas></div><span style="font-size:11px;color:#a29aac">中央 40×40 取景框 · 可拖动底图</span></div><div class="crop-preview-block"><span>实际头像尺寸预览</span><span aria-label="头像预览" class="crop-preview avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="cropPreview" alt="" class="user-avatar-img" :id="uid('cropPreview')" data-source-id="cropPreview" v-if="cropPreview"/></span><strong style="font-size:12px;color:#e3dcf3">40 × 40 px · 与侧栏相同</strong><button @click="resetCrop" class="gs-cta gs-cta-muted" :id="uid('cropReset')" data-source-id="cropReset" type="button">恢复居中</button></div></div>
+<div class="crop-content"><div class="crop-work"><div @pointercancel="stopCrop" @pointerdown="startCrop" @pointermove="moveCrop" @pointerup="stopCrop" class="crop-viewport" :id="uid('cropViewport')" data-source-id="cropViewport" style="touch-action:none"><canvas height="480" :id="uid('cropCanvas')" data-source-id="cropCanvas" width="480"></canvas></div><span style="font-size:11px;color:#a9a294">中央 40×40 取景框 · 可拖动底图</span></div><div class="crop-preview-block"><span>实际头像尺寸预览</span><span aria-label="头像预览" class="crop-preview avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="cropPreview" alt="" class="user-avatar-img" :id="uid('cropPreview')" data-source-id="cropPreview" v-if="cropPreview"/></span><strong style="font-size:12px;color:#f0eadf">40 × 40 px · 与侧栏相同</strong><button @click="resetCrop" class="gs-cta gs-cta-muted" :id="uid('cropReset')" data-source-id="cropReset" type="button">恢复居中</button></div></div>
 <div class="crop-controls"><label :for="uid('cropZoom')">缩放图片</label><input @input="drawCrop" :id="uid('cropZoom')" data-source-id="cropZoom" max="8" min="1" step="0.05" type="range" v-model.number="cropZoom"/></div>
 <div class="crop-actions"><button @click="chooseAvatarFile" class="gs-cta gs-cta-muted" :id="uid('cropChooseFile')" data-source-id="cropChooseFile" type="button">选择本地图片</button><button @click="cropOpen=false" class="gs-cta gs-cta-muted" :id="uid('cropCancel')" data-source-id="cropCancel" type="button">取消</button><button @click="applyAvatar" :disabled="!cropPreview||avatarBusy" class="gs-cta" :id="uid('cropApply')" data-source-id="cropApply" type="button">保存头像</button></div>
 <input @change="loadAvatar" accept="image/png,image/jpeg,image/webp" hidden="" :id="uid('cropFileInput')" data-source-id="cropFileInput" type="file"/>
@@ -146,5 +146,40 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 <style scoped src="../styles/account-settings.css"></style>
 <style scoped src="../styles/assistant-avatar.css"></style>
 <style scoped>
-.account-settings-surface{position:relative;height:100%;min-height:0}.gs-return{text-decoration:none}.display-actions{display:flex;flex-wrap:wrap;gap:8px}.settings-error{color:#ffc2cf;font-size:13px;line-height:1.7}
+.account-settings-surface{position:relative;height:100%;min-height:0}.gs-return{text-decoration:none}.display-actions{display:flex;flex-wrap:wrap;gap:8px}.settings-error{color:#e8a094;font-size:13px;line-height:1.7}
+/* 全站深炭黑 + 暖金点缀统一基线，保留所有设置功能与状态 */
+.global-settings-page{background:#0c0d0f;color:#fff}
+.gs-top{background:#0c0d0f;border-bottom:1px solid rgba(241,236,226,.10)}
+.gs-return{border-color:rgba(241,236,226,.22);color:#fff}
+.gs-return:hover{background:rgba(255,255,255,.07)}
+.gs-brand small{color:#a9a294}
+.gs-tag{color:#a9a294;background:transparent;border-color:rgba(241,236,226,.14)}
+.gs-nav{background:#121317;border-color:rgba(241,236,226,.10)}
+.gs-tab{color:#b7b1a5}
+.gs-tab:hover{background:rgba(255,255,255,.06);color:#fff}
+.gs-tab.active{color:#fff;background:rgba(255,255,255,.08);border-color:rgba(200,164,106,.45)}
+.gs-eyebrow{color:#c8a46a}
+.gs-intro p,.gs-card p,.gs-setting-row p{color:#b7b1a5}
+.gs-card{background:#141519;border-color:rgba(241,236,226,.12);border-radius:14px;box-shadow:none}
+.gs-input,.gs-select{background:#0c0d0f;border-color:rgba(241,236,226,.18);color:#fff;border-radius:10px}
+.gs-input:focus,.gs-select:focus{border-color:#c8a46a;outline:none}
+.gs-cta{background:transparent;border-color:rgba(241,236,226,.26);color:#fff;border-radius:10px}
+.gs-cta:hover{background:rgba(255,255,255,.08)}
+.gs-cta-muted{background:transparent;border-color:rgba(241,236,226,.16);color:#ded8cc}
+.gs-pill{color:#e6dcc6;background:rgba(200,164,106,.08);border-color:rgba(200,164,106,.30)}
+.gs-notice{background:#141519;border-color:rgba(241,236,226,.12);color:#cfc8ba}
+.gs-inline-link{color:#c8a46a}
+.gs-card a{color:#c8a46a;text-underline-offset:3px}
+.gs-setting-row h3{color:#fff}
+.crop-dialog{background:#141519;border-color:rgba(241,236,226,.14);border-radius:16px}
+.crop-head p,.crop-preview-block,.crop-controls label{color:#b7b1a5}
+.crop-viewport{border-color:rgba(241,236,226,.22);box-shadow:none;background:#101115}
+.crop-controls input[type=range]{accent-color:#c8a46a}
+.prototype-ai .settings-api :is(input:not([type=checkbox]),select){background:#0c0d0f;border-color:rgba(241,236,226,.18);color:#fff}
+.prototype-ai .settings-api :is(input:not([type=checkbox]),select):focus{border-color:#c8a46a;outline:none}
+.prototype-ai .settings-api input[type=checkbox]{accent-color:#c8a46a}
+.prototype-ai .settings-api button{background:transparent;border-color:rgba(241,236,226,.26);color:#fff}
+.prototype-ai .settings-api button:hover:not(:disabled){background:#1f2027;border-color:rgba(241,236,226,.38)}
+.prototype-ai .settings-api label,.prototype-ai .settings-api .assistant-note{color:#b7b1a5}
+.prototype-ai :focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
 </style>

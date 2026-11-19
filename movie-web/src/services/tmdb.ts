@@ -2,9 +2,17 @@ export const tmdbErrors:Record<string,string>={TMDB_KEY_REJECTED:'令牌无效�
 export async function tmdbRequest(path:string,method='GET',body?:unknown){
  const headers:Record<string,string>={},controller=new AbortController(),timer=setTimeout(()=>controller.abort(),75000)
  try{
-  if(method!=='GET'){const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin',signal:controller.signal});if(!c.ok)throw new Error('登录已失效，请重新登录。');headers['X-CSRF-Token']=(await c.json()).data.csrf_token;headers['Content-Type']='application/json'}
-  const r=await fetch('/api/v1/tmdb/'+path,{method,headers,credentials:'same-origin',body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal});const b=await r.json()
-  if(!r.ok)throw new Error((tmdbErrors[b.code]||'TMDB 操作未完成，请稍后重试。')+(b.data?.retry_after?' 请等待约 '+b.data.retry_after+' 秒。':''))
+  if(method!=='GET'){
+   const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin',signal:controller.signal})
+   let cb:any=null;try{cb=await c.json()}catch{cb=null}
+   const token=cb?.data?.csrf_token
+   if(!c.ok||(cb?.code!==0&&cb?.code!=='OK')||!token)throw new Error('登录已失效，请重新登录。')
+   headers['X-CSRF-Token']=token;headers['Content-Type']='application/json'
+  }
+  const r=await fetch('/api/v1/tmdb/'+path,{method,headers,credentials:'same-origin',body:body===undefined?undefined:JSON.stringify(body),signal:controller.signal})
+  let b:any=null;try{b=await r.json()}catch{b=null}
+  if(!r.ok)throw new Error((tmdbErrors[b?.code]||'TMDB 操作未完成，请稍后重试。')+(b?.data?.retry_after?' 请等待约 '+b.data.retry_after+' 秒。':''))
+  if(!b||b.code!=='OK')throw new Error(tmdbErrors[b?.code]||'TMDB 响应格式异常，请稍后重试。')
   return b.data
  }catch(e){if((e as Error).name==='AbortError')throw new Error('请求超时，未自动重试；可以重新读取状态，已有缓存保持可用。');throw e}finally{clearTimeout(timer)}
 }
