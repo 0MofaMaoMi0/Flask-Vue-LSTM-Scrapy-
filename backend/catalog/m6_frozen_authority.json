@@ -1,0 +1,12 @@
+{
+  "authority": "M6-D-M6-01-frozen-v1",
+  "files": {
+    "models.py": "79abfdd6be1e495f59ee01e3c6469d80414486aa514f214098a082e6c2fb28b1",
+    "design_expected_columns.json": "7de321a4e65f5154e2f09f74e24fdb4f246a78fdc4b60a6d6415eef78643002e",
+    "drafts/0002_catalog_draft.py": "e1ccb325e27e63ace13ccc2e8d41e0b53d225146755927169aa1b95422c57afa",
+    "local_catalog_store.py": "84ae465edc9c7aa69ea5f966c1f69c110b14227765dd1cb0f2637869b9059b4a",
+    "offline_contract_check.py": "fb06812cbc6d810f3be8a2f6286b0a2afcc37b6f6ba6974e40b170498dbdce6f",
+    "data_pipeline.py": "482036445403be137f661e8d386b62044efe9fca6dd7cc88c36e7a0bf5a2639a",
+    "tmdb_local.py": "f82278e59ed0281bfbac4207f251dcc74a002417c858971c2f108ea2109e7801"
+  }
+}

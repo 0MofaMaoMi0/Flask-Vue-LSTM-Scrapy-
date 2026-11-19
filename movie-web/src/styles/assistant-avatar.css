@@ -1,0 +1,14 @@
+
+.user-avatar-img{display:block;width:100%;height:100%;object-fit:cover}
+.account-avatar.avatar-slot,.profile-avatar-lg.avatar-slot,.gs-avatar-swatch.avatar-slot,.crop-preview.avatar-slot{
+  width:40px!important;height:40px!important;border-radius:11px!important;flex:none!important;
+  position:relative!important;display:grid!important;place-items:center!important;
+  overflow:hidden!important;border:0!important;box-shadow:none!important;
+  background:transparent!important;
+}
+.avatar-slot.is-empty{background:#28272d!important;color:#9c96ae}
+.avatar-slot .avatar-placeholder{width:23px;height:23px;position:relative;z-index:0;display:none}
+.avatar-slot.is-empty .avatar-placeholder{display:block}
+.avatar-slot .user-avatar-img{width:100%!important;height:100%!important;position:absolute;inset:0;display:block;object-fit:contain!important;background:transparent!important;border-radius:inherit!important}
+.avatar-slot img[hidden]{display:none!important}
+.crop-preview.avatar-slot{margin:auto}

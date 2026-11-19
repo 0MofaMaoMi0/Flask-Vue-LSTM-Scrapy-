@@ -1,0 +1,110 @@
+{
+  "schema_version": "m10-eval-v1",
+  "state_as_of": "REPLACE_WITH_AWARE_ISO_TIME",
+  "template": true,
+  "note": "这是结构模板，不含真实标签。把所有 relevant_movie_ids 的 [] 替换为冻结快照中真实存在、且由人工或历史留出确认的 ID；不得填不存在的 ID。",
+  "scenarios": [
+    {
+      "scenario_id": "T01-cold-start",
+      "category": "cold_start",
+      "split": "train",
+      "query": "冷启动示例",
+      "state": {},
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T02-genre",
+      "category": "genre",
+      "split": "train",
+      "query": "单类型示例",
+      "hard_conditions": {"genres_any": ["REPLACE_GENRE"]},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T03-multi-genre",
+      "category": "multi_genre",
+      "split": "dev",
+      "query": "多类型示例",
+      "hard_conditions": {"genres_any": ["REPLACE_GENRE_A", "REPLACE_GENRE_B"]},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T04-watched",
+      "category": "watched",
+      "split": "dev",
+      "query": "已看排除示例",
+      "state": {"REPLACE_MOVIE_ID": {"watched": true}},
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T05-not-interested",
+      "category": "not_interested",
+      "split": "test",
+      "query": "不感兴趣排除示例",
+      "state": {"REPLACE_MOVIE_ID": {"not_interested": true}},
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T06-multi-hard",
+      "category": "multi_hard_conditions",
+      "split": "test",
+      "query": "多硬条件示例",
+      "hard_conditions": {
+        "year_from": 2000,
+        "year_to": 2025,
+        "runtime_max": 150,
+        "language": "zh",
+        "excluded_genres": ["REPLACE_GENRE"]
+      },
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T07-soft-preference",
+      "category": "soft_preference",
+      "split": "test",
+      "query": "软偏好示例",
+      "hard_conditions": {},
+      "soft_preferences": {"preferred_genres": ["REPLACE_GENRE"]},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T08-niche",
+      "category": "niche",
+      "split": "test",
+      "query": "小众类型示例",
+      "hard_conditions": {"genres_any": ["REPLACE_NICHE_GENRE"]},
+      "soft_preferences": {},
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T09-no-results",
+      "category": "no_results",
+      "split": "test",
+      "query": "无结果示例",
+      "hard_conditions": {"genres_any": ["REPLACE_ABSENT_GENRE"]},
+      "soft_preferences": {},
+      "expectation": "NO_RESULTS",
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    },
+    {
+      "scenario_id": "T10-out-of-catalog",
+      "category": "out_of_catalog",
+      "split": "test",
+      "query": "库外发现示例",
+      "hard_conditions": {"genres_any": ["REPLACE_ABSENT_GENRE"]},
+      "soft_preferences": {},
+      "allow_external": true,
+      "expectation": "EXTERNAL_DISCOVERY",
+      "labels": {"relevant_movie_ids": [], "label_source": "NONE", "reliable": false}
+    }
+  ]
+}

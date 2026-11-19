@@ -1,0 +1,32 @@
+<script setup lang="ts">
+import {ref,onMounted,onBeforeUnmount,computed} from 'vue'
+import AssistantChat from './AssistantChat.vue'
+import {aiWorkspace} from '../services/aiWorkspace'
+import {useAuthStore} from '../stores/auth'
+const chat=ref<InstanceType<typeof AssistantChat>>(),full=ref(false)
+function toggle(){if(open.value){close();return}full.value=aiWorkspace.startFull;open.value=true}
+function close(){open.value=false;chat.value?.clearSensitive()}
+function defaultRect(){const w=Math.min(1120,innerWidth-64),h=Math.min(780,innerHeight-72);return {x:Math.round((innerWidth-w)/2),y:Math.round((innerHeight-h)/2),w,h}}
+const auth=useAuthStore(),open=ref(false),rect=ref(defaultRect())
+const storageKey='mi2_float_geometry_source_v2_'+auth.user?.id
+const style=computed(()=>full.value?{left:'0px',top:'0px',width:'100vw',height:'100dvh'}:({left:rect.value.x+'px',top:rect.value.y+'px',width:rect.value.w+'px',height:rect.value.h+'px'}))
+function clamp(){const r=rect.value;r.w=Math.max(Math.min(680,innerWidth-24),Math.min(r.w,innerWidth-16));r.h=Math.max(Math.min(360,innerHeight-16),Math.min(r.h,innerHeight-16));r.x=Math.max(8,Math.min(r.x,innerWidth-r.w-8));r.y=Math.max(8,Math.min(r.y,innerHeight-r.h-8))}
+function save(){clamp();localStorage.setItem(storageKey,JSON.stringify(rect.value))}
+let action:{x:number,y:number,rect:typeof rect.value,resize:string}|null=null
+function start(e:PointerEvent,resize=''){if(e.button!==0||full.value)return;action={x:e.clientX,y:e.clientY,rect:{...rect.value},resize};(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);e.preventDefault()}
+function move(e:PointerEvent){if(!action)return;const dx=e.clientX-action.x,dy=e.clientY-action.y,r=action.rect,edge=action.resize;rect.value={...r};if(!edge){rect.value.x=r.x+dx;rect.value.y=r.y+dy}else{if(edge.includes('e'))rect.value.w=r.w+dx;if(edge.includes('s'))rect.value.h=r.h+dy;if(edge.includes('w')){rect.value.w=r.w-dx;rect.value.x=r.x+dx}if(edge.includes('n')){rect.value.h=r.h-dy;rect.value.y=r.y+dy}}clamp()}
+function end(){if(action){action=null;save()}}
+function keyMove(e:KeyboardEvent,resize=false){const d:Record<string,[number,number]>={ArrowLeft:[-16,0],ArrowRight:[16,0],ArrowUp:[0,-16],ArrowDown:[0,16]};if(!d[e.key])return;e.preventDefault();const [x,y]=d[e.key]!;if(resize){rect.value.w+=x;rect.value.h+=y}else{rect.value.x+=x;rect.value.y+=y}save()}
+function reset(){rect.value=defaultRect();save()}
+function openAssistant(){open.value=true;full.value=aiWorkspace.startFull}
+onMounted(()=>{try{const r=JSON.parse(localStorage.getItem(storageKey)||'null');if(r&&['x','y','w','h'].every(k=>Number.isFinite(r[k])))rect.value=r}catch{}clamp();window.addEventListener('resize',save);window.addEventListener('mi2-open-assistant',openAssistant)})
+onBeforeUnmount(()=>{window.removeEventListener('resize',save);window.removeEventListener('mi2-open-assistant',openAssistant)})
+</script>
+<template><button class="assistant-orb" :aria-expanded="open" aria-controls="floating-assistant-window" aria-label="打开悬浮 AI 助手" @click="toggle"><img src="/m9/assistant-orb.png" alt=""/><span class="eye left"></span><span class="eye right"></span></button><section v-show="open" id="floating-assistant-window" class="floating-window" :class="{'is-full':full}" :style="style" role="dialog" aria-label="悬浮 AI 助手"><button v-if="!full" class="prototype-drag" aria-label="移动助手窗口（方向键）" @pointerdown="start($event)" @pointermove="move" @pointerup="end" @pointercancel="end" @keydown="keyMove($event)"><span></span></button><div class="floating-chat"><AssistantChat ref="chat" surface="floating" @close="close" @toggle-full="full=!full"/></div><button v-for="edge in full?[]:['n','s','w','e','nw','ne','sw','se']" :key="edge" class="resize-handle" :class="'edge-'+edge" :aria-label="'调整窗口 '+edge+' 边缘（方向键）'" @pointerdown="start($event,edge)" @pointermove="move" @pointerup="end" @pointercancel="end" @keydown="keyMove($event,true)"></button></section></template>
+<style scoped>
+.assistant-orb{position:fixed;z-index:110;bottom:24px;right:26px;width:69px;height:69px;background:transparent;border:0;border-radius:50%;cursor:pointer;padding:0}.assistant-orb img{width:100%;height:100%;object-fit:contain}.eye{position:absolute;top:43.2%;width:7.6%;height:22%;background:white;border-radius:9px;pointer-events:none}.eye.left{left:32.2%}.eye.right{left:60.8%}.floating-window{position:fixed;z-index:120;display:flex;flex-direction:column;border-radius:18px;background:#0c0d0f;box-shadow:0 26px 75px rgba(0,0,0,.45),0 4px 18px rgba(0,0,0,.32);color:#fff;overflow:hidden;border:1px solid #ffffff1a}.floating-bar{display:flex;align-items:center;gap:8px;padding:9px 14px;border-bottom:1px solid #ffffff12;flex:none}.floating-bar button{border:0;background:transparent;color:#c9bfd9;padding:8px;cursor:pointer;font:inherit;font-size:12px}.floating-bar .drag-handle{flex:1;text-align:left;cursor:move;touch-action:none}.floating-chat{flex:1;min-height:0;overflow:hidden}.resize-handle{position:absolute;right:0;bottom:0;width:24px;height:24px;cursor:nwse-resize;background:transparent;border:0;touch-action:none}.resize-handle:after{content:'';position:absolute;right:6px;bottom:6px;width:9px;height:9px;border-right:2px solid #c4acec80;border-bottom:2px solid #c4acec80}.floating-window :focus-visible,.assistant-orb:focus-visible{outline:2px solid #c2a6f4;outline-offset:-3px}
+
+.prototype-drag{position:absolute;z-index:50;top:0;left:30%;width:40%;height:12px;background:transparent;border:0;cursor:move;touch-action:none}.prototype-drag span{display:block;margin:2px auto;width:36px;height:3px;border-radius:4px;background:#b69ac440}.floating-window.is-full{border-radius:0;border:0}.floating-chat{height:100%}.resize-handle:after{display:none}.edge-n,.edge-s{left:12px;right:12px;width:auto;height:6px;cursor:ns-resize}.edge-n{top:0;bottom:auto}.edge-s{bottom:0}.edge-w,.edge-e{top:12px;bottom:12px;width:6px;height:auto;cursor:ew-resize}.edge-w{left:0;right:auto}.edge-e{right:0}.edge-nw,.edge-ne,.edge-sw,.edge-se{width:14px;height:14px}.edge-nw{top:0;left:0;right:auto;bottom:auto}.edge-ne{top:0;right:0;bottom:auto;cursor:nesw-resize}.edge-sw{bottom:0;left:0;right:auto;cursor:nesw-resize}.edge-se{bottom:0;right:0}
+/* 悬浮助手：文字统一为白色 */
+:deep(.thread),:deep(.chat-main),:deep(.reply-body),:deep(.bubble),:deep(.assistant-name),:deep(.movie-title),:deep(.movie-meta),:deep(.why),:deep(.date-line),:deep(.trust-note),:deep(.cards-head){color:#fff!important}
+:deep(.reply-body strong),:deep(.reply-body b){color:#fff!important}</style>

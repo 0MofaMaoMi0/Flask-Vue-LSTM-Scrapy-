@@ -1,0 +1,14 @@
+{
+  "schema_version": "m10-eval-v1",
+  "state_as_of": "2026-11-15T00:00:00+08:00",
+  "note": "合成用户状态；已看不等于喜欢，仅用于负反馈/画像演示。",
+  "states": {
+    "900001": {"favorite": true, "rating": 4.5},
+    "900002": {"want": true},
+    "900004": {"rating": 2.0},
+    "900005": {"watched": true},
+    "900009": {"not_interested": true},
+    "900011": {"watched": true},
+    "900013": {"want": true}
+  }
+}

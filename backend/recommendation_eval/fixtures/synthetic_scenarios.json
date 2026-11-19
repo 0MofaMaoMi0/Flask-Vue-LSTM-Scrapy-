@@ -1,0 +1,186 @@
+{
+  "schema_version": "m10-eval-v1",
+  "state_as_of": "2026-11-15T00:00:00+08:00",
+  "note": "SYNTHETIC 场景模板：覆盖冷启动、类型、多类型、已看、不感兴趣、多硬条件、软偏好、小众、无结果、库外发现。标签仅为计算器校验，不代表真实用户效果。",
+  "scenarios": [
+    {
+      "scenario_id": "S01-cold-start",
+      "category": "cold_start",
+      "split": "train",
+      "query": "我不知道看什么，给我一些热门电影",
+      "state": {},
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900006, 900007],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 冷启动计算器标签，不是人工判断"
+      },
+      "notes": "空状态，验证无画像时的热度/多样性冷启动"
+    },
+    {
+      "scenario_id": "S02-genre",
+      "category": "genre",
+      "split": "train",
+      "query": "想看剧情片",
+      "state": {"900001": {"favorite": true, "rating": 4.5}},
+      "hard_conditions": {"genres_any": ["剧情"]},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900002, 900003],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 单类型标签"
+      },
+      "notes": "单类型硬条件"
+    },
+    {
+      "scenario_id": "S03-multi-genre",
+      "category": "multi_genre",
+      "split": "dev",
+      "query": "科幻或者悬疑都可以",
+      "hard_conditions": {"genres_any": ["科幻", "悬疑"]},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900006, 900008, 900010],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 多类型标签"
+      },
+      "notes": "多类型 any 条件"
+    },
+    {
+      "scenario_id": "S04-watched",
+      "category": "watched",
+      "split": "dev",
+      "query": "推荐没看过的电影",
+      "state": {
+        "900005": {"watched": true},
+        "900011": {"watched": true},
+        "900001": {"favorite": true, "rating": 4.5}
+      },
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900006, 900007],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 已看过滤标签；已看不等于喜欢"
+      },
+      "notes": "验证已看电影不进入推荐"
+    },
+    {
+      "scenario_id": "S05-not-interested",
+      "category": "not_interested",
+      "split": "test",
+      "query": "别再推荐悬疑片",
+      "state": {
+        "900009": {"not_interested": true},
+        "900001": {"favorite": true, "rating": 4.5},
+        "900002": {"want": true}
+      },
+      "hard_conditions": {},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900006, 900007],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 负反馈标签"
+      },
+      "notes": "验证不感兴趣电影不进入推荐"
+    },
+    {
+      "scenario_id": "S06-multi-hard",
+      "category": "multi_hard_conditions",
+      "split": "test",
+      "query": "2020 到 2022 年、两小时左右、中文、不要恐怖片",
+      "state": {},
+      "hard_conditions": {
+        "year_from": 2020,
+        "year_to": 2022,
+        "runtime_max": 130,
+        "language": "zh",
+        "excluded_genres": ["恐怖"]
+      },
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900008, 900023, 900024],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 多硬条件标签"
+      },
+      "notes": "年份/时长/语言/排除类型同时生效"
+    },
+    {
+      "scenario_id": "S07-soft-preference",
+      "category": "soft_preference",
+      "split": "test",
+      "query": "我喜欢科幻，最好英语，但不强制",
+      "state": {
+        "900006": {"favorite": true, "rating": 5.0},
+        "900007": {"want": true}
+      },
+      "hard_conditions": {},
+      "soft_preferences": {"preferred_genres": ["科幻"], "preferred_language": "en"},
+      "labels": {
+        "relevant_movie_ids": [900007, 900008, 900010],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 软偏好标签"
+      },
+      "notes": "软偏好只作上下文；Baseline V1 本身不读取 soft_preferences"
+    },
+    {
+      "scenario_id": "S08-niche",
+      "category": "niche",
+      "split": "test",
+      "query": "有没有小众纪录片",
+      "state": {},
+      "hard_conditions": {"genres_any": ["纪录片"]},
+      "soft_preferences": {},
+      "labels": {
+        "relevant_movie_ids": [900013, 900014],
+        "label_source": "SYNTHETIC",
+        "reliable": false,
+        "note": "SYNTHETIC 小众池标签"
+      },
+      "notes": "候选池极小的类型"
+    },
+    {
+      "scenario_id": "S09-no-results",
+      "category": "no_results",
+      "split": "test",
+      "query": "来一部歌舞片",
+      "state": {},
+      "hard_conditions": {"genres_any": ["歌舞"]},
+      "soft_preferences": {},
+      "expectation": "NO_RESULTS",
+      "labels": {
+        "relevant_movie_ids": [],
+        "label_source": "NONE",
+        "reliable": false,
+        "note": "无标签；无结果不应伪造指标"
+      },
+      "notes": "快照中没有歌舞片，验证空结果语义"
+    },
+    {
+      "scenario_id": "S10-out-of-catalog",
+      "category": "out_of_catalog",
+      "split": "test",
+      "query": "找一部武侠片，库外也可以",
+      "state": {},
+      "hard_conditions": {"genres_any": ["武侠"]},
+      "soft_preferences": {},
+      "allow_external": true,
+      "expectation": "EXTERNAL_DISCOVERY",
+      "labels": {
+        "relevant_movie_ids": [],
+        "label_source": "NONE",
+        "reliable": false,
+        "note": "库外占位不是内部 movie_id"
+      },
+      "notes": "验证库外结果不得伪装成本地电影 ID"
+    }
+  ]
+}

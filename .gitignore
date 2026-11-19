@@ -11,6 +11,9 @@ downloads/
 eggs/
 .eggs/
 lib/
+# Frontend application sources must remain tracked; lib/ above is for Python.
+!movie-web/src/lib/
+!movie-web/src/lib/**
 lib64/
 parts/
 sdist/
@@ -79,3 +82,14 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Login integration local caches
+.local-cache/
+
+# Local protected legacy assets; tracked historical blobs remain versioned.
+/legacy/*
+!/legacy/README.md
+
+# Local build/preview dists and runtime catalog snapshots
+movie-web/*-dist/
+backend/catalog/data/public-catalog-*.json.gz
