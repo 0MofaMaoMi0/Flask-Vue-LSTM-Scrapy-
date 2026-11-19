@@ -216,7 +216,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     result['ranked_window_count']=len(ranked)
     for index,m in enumerate(ranked[:limit],1):
         local=m.get('movie_id') is not None;key=str(m['movie_id']) if local and channel not in PUBLIC else str(m.get('tmdb_id'))
-        item={k:m.get(k) for k in ('movie_id','tmdb_id','title','original_title','release_year','runtime_minutes','original_language','genres','poster','tmdb_rating','vote_count','revenue','revenue_as_of','revenue_source','tmdb_popularity','feature_source','feature_as_of','popularity_observed_at')}
+        item={k:m.get(k) for k in ('movie_id','tmdb_id','title','original_title','release_year','runtime_minutes','original_language','genres','poster','poster_fallback','tmdb_rating','vote_count','revenue','revenue_as_of','revenue_source','tmdb_popularity','feature_source','feature_as_of','popularity_observed_at')}
         item.update(key=('local:'+str(m['movie_id'])) if local else 'tmdb:'+str(m['tmdb_id']),in_catalog=local,rank=index,source_rank=source_ranks.get(str(m.get('tmdb_id'))),reasons=reasons.get(key,[]),score=scores.get(str(m.get('movie_id'))),tmdb_url='https://www.themoviedb.org/movie/'+str(m['tmdb_id']) if m.get('tmdb_id') else None,verification='LOCAL_DATABASE' if local else 'TMDB_OFFICIAL_LIST')
         evidence=ranking_evidence.get(m.get('movie_id'))
         if evidence:

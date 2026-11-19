@@ -1,9 +1,11 @@
 """Shared full-catalog, read-only ranking inputs. Missing source facts stay missing.
 
-Deployment increment over the online baseline: current per-topic TMDB facts,
-bounded historical fallback and the shared public cache.  It intentionally keeps
-the online poster behaviour (single primary poster) so the owner's uncommitted
-M10 ``poster_fallback`` change is not published by this task.
+The loader reads the *currently attributed* source record per movie from
+``tmdb_movie_metadata`` instead of every historical payload, and wraps the
+result in the shared public-catalog cache (cross-process fingerprint + atomic
+snapshot).  Historical records are still consulted, but only for a bounded
+fallback: movies without a current supplement capture (e.g. the 114 unmapped
+titles) and cumulative revenue that a newer heat-only capture dropped.
 """
 import math,json
 from datetime import datetime
@@ -147,7 +149,7 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
         movies=[dict(row) for row in c.execute(statement.order_by(m.c.movie_id)).mappings()]
         byid={row['movie_id']:row for row in movies}
         stats['movies']=len(movies)
-        for row in movies:row.update(genres=[],tmdb_popularity=None,popularity_observed_at=None,poster=None,tmdb_id=None,tmdb_rating=None,vote_count=None,revenue=None,feature_source=None,feature_as_of=None,actor_ids=[],director_ids=[])
+        for row in movies:row.update(genres=[],tmdb_popularity=None,popularity_observed_at=None,poster=None,poster_fallback=None,tmdb_id=None,tmdb_rating=None,vote_count=None,revenue=None,feature_source=None,feature_as_of=None,actor_ids=[],director_ids=[])
         genre_query=select(links.c.movie_id,g.c.name_zh).join(g,g.c.genre_id==links.c.genre_id).join(m,m.c.movie_id==links.c.movie_id).where(m.c.catalog_status=='active')
         if subset is not None:genre_query=genre_query.where(m.c.movie_id.in_(subset))
         for mid,name in c.execute(genre_query):
@@ -187,11 +189,15 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
             if subset is not None:credit_query=credit_query.where(credits.c.movie_id.in_(subset))
             for mid,pid,role,job in c.execute(credit_query):
                 byid[mid]['director_ids' if role=='crew' else 'actor_ids'].append(int(pid))
+        # Keep a second candidate: a stale primary poster must not blank the card
+        # when another stored poster for the same movie still resolves.
         asset_query=select(assets).join(m,m.c.movie_id==assets.c.movie_id).where(m.c.catalog_status=='active',assets.c.asset_type=='poster')
         if subset is not None:asset_query=asset_query.where(assets.c.movie_id.in_(subset))
         for row in c.execute(asset_query.order_by(assets.c.is_primary.desc(),assets.c.asset_id)).mappings():
-            if byid[row['movie_id']]['poster']:continue
-            byid[row['movie_id']]['poster']=asset_url(row)
+            movie=byid[row['movie_id']];url=asset_url(row)
+            if not url:continue
+            if movie['poster'] is None:movie['poster']=url
+            elif url!=movie['poster'] and movie['poster_fallback'] is None:movie['poster_fallback']=url
     for row in movies:row.update(row.pop('_retained_current_fields',{}))
     if subset is None:finalize(movies)
     return movies
