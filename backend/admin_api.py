@@ -3,7 +3,7 @@
 Access is limited to usernames in MI2_ADMIN_USERS (default: zhang).
 No raw event payloads, prompts, keys, or request bodies are returned.
 """
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from flask import Blueprint, g, jsonify, request
 from sqlalchemy import select, func, distinct
 from sqlalchemy.exc import SQLAlchemyError
@@ -31,6 +31,10 @@ def install(app):
 
     def reply(data):
         return jsonify(code='OK', data=data)
+
+    def window_payload(days, start, end):
+        return {'days': days, 'from': start.isoformat() + 'Z',
+                'to': end.isoformat() + 'Z', 'timezone': 'UTC'}
 
     @bp.get('/dashboard')
     def dashboard():
@@ -141,30 +145,117 @@ def install(app):
                   'last_event': last[uid].isoformat() if last.get(uid) else None} for uid, name, status, created in rows]
         return reply({'items': items})
 
+    @bp.get('/users/analytics')
+    def users_analytics_report():
+        from admin_dashboard import (parse_kind_days, record_generation, users_analytics,
+                                     window_for)
+        try:
+            days, kind = parse_kind_days(request.args)
+            start, end = window_for(days)
+            with engine.connect() as connection:
+                data = users_analytics(connection, repo, start, end, kind)
+            record_generation('users_analytics')
+            return reply(dict(data, window=window_payload(days, start, end)))
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
+
+    @bp.get('/interest-match')
+    def interest_match_report():
+        from admin_dashboard import (feedback_tables, interest_match, parse_dimension_days,
+                                     record_generation, window_for)
+        try:
+            days, dimension = parse_dimension_days(request.args, ('genre', 'decade', 'country'))
+            start, end = window_for(days)
+            try:
+                feedback = feedback_tables(app)
+            except ValueError:
+                feedback = None
+            with engine.connect() as connection:
+                data = interest_match(connection, repo, feedback, start, end, dimension)
+            record_generation('interest_match')
+            return reply(dict(data, window=window_payload(days, start, end)))
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
+
+    @bp.get('/recommendation/analytics')
+    def recommendation_analytics_report():
+        from admin_dashboard import (feedback_tables, parse_days, recommendation_analytics,
+                                     record_generation, window_for)
+        try:
+            days = parse_days(request.args)
+            start, end = window_for(days)
+            try:
+                feedback = feedback_tables(app)
+            except ValueError:
+                feedback = None
+            with engine.connect() as connection:
+                data = recommendation_analytics(connection, feedback, start, end)
+            record_generation('recommendation_analytics')
+            return reply(dict(data, window=window_payload(days, start, end)))
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
+
+    @bp.get('/ai/analytics')
+    def ai_analytics_report():
+        from admin_dashboard import ai_analytics, parse_days, record_generation, window_for
+        try:
+            days = parse_days(request.args)
+            start, end = window_for(days)
+            data = ai_analytics(app, start, end)
+            record_generation('ai_analytics')
+            return reply(dict(data, window=window_payload(days, start, end)))
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
+
+    @bp.get('/metrics/definitions')
+    def metrics_definitions_report():
+        from admin_dashboard import metrics_definitions
+        return reply(metrics_definitions())
+
     @bp.get('/events')
     def events_feed():
-        events = repo.tables['events']
-        m = CatalogBase.metadata.tables['movies']
-        with engine.connect() as c:
-            rows = c.execute(select(events.c.created_at, User.username, m.c.title, events.c.payload)
-                             .join(User, User.id == events.c.user_id)
-                             .join(m, m.c.movie_id == events.c.movie_id)
-                             .order_by(events.c.seq.desc()).limit(60)).all()
-        items = []
-        for created, username, title, payload in rows:
-            payload = payload if isinstance(payload, dict) else {}
-            items.append({'at': created.isoformat() if created else None, 'user': username, 'title': title,
-                          'kind': payload.get('kind'), 'action': payload.get('action')})
-        return reply({'items': items})
+        from admin_dashboard import events_page, parse_events_args
+        try:
+            spec = parse_events_args(request.args)
+            with engine.connect() as connection:
+                data = events_page(connection, repo, spec)
+            return reply(data)
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
 
     @bp.get('/health')
     def health():
-        with engine.connect() as c:
-            now = c.scalar(select(func.now()))
-            movies = c.scalar(select(func.count()).select_from(CatalogBase.metadata.tables['movies']))
-        m7 = 'm7_engine' in app.extensions
-        return reply({'db_time': now.isoformat() if now else None, 'movies': int(movies or 0),
-                      'm7_configured': m7, 'admin': g.admin_user.username,
-                      'config': {'schema': app.config.get('M6_SCHEMA'), 'activity_schema': app.config.get('M6_ACTIVITY_SCHEMA')}})
+        from admin_dashboard import record_generation, health_report
+        try:
+            with engine.connect() as c:
+                now = c.scalar(select(func.now()))
+                movies = c.scalar(select(func.count()).select_from(CatalogBase.metadata.tables['movies']))
+            record_generation('health')
+            extras = health_report(app)
+            if now is not None and hasattr(now, 'isoformat'):
+                db_time = now.isoformat()
+            else:
+                db_time = str(now) if now is not None else None
+            # db_time keeps its legacy shape; the UTC companion is always 'Z'-suffixed.
+            db_time_utc = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+            return reply({'db_time': db_time, 'db_time_utc': db_time_utc,
+                          'movies': int(movies or 0),
+                          'm7_configured': 'm7_engine' in app.extensions,
+                          'admin': g.admin_user.username,
+                          'config': {'schema': app.config.get('M6_SCHEMA'),
+                                     'activity_schema': app.config.get('M6_ACTIVITY_SCHEMA')},
+                          **extras})
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
 
     app.register_blueprint(bp)

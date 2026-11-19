@@ -21,8 +21,33 @@ def parse_window(args):
     window={'from':start.isoformat().replace('+00:00','Z'),'to':end.isoformat().replace('+00:00','Z')}
     return start.replace(tzinfo=None),end.replace(tzinfo=None),window
 
+
+class RateLimiter:
+    """Fixed-window per-user limit with a bounded key table.
+
+    Expired keys are pruned first; at capacity the oldest live key is evicted
+    instead of rejecting a first-time caller, so memory stays bounded without
+    turning away new users during a burst.
+    """
+    def __init__(self, *, limit=60, window=60.0, capacity=10000, clock=time.monotonic):
+        self.limit=limit;self.window=window;self.capacity=capacity;self._clock=clock
+        self._rates={};self._lock=threading.Lock()
+
+    def allow(self,key):
+        now=self._clock()
+        with self._lock:
+            for stale in [k for k,v in self._rates.items() if now-v[0]>=self.window]:
+                self._rates.pop(stale,None)
+            stamp,count=self._rates.get(key,(now,0))
+            if count>=self.limit:return False
+            if key not in self._rates and len(self._rates)>=self.capacity:
+                oldest=min(self._rates,key=lambda k:(self._rates[k][0],str(k)))
+                self._rates.pop(oldest,None)
+            self._rates[key]=(stamp,count+1)
+            return True
+
 def install(app):
-    bp=Blueprint('analytics',__name__,url_prefix='/api/v1/insights');rates={};lock=threading.Lock()
+    bp=Blueprint('analytics',__name__,url_prefix='/api/v1/insights');limiter=RateLimiter()
     @bp.before_request
     def guard():
         try:
@@ -35,12 +60,7 @@ def install(app):
         if set(request.args)-allowed or any(len(request.args.getlist(k))!=1 for k in request.args):return jsonify(code='INVALID_INPUT',data=None),400
         try:g.insight_window=parse_window(request.args)
         except (ValueError,TypeError,OverflowError):return jsonify(code='INVALID_TIME_WINDOW',data=None),400
-        now=time.monotonic()
-        with lock:
-            expired=[k for k,v in rates.items() if now-v[0]>=60]
-            for k in expired:rates.pop(k,None)
-            stamp,count=rates.get(g.insight_user,(now,0));rates[g.insight_user]=(stamp,count+1)
-            if count>=60 or len(rates)>10000:return jsonify(code='RATE_LIMITED',data=None),429
+        if not limiter.allow(g.insight_user):return jsonify(code='RATE_LIMITED',data=None),429
     def respond(fn):
         try:metrics=fn();return jsonify(code='OK',data={'metrics':metrics,'as_of':metrics[0]['as_of'] if metrics else None,'time_semantics':'UTC; [from,to); snapshot metrics ignore event windows'})
         except OverflowError:return jsonify(code='QUERY_LIMIT_EXCEEDED',data=None),422

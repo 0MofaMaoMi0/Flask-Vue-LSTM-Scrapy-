@@ -192,9 +192,6 @@ def install_m6_business(app):
         except PermissionError:return response(status=403,code='REQUEST_VERIFICATION_FAILED')
         except Conflict:return response(status=409,code='STATE_CONFLICT')
         except ValueError:return response(status=400,code='INVALID_INPUT')
-    def movies_for_recommendation():
-        from .recommendation_data import load_candidates
-        return load_candidates(engine)
     @bp.get('/api/catalog/recommendation-channels')
     def recommendation_channels():
         if identity() is None:return response(status=401,code='AUTHENTICATION_REQUIRED')

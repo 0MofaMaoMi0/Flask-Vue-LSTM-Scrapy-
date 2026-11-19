@@ -9,7 +9,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 from flask import Blueprint, current_app, request, jsonify, g
-from sqlalchemy import (MetaData, Table, Column, BigInteger, Integer, String, DateTime, select, insert, func, delete)
+from sqlalchemy import (MetaData, Table, Column, BigInteger, Integer, String, DateTime,
+                        and_, distinct, select, insert, func, delete)
 from sqlalchemy.exc import IntegrityError
 from app.auth import session_row, csrf_ok
 from app.models import User
@@ -232,3 +233,120 @@ def evaluate(impressions, clicks, states, k):
         ctr=round(len(clicked) / len(cohort), 6) if cohort else None,
         channels=[dict(channel=ch, impressions=n, clicks=c, ctr=round(c/n, 6))
                   for ch, (n, c) in sorted(counts.items())], ranking=ranking)
+
+
+# --- Read-only administrator aggregates (WP-B V2 ops) -----------------------
+#
+# The write path, cohort definition and 180-day retention above are untouched.
+# Everything below only SELECTs and is shared by /api/admin/* read models.
+
+VISIBLE_BOARD_VERSION = 'visible-v2'
+EXPOSURE_RETENTION_DAYS = 180
+EFFECTIVE_EXPOSURE_DEFINITION = (
+    "有效曝光=board_version='visible-v2'（电影卡片至少 50% 进入视口持续 1 秒，或用户主动点击）；"
+    "有效点击=与同一 (request_id, position, user_id) 有效曝光关联且 clicked_at>=shown_at 的去重点击；"
+    "CTR=有效点击/有效曝光；曝光与点击记录默认保留 180 天")
+
+
+def _window(column, start, end):
+    return and_(column >= start, column < end)
+
+
+def _impression_window(imp, start, end):
+    return and_(_window(imp.c.shown_at, start, end), imp.c.board_version == VISIBLE_BOARD_VERSION)
+
+
+def _attributable_clicks(clicks, imp):
+    """Click must belong to an effective impression of the same user and come after it."""
+    return clicks.join(imp, and_(imp.c.request_id == clicks.c.request_id,
+                                 imp.c.position == clicks.c.position,
+                                 imp.c.user_id == clicks.c.user_id,
+                                 clicks.c.clicked_at >= imp.c.shown_at))
+
+
+def _ratio(part, whole):
+    return round(part / whole, 6) if whole else None
+
+
+def _calendar_days(start, end):
+    return [(start + timedelta(days=i)).date().isoformat()
+            for i in range((end.date() - start.date()).days + 1)]
+
+
+def summarize(connection, imp, clicks, start, end):
+    """One windowed read model: totals, channel ranking and daily series."""
+    impressions_where = _impression_window(imp, start, end)
+    clicks_where = _window(clicks.c.clicked_at, start, end)
+    impressions = int(connection.scalar(
+        select(func.count()).select_from(imp).where(impressions_where)) or 0)
+    clicks_total = int(connection.scalar(
+        select(func.count()).select_from(clicks).where(clicks_where)) or 0)
+    attributed = int(connection.scalar(
+        select(func.count(distinct(imp.c.impression_id)))
+        .select_from(_attributable_clicks(clicks, imp))
+        .where(impressions_where, clicks_where)) or 0)
+    # Unattributed clicks are raw click rows that match no effective exposure.
+    # Count click rows (not impressions) so one click matching two impressions is
+    # still only subtracted once from clicks_total.
+    attributable_clicks = int(connection.scalar(
+        select(func.count(distinct(clicks.c.click_id)))
+        .select_from(_attributable_clicks(clicks, imp))
+        .where(impressions_where, clicks_where, imp.c.impression_id.is_not(None))) or 0)
+    accounts = int(connection.scalar(
+        select(func.count(distinct(imp.c.user_id))).where(impressions_where)) or 0)
+    per_channel = {channel: int(count) for channel, count in connection.execute(
+        select(imp.c.channel, func.count()).where(impressions_where)
+        .group_by(imp.c.channel)).all()}
+    clicks_channel = {channel: int(count) for channel, count in connection.execute(
+        select(imp.c.channel, func.count(distinct(imp.c.impression_id)))
+        .select_from(_attributable_clicks(clicks, imp))
+        .where(impressions_where, clicks_where).group_by(imp.c.channel)).all()}
+    daily_impressions = {str(day)[:10]: int(count) for day, count in connection.execute(
+        select(func.date(imp.c.shown_at), func.count()).where(impressions_where)
+        .group_by(func.date(imp.c.shown_at))).all()}
+    daily_clicks = {str(day)[:10]: int(count) for day, count in connection.execute(
+        select(func.date(imp.c.shown_at), func.count(distinct(imp.c.impression_id)))
+        .select_from(_attributable_clicks(clicks, imp))
+        .where(impressions_where, clicks_where)
+        .group_by(func.date(imp.c.shown_at))).all()}
+    channels = [{'channel': channel, 'impressions': n,
+                 'clicks': clicks_channel.get(channel, 0),
+                 'ctr': _ratio(clicks_channel.get(channel, 0), n)}
+                for channel, n in sorted(per_channel.items(), key=lambda kv: (-kv[1], kv[0]))]
+    daily = [{'date': day, 'impressions': daily_impressions.get(day, 0),
+              'clicks': daily_clicks.get(day, 0),
+              'ctr': _ratio(daily_clicks.get(day, 0), daily_impressions.get(day, 0))}
+             for day in _calendar_days(start, end)]
+    return {'impressions': impressions, 'clicks': attributed,
+            'ctr': _ratio(attributed, impressions), 'accounts': accounts,
+            'channels': channels, 'daily': daily,
+            'unattributed_clicks': max(0, clicks_total - attributable_clicks)}
+
+
+def movie_totals(connection, imp, clicks, start, end):
+    """Per-movie exposure/click counts for the same effective-exposure cohort."""
+    impressions_where = _impression_window(imp, start, end)
+    clicks_where = _window(clicks.c.clicked_at, start, end)
+    totals = {int(mid): {'impressions': int(count), 'clicks': 0} for mid, count in
+              connection.execute(select(imp.c.movie_id, func.count())
+                                 .where(impressions_where, imp.c.movie_id.is_not(None))
+                                 .group_by(imp.c.movie_id)).all()}
+    for mid, count in connection.execute(
+            select(imp.c.movie_id, func.count(distinct(imp.c.impression_id)))
+            .select_from(_attributable_clicks(clicks, imp))
+            .where(impressions_where, clicks_where, imp.c.movie_id.is_not(None))
+            .group_by(imp.c.movie_id)).all():
+        totals.setdefault(int(mid), {'impressions': 0, 'clicks': 0})['clicks'] = int(count)
+    return totals
+
+
+def tracking_counts(connection, imp, now, window_days=7):
+    """Latest effective exposure plus 7d/24h counts; used by the health endpoint."""
+    cohort = imp.c.board_version == VISIBLE_BOARD_VERSION
+    latest = connection.scalar(select(func.max(imp.c.shown_at)).where(cohort))
+    impressions_7d = int(connection.scalar(
+        select(func.count()).select_from(imp).where(cohort, imp.c.shown_at >= now - timedelta(days=window_days))) or 0)
+    impressions_24h = int(connection.scalar(
+        select(func.count()).select_from(imp).where(cohort, imp.c.shown_at >= now - timedelta(hours=24))) or 0)
+    return {'last_impression_at': latest, 'impressions_7d': impressions_7d,
+            'impressions_24h': impressions_24h}
