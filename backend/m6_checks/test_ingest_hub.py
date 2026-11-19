@@ -1328,3 +1328,80 @@ def test_convert_catalog_to_supplement_offline_e2e_and_cli(monkeypatch):
         assert exc_corrupt.value.code == 'ARCHIVE_CORRUPT'
 
 
+def test_convert_catalog_to_supplement_handles_partial_release_language_without_aborting(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    with non_c_archive() as root:
+        plan = select_targets(source='tmdb_catalog', job_id='cat-partial-rel', tmdb_ids=[772, 773])
+
+        def fake_fetch(req):
+            tid = int(req['url'].split('/movie/')[1].split('?')[0])
+            payload = _tmdb_movie_payload(tid, imdb_id=f'tt0000{tid}')
+            if tid == 772:
+                payload['release_dates']['results'].append({
+                    'iso_3166_1': 'PT',
+                    'release_dates': [{
+                        'type': 3,
+                        'release_date': '1992-12-18T00:00:00.000Z',
+                        'certification': 'M/6',
+                        'note': '',
+                        'iso_639_1': '[object Object]',
+                    }],
+                })
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        cap = run_capture(plan, archive_dir=str(root), execute=True, token_env='HUB_TEST_TMDB_TOKEN', fetch=fake_fetch)
+        cat_dir = Path(cap['archive_dir'])
+        verify_archive(cat_dir)
+
+        class _MapAdapter(_FakeCatalogAdapter):
+            def apply(self, jobid, payloads, backup, expected_plans=None):
+                backup({'movies': []})
+                return {
+                    'batch_id': 88,
+                    'items': [{'tmdb_id': p['id'], 'movie_id': 3500 + idx} for idx, p in enumerate(payloads)],
+                    'replayed': False,
+                }
+
+        commit_archive(cat_dir, execute=True, importer=_MapAdapter())
+
+        out_sup_root = root / 'sup-archives'
+        receipt = convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=True, now=NOW)
+        assert receipt['status'] == 'READY_TO_COMMIT'
+        assert receipt['counts']['valid'] == 2
+        assert receipt['counts']['rejected'] == 0
+        assert receipt['error_breakdown'] == {'FIELD_FAILED:releases': 1}
+        assert len(receipt['anomaly_samples']) == 1
+        assert receipt['anomaly_samples'][0]['tmdb_id'] == 772
+        assert receipt['anomaly_samples'][0]['topic'] == 'releases'
+
+        # Re-running on the PARTIAL checkpoint archive is idempotent with the same commit_seal
+        sup_dir = Path(receipt['archive_dir'])
+        ckpt = json.loads((sup_dir / 'checkpoint.json').read_text(encoding='utf-8'))
+        assert ckpt['status'] == 'PARTIAL'
+        replay = convert_catalog_to_supplement(cat_dir, out_archive=out_sup_root, execute=True, now=NOW)
+        assert replay['commit_seal'] == receipt['commit_seal']
+
+        # Commit writes valid topics for both movies while skipping releases for 772
+        sup_conn = FakeSupplementConnection()
+        committed = commit_archive(sup_dir, execute=True, seal=receipt['commit_seal'], connection=sup_conn, now=NOW)
+        assert committed['status'] == 'COMMITTED'
+        assert committed['counts']['valid'] == 2
+
+        # If normalizer itself fails (normalized_path=None), conversion must still abort
+        from catalog.tmdb_supplement import capture as _sup_cap
+        orig_capture_movies = _sup_cap.capture_movies
+
+        def broken_capture_movies(*args, **kwargs):
+            return orig_capture_movies(*args, normalize=lambda **kw: (_ for _ in ()).throw(RuntimeError('boom')), **kwargs)
+
+        monkeypatch.setattr(_sup_cap, 'capture_movies', broken_capture_movies)
+        with pytest.raises(HubInputError) as exc_inc:
+            convert_catalog_to_supplement(cat_dir, out_archive=root / 'sup-broken', execute=True, now=NOW)
+        assert exc_inc.value.code == 'SUPPLEMENT_CAPTURE_INCOMPLETE'
+
+
