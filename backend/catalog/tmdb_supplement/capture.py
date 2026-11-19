@@ -85,6 +85,8 @@ _MOVIE_PATH_RE = re.compile(r'/3/movie/[1-9][0-9]*$')
 TRENDING_PATHS = frozenset(('/3/trending/movie/day', '/3/trending/movie/week'))
 TRENDING_PAGES = (1, 2)
 TRENDING_PAGE_VALUES = frozenset(str(page) for page in TRENDING_PAGES)
+DISCOVER_PATHS = frozenset(('/3/movie/popular', '/3/movie/top_rated', '/3/discover/movie'))
+DISCOVER_SORT_BY = frozenset(('popularity.desc', 'vote_average.desc', 'vote_count.desc'))
 _REPARSE_ATTRIBUTE = 0x400
 
 
@@ -448,10 +450,78 @@ def _validate_trending_request(request):
     return url, headers, timeout, max_bytes
 
 
+def _validate_discover_request(request):
+    """Bounded validation for TMDB popular / top_rated / discover list queries."""
+    url = request.get('url')
+    if not isinstance(url, str):
+        raise CaptureSecurityError('URL_INVALID')
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme != 'https' or parsed.netloc != 'api.themoviedb.org' or parsed.fragment:
+        raise CaptureSecurityError('URL_NOT_ALLOWED')
+    if parsed.path not in DISCOVER_PATHS:
+        raise CaptureSecurityError('URL_NOT_ALLOWED')
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    if 'language' not in query or 'page' not in query:
+        raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+    pages = query.get('page') or []
+    if len(pages) != 1 or not pages[0].isdigit():
+        raise CaptureSecurityError('PAGE_NOT_ALLOWED')
+    page_num = int(pages[0])
+    if not 1 <= page_num <= 500:
+        raise CaptureSecurityError('PAGE_NOT_ALLOWED')
+    langs = query.get('language') or []
+    if len(langs) != 1:
+        raise CaptureSecurityError('LANGUAGE_NOT_ALLOWED')
+    try:
+        _validate_language(langs[0])
+    except CaptureInputError:
+        raise CaptureSecurityError('LANGUAGE_NOT_ALLOWED') from None
+
+    if parsed.path in ('/3/movie/popular', '/3/movie/top_rated'):
+        if set(query) != {'language', 'page'}:
+            raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+    else:
+        allowed = {'language', 'page', 'include_adult', 'sort_by', 'vote_count.gte', 'vote_average.gte'}
+        if not set(query).issubset(allowed) or 'include_adult' not in query:
+            raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+        if query['include_adult'] != ['false']:
+            raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+        if 'sort_by' in query:
+            sorts = query['sort_by']
+            if len(sorts) != 1 or sorts[0] not in DISCOVER_SORT_BY:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+        if 'vote_count.gte' in query:
+            vals = query['vote_count.gte']
+            if len(vals) != 1:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+            try:
+                vc = float(vals[0])
+            except ValueError:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED') from None
+            if not math.isfinite(vc) or vc < 0:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+        if 'vote_average.gte' in query:
+            vals = query['vote_average.gte']
+            if len(vals) != 1:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+            try:
+                va = float(vals[0])
+            except ValueError:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED') from None
+            if not math.isfinite(va) or not 0.0 <= va <= 10.0:
+                raise CaptureSecurityError('URL_QUERY_NOT_ALLOWED')
+
+    headers, timeout, max_bytes = _validate_envelope(request)
+    return url, headers, timeout, max_bytes
+
+
 def _validate_request(request):
     """Shared request validation; every HTTPS transport goes through this."""
-    if request.get('kind') == 'trending':
+    kind = request.get('kind')
+    if kind == 'trending':
         return _validate_trending_request(request)
+    if kind == 'discover':
+        return _validate_discover_request(request)
     return _validate_movie_request(request)
 
 

@@ -28,6 +28,7 @@ from catalog.ingest_hub import (  # noqa: E402
     HubRejected,
     HubSecurityError,
     commit_archive,
+    discover_catalog_targets,
     load_plan,
     run_capture,
     select_targets,
@@ -260,7 +261,7 @@ def test_select_explicit_trending_catalog_and_validation():
     assert exc_dup.value.code == 'TMDB_IDS_INVALID'
 
     with pytest.raises(HubInputError) as exc_many:
-        select_targets(source='tmdb_catalog', job_id='cat-many', tmdb_ids=list(range(1, 22)))
+        select_targets(source='tmdb_catalog', job_id='cat-many', tmdb_ids=list(range(1, 502)))
     assert exc_many.value.code == 'TMDB_IDS_INVALID'
 
 
@@ -726,4 +727,323 @@ def test_cli_select_supplement_missing_and_commit_requires_dsn():
         r_no_exec = _run_cli(['commit', '--archive', str(sup_dir), '--source', 'tmdb_supplement'])
         assert r_no_exec.returncode == 2
         assert 'EXECUTE_FLAG_REQUIRED' in r_no_exec.stderr
+
+
+# ------------------------------------------------------------------ 6. S3 flexible discover & tmdb_catalog upgrades
+
+
+def test_tmdb_catalog_request_passes_capture_security_validator():
+    from catalog.ingest_hub.pipeline import _capture_catalog_movie_request
+    from catalog.tmdb_supplement.capture import APPEND_FIELDS, _validate_request
+
+    req = _capture_catalog_movie_request(278, 'zh-CN', SYNTHETIC_TOKEN)
+    url, headers, timeout, max_bytes = _validate_request(req)
+    assert 'append_to_response=' + '%2C'.join(APPEND_FIELDS) in url
+    assert headers['Authorization'] == 'Bearer ' + SYNTHETIC_TOKEN
+    assert timeout > 0 and max_bytes > 0
+
+
+def test_tmdb_catalog_pacing_retry_429_and_checkpoint_resume(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    clock = FakeClock()
+    sleep_calls = []
+
+    def tracking_sleep(sec):
+        sleep_calls.append(float(sec))
+        clock.sleep(sec)
+
+    plan = select_targets(
+        source='tmdb_catalog',
+        job_id='cat-resume-01',
+        tmdb_ids=[7001, 7002, 7003],
+        max_requests=5,
+    )
+    attempts_seen = []
+
+    def fake_fetch_round1(req):
+        tid = int(req['url'].split('/movie/')[1].split('?')[0])
+        attempts_seen.append(tid)
+        if tid == 7001 and attempts_seen.count(7001) == 1:
+            return {'status': 429, 'headers': {'Retry-After': '2'}, 'body': b'rate limit', 'url': req['url']}
+        if tid == 7002 and attempts_seen.count(7002) == 1:
+            return {'status': 503, 'headers': {}, 'body': b'unavailable', 'url': req['url']}
+        if tid == 7003:
+            # Exhaust budget on 7003 during round 1 (used: 7001 x2 + 7002 x2 + 7003 x1 = 5)
+            return {'status': 502, 'headers': {}, 'body': b'bad gateway', 'url': req['url']}
+        return {
+            'status': 200,
+            'headers': {},
+            'body': json.dumps(_tmdb_movie_payload(tid), ensure_ascii=False).encode('utf-8'),
+            'url': req['url'],
+        }
+
+    with non_c_archive() as root:
+        cap1 = run_capture(
+            plan,
+            archive_dir=str(root),
+            execute=True,
+            token_env='HUB_TEST_TMDB_TOKEN',
+            fetch=fake_fetch_round1,
+            clock=clock,
+            sleep=tracking_sleep,
+        )
+        assert cap1['status'] == 'PARTIAL'
+        assert cap1['succeeded'] == 2
+        assert cap1['failed'] == 1
+        assert cap1['requests_used'] == 5
+        assert any(sec >= 2.0 for sec in sleep_calls)
+
+        # Resume same job_id + language: 7001 & 7002 skipped (0 network calls), only 7003 fetched!
+        resumed_calls = []
+
+        def fake_fetch_round2(req):
+            tid = int(req['url'].split('/movie/')[1].split('?')[0])
+            resumed_calls.append(tid)
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(_tmdb_movie_payload(tid), ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        cap2 = run_capture(
+            plan,
+            archive_dir=str(root),
+            execute=True,
+            token_env='HUB_TEST_TMDB_TOKEN',
+            fetch=fake_fetch_round2,
+            clock=clock,
+            sleep=tracking_sleep,
+        )
+        assert cap2['status'] == 'COMPLETED'
+        assert cap2['succeeded'] == 3
+        assert cap2['resumed'] == 2
+        assert cap2['requests_used'] == 1
+        assert resumed_calls == [7003]
+
+        receipt = verify_archive(cap2['archive_dir'])
+        assert receipt['status'] == 'READY_TO_COMMIT'
+        assert receipt['counts']['valid'] == 3
+
+        # Language mismatch on existing manifest must fail cleanly
+        other_lang_plan = select_targets(
+            source='tmdb_catalog',
+            job_id='cat-resume-01',
+            tmdb_ids=[7001],
+            language='en-US',
+        )
+        with pytest.raises(HubInputError) as exc_lang:
+            run_capture(
+                other_lang_plan,
+                archive_dir=str(root),
+                execute=True,
+                token_env='HUB_TEST_TMDB_TOKEN',
+                fetch=fake_fetch_round2,
+                clock=clock,
+                sleep=tracking_sleep,
+            )
+        assert exc_lang.value.code == 'INPUT_MISMATCH'
+
+
+def test_select_tmdb_catalog_flexible_limit_and_json_file():
+    with non_c_archive() as root:
+        ids_file = root / 'ids-30.json'
+        ids_file.write_text(json.dumps(list(range(8001, 8031))), encoding='utf-8')
+        plan = select_targets(
+            source='tmdb_catalog',
+            job_id='cat-json-25',
+            tmdb_ids=str(ids_file),
+            limit=25,
+            max_requests=50,
+        )
+        assert len(plan['targets']) == 25
+        assert plan['targets'][0]['tmdb_id'] == 8001
+        assert plan['targets'][-1]['tmdb_id'] == 8025
+        assert plan['selection']['candidate_count'] == 30
+        assert plan['selection']['truncated'] is True
+        assert plan['request_budget'] == 50
+
+        # CLI select with .json --tmdb-ids + --limit
+        r_cli = _run_cli([
+            'select',
+            '--source', 'tmdb_catalog',
+            '--job-id', 'cli-json-25',
+            '--tmdb-ids', str(ids_file),
+            '--limit', '25',
+            '--max-requests', '50',
+        ])
+        assert r_cli.returncode == 0, r_cli.stderr
+        cli_plan = json.loads(r_cli.stdout)
+        assert len(cli_plan['targets']) == 25
+
+
+def test_discover_catalog_targets_dry_run_dedup_pagination_and_e2e(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    clock = FakeClock()
+
+    # SQLite connection with existing TMDB IDs (1002, 1004)
+    engine = create_engine('sqlite+pysqlite:///:memory:')
+    md = MetaData()
+    ext = Table('movie_external_ids', md, Column('movie_id', Integer), Column('source', String(16)), Column('external_id', String(32)))
+    md.create_all(engine)
+    with engine.begin() as conn:
+        conn.execute(insert(ext), [
+            {'movie_id': 1, 'source': 'tmdb', 'external_id': '1002'},
+            {'movie_id': 2, 'source': 'tmdb', 'external_id': '1004'},
+        ])
+
+    with non_c_archive() as root:
+        existing_file = root / 'existing.json'
+        existing_file.write_text(json.dumps([1001, 1005]), encoding='utf-8')
+        out_plan = root / 'discovered-plan.json'
+
+        # 1) Dry-run never calls fetch or writes out_plan
+        def fail_if_called(_req):
+            raise AssertionError('dry-run must not fetch')
+
+        with engine.connect() as conn:
+            dry = discover_catalog_targets(
+                job_id='disc-dry',
+                preset='popular',
+                limit=5,
+                max_pages=3,
+                existing_ids=str(existing_file),
+                connection=conn,
+                execute=False,
+                fetch=fail_if_called,
+                output_plan_path=str(out_plan),
+            )
+        assert dry['status'] == 'DRY_RUN'
+        assert dry['existing_known'] == 4
+        assert not out_plan.exists()
+
+        # 2) Execute with pagination, 429 retry, adult filtering, DB+file dedup, and exact limit=5
+        pages_calls = []
+
+        def fake_discover_fetch(req):
+            from catalog.tmdb_supplement.capture import _validate_request
+            _validate_request(req)
+            page = int(req['url'].split('page=')[1].split('&')[0])
+            pages_calls.append(page)
+            if page == 1 and pages_calls.count(1) == 1:
+                return {'status': 429, 'headers': {'Retry-After': '1'}, 'body': b'wait', 'url': req['url']}
+            if page == 1:
+                results = [
+                    {'id': 1001, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # file existing -> skip
+                    {'id': 1002, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # db existing -> skip
+                    {'id': 1003, 'adult': True, 'vote_count': 200, 'vote_average': 7.5},   # adult -> skip
+                    {'id': 2099, 'adult': False, 'vote_count': 10, 'vote_average': 7.5},   # below min_vote_count -> skip
+                    {'id': 2001, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # keep #1
+                    {'id': 2002, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # keep #2
+                    {'id': 2002, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # dup -> skip
+                ]
+            else:
+                results = [
+                    {'id': 1004, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # db existing -> skip
+                    {'id': 1005, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # file existing -> skip
+                    {'id': 2003, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # keep #3
+                    {'id': 2004, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # keep #4
+                    {'id': 2005, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # keep #5 (reaches limit=5)
+                    {'id': 2006, 'adult': False, 'vote_count': 200, 'vote_average': 7.5},  # truncated after limit
+                ]
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps({'page': page, 'total_pages': 10, 'results': results}).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        with engine.connect() as conn:
+            res = discover_catalog_targets(
+                job_id='disc-run-01',
+                preset='discover',
+                limit=5,
+                max_pages=4,
+                max_requests=6,
+                catalog_max_requests=10,
+                sort_by='vote_count.desc',
+                min_vote_count=50,
+                min_vote_average=6.5,
+                existing_ids=str(existing_file),
+                connection=conn,
+                execute=True,
+                token_env='HUB_TEST_TMDB_TOKEN',
+                fetch=fake_discover_fetch,
+                clock=clock,
+                sleep=clock.sleep,
+                output_plan_path=str(out_plan),
+            )
+        assert res['status'] == 'COMPLETED'
+        assert res['requests_used'] == 3  # p1 429 + p1 200 + p2 200
+        assert res['pages_scanned'] == 2
+        assert res['counts']['selected'] == 5
+        assert res['counts']['skipped_existing'] == 4
+        assert res['counts']['skipped_adult'] == 1
+        assert res['counts']['skipped_duplicate'] == 1
+        assert res['counts']['skipped_filter'] == 1
+        assert out_plan.is_file()
+
+        loaded = load_plan(out_plan)
+        assert [t['tmdb_id'] for t in loaded['targets']] == [2001, 2002, 2003, 2004, 2005]
+        assert loaded['request_budget'] == 10
+
+        # Feed discovered job-plan.json directly into run_capture -> verify -> commit
+        def fake_movie_fetch(req):
+            tid = int(req['url'].split('/movie/')[1].split('?')[0])
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(_tmdb_movie_payload(tid), ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        cap = run_capture(
+            str(out_plan),
+            archive_dir=str(root / 'archives'),
+            execute=True,
+            token_env='HUB_TEST_TMDB_TOKEN',
+            fetch=fake_movie_fetch,
+            clock=clock,
+            sleep=clock.sleep,
+        )
+        assert cap['status'] == 'COMPLETED'
+        receipt = verify_archive(cap['archive_dir'])
+        assert receipt['status'] == 'READY_TO_COMMIT'
+        assert receipt['counts']['valid'] == 5
+        adapter = _FakeCatalogAdapter()
+        committed = commit_archive(cap['archive_dir'], execute=True, seal=receipt['commit_seal'], importer=adapter)
+        assert committed['status'] == 'COMMITTED'
+
+
+def test_cli_discover_dry_run_summary_under_30_lines():
+    with non_c_archive() as root:
+        existing_file = root / 'existing.json'
+        existing_file.write_text(json.dumps([10, 20, 30]), encoding='utf-8')
+        out_plan = root / 'plan.json'
+        r_disc = _run_cli([
+            'discover',
+            '--job-id', 'cli-disc-dry',
+            '--preset', 'top_rated',
+            '--limit', '100',
+            '--existing-ids', str(existing_file),
+            '--out-plan', str(out_plan),
+            '--summary-only',
+        ])
+        assert r_disc.returncode == 0, r_disc.stderr
+        lines = [line for line in r_disc.stdout.strip().splitlines() if line.strip()]
+        assert len(lines) < 30
+        payload = json.loads(r_disc.stdout)
+        assert payload['status'] == 'DRY_RUN'
+        assert payload['limit'] == 100 if 'limit' in payload else True
+        assert not out_plan.exists()
+
+        # C: drive --out-plan must be blocked cleanly
+        r_bad_c = _run_cli([
+            'discover',
+            '--job-id', 'cli-disc-c',
+            '--out-plan', r'C:\bad\plan.json',
+        ])
+        assert r_bad_c.returncode == 2
+        assert 'ARCHIVE_ON_SYSTEM_DRIVE' in r_bad_c.stderr
+
 

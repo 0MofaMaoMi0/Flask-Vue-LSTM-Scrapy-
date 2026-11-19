@@ -29,6 +29,9 @@ _SELECTOR_EXPORTS = frozenset((
     'load_plan',
     'select_targets',
 ))
+_DISCOVER_EXPORTS = frozenset((
+    'discover_catalog_targets',
+))
 
 
 def __getattr__(name):
@@ -38,6 +41,9 @@ def __getattr__(name):
     if name in _SELECTOR_EXPORTS:
         from . import selector as _selector
         return getattr(_selector, name)
+    if name in _DISCOVER_EXPORTS:
+        from . import discover as _discover
+        return getattr(_discover, name)
     raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
 
 
@@ -53,6 +59,7 @@ __all__ = [
     'build_douban_archive',
     'classify_douban_item',
     'commit_archive',
+    'discover_catalog_targets',
     'douban_item_to_envelope_record',
     'load_douban_raw',
     'load_plan',

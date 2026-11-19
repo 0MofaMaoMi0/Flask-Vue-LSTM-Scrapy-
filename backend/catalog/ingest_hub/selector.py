@@ -26,7 +26,8 @@ from .contracts import (
     validate_safe_file,
 )
 
-MAX_CATALOG_IDS = 20
+MAX_CATALOG_IDS = 500
+MAX_CATALOG_REQUESTS = 1500
 MAX_SUPPLEMENT_TARGETS = _capture.MAX_TARGETS
 MAX_SUPPLEMENT_REQUESTS = _capture.MAX_REQUESTS
 MISSING_STATUSES = frozenset(_repository.MISSING_STATUSES)  # FAILED, MISSING, NOT_FETCHED
@@ -134,6 +135,45 @@ def _load_explicit_targets(targets):
     except _capture.CaptureError as exc:
         raise HubInputError(exc.code, str(exc)) from None
     return prepared, duplicates
+
+
+def _load_catalog_tmdb_ids(tmdb_ids):
+    """Parse explicit tmdb_ids from a JSON file path, comma string, or int sequence."""
+    if isinstance(tmdb_ids, (list, tuple)) and len(tmdb_ids) == 1 and isinstance(tmdb_ids[0], (str, Path)):
+        single = str(tmdb_ids[0]).strip()
+        if single.lower().endswith('.json') or ',' in single:
+            tmdb_ids = single
+
+    if isinstance(tmdb_ids, Path) or (isinstance(tmdb_ids, str) and tmdb_ids.strip().lower().endswith('.json')):
+        path = validate_safe_file(tmdb_ids, allow_c_read=True, must_exist=True)
+        try:
+            loaded = json.loads(path.read_text(encoding='utf-8-sig'))
+        except (OSError, ValueError) as exc:
+            raise HubInputError('TMDB_IDS_INVALID', 'cannot parse tmdb_ids JSON file') from exc
+        if isinstance(loaded, dict):
+            if 'tmdb_ids' in loaded and isinstance(loaded['tmdb_ids'], list):
+                loaded = loaded['tmdb_ids']
+            elif 'targets' in loaded and isinstance(loaded['targets'], list):
+                loaded = [
+                    item.get('tmdb_id') if isinstance(item, dict) else item
+                    for item in loaded['targets']
+                ]
+            else:
+                raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids JSON object must contain tmdb_ids or targets list')
+        if not isinstance(loaded, list):
+            raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids JSON must be a list of positive integers')
+        return loaded
+
+    if isinstance(tmdb_ids, str):
+        raw_parts = [p.strip() for p in tmdb_ids.split(',') if p.strip()]
+        if not raw_parts or any(not p.isdigit() for p in raw_parts):
+            raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids must contain positive integers')
+        return [int(p) for p in raw_parts]
+
+    if isinstance(tmdb_ids, (list, tuple)):
+        return list(tmdb_ids)
+
+    raise HubInputError('TMDB_IDS_INVALID', f'tmdb_ids must be a sequence of 1..{MAX_CATALOG_IDS} positive integers')
 
 
 def _rows_from_connection(connection):
@@ -458,27 +498,29 @@ def select_targets(
         scope = scope or 'catalog'
         if scope != 'catalog':
             raise HubInputError('INVALID_SCOPE', f'invalid scope for tmdb_catalog: {scope}')
-        if isinstance(tmdb_ids, str):
-            raw_parts = [p.strip() for p in tmdb_ids.split(',') if p.strip()]
-            if not raw_parts or any(not p.isdigit() for p in raw_parts):
-                raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids must contain positive integers')
-            ids = [int(p) for p in raw_parts]
-        elif isinstance(tmdb_ids, (list, tuple)):
-            ids = list(tmdb_ids)
-        else:
-            raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids must be a sequence of 1..20 positive integers')
-        if not 1 <= len(ids) <= MAX_CATALOG_IDS:
+        ids = _load_catalog_tmdb_ids(tmdb_ids)
+        if not ids:
             raise HubInputError('TMDB_IDS_INVALID', f'tmdb_ids count must be 1..{MAX_CATALOG_IDS}')
         if any(not is_positive_int(tid) or tid > 9999999999 for tid in ids) or len(set(ids)) != len(ids):
             raise HubInputError('TMDB_IDS_INVALID', 'tmdb_ids must be unique integers in 1..9999999999')
-        budget = _parse_budget(max_requests, default=len(ids), maximum=MAX_SUPPLEMENT_REQUESTS)
+        candidate_count = len(ids)
+        parsed_limit = _parse_limit(limit, default=None, maximum=MAX_CATALOG_IDS)
+        if parsed_limit is not None:
+            ids = ids[:parsed_limit]
+        if not 1 <= len(ids) <= MAX_CATALOG_IDS:
+            raise HubInputError('TMDB_IDS_INVALID', f'tmdb_ids count must be 1..{MAX_CATALOG_IDS}')
+        budget = _parse_budget(max_requests, default=len(ids), maximum=MAX_CATALOG_REQUESTS)
         if len(ids) > budget:
             warnings.append('BUDGET_INSUFFICIENT_FOR_ALL_TARGETS')
         plan['scope'] = scope
         plan['request_budget'] = budget
         plan['targets'] = [{'tmdb_id': tid} for tid in ids]
         plan['estimated_requests'] = min(len(ids), budget)
-        plan['selection'] = {'selected_count': len(ids)}
+        plan['selection'] = {
+            'candidate_count': candidate_count,
+            'selected_count': len(ids),
+            'truncated': candidate_count > len(ids),
+        }
 
     elif source == 'douban_archive':
         scope = scope or 'douban'
@@ -562,4 +604,4 @@ def load_plan(plan_or_path):
     return plan
 
 
-__all__ = ['MAX_CATALOG_IDS', 'select_targets', 'load_plan']
+__all__ = ['MAX_CATALOG_IDS', 'MAX_CATALOG_REQUESTS', 'select_targets', 'load_plan']

@@ -29,6 +29,7 @@ from catalog.ingest_hub import (  # noqa: E402
     HubRejected,
     build_douban_archive,
     commit_archive,
+    discover_catalog_targets,
     load_douban_raw,
     load_plan,
     run_capture,
@@ -118,7 +119,7 @@ def _select_kwargs_from_args(args):
     if isinstance(targets, list) and len(targets) == 1 and targets[0].endswith('.json'):
         targets = targets[0]
     tmdb_ids = getattr(args, 'tmdb_ids', None)
-    if isinstance(tmdb_ids, list) and len(tmdb_ids) == 1 and ',' in tmdb_ids[0]:
+    if isinstance(tmdb_ids, list) and len(tmdb_ids) == 1 and (',' in tmdb_ids[0] or tmdb_ids[0].lower().endswith('.json')):
         tmdb_ids = tmdb_ids[0]
     elif isinstance(tmdb_ids, list):
         parsed_ids = []
@@ -369,12 +370,85 @@ def _cmd_convert_douban(args):
     return EXIT_OK
 
 
+def _cmd_discover(args):
+    validate_env_name(args.token_env, 'token_env')
+    if args.out_plan:
+        validate_archive_dir(Path(args.out_plan).parent, must_exist=False, create=False)
+    kwargs = {
+        'job_id': args.job_id,
+        'preset': args.preset,
+        'limit': args.limit,
+        'language': args.language,
+        'start_page': args.start_page,
+        'max_pages': args.max_pages,
+        'max_requests': args.max_requests,
+        'catalog_max_requests': args.catalog_max_requests,
+        'sort_by': args.sort_by,
+        'min_vote_count': args.min_vote_count,
+        'min_vote_average': args.min_vote_average,
+        'existing_ids': args.existing_ids,
+        'execute': bool(args.execute),
+        'token_env': args.token_env,
+        'proxy': args.proxy,
+        'reuse_connection': bool(args.reuse_connection),
+        'output_plan_path': args.out_plan,
+    }
+    if args.dsn_env:
+        engine = _connect_sqlalchemy(args.dsn_env)
+        try:
+            with engine.connect() as conn:
+                result = discover_catalog_targets(connection=conn, **kwargs)
+        finally:
+            engine.dispose()
+    else:
+        result = discover_catalog_targets(**kwargs)
+
+    if args.summary_only:
+        compact = {
+            k: result[k]
+            for k in (
+                'contract',
+                'rule_version',
+                'command',
+                'job_id',
+                'mode',
+                'status',
+                'preset',
+                'language',
+                'requests_used',
+                'request_budget',
+                'pages_scanned',
+                'counts',
+                'output_plan_path',
+                'plan_digest',
+                'error_code',
+            )
+            if k in result and result[k] is not None
+        }
+        pretty = json.dumps(compact, ensure_ascii=False, sort_keys=True, indent=2)
+        if pretty.count('\n') + 1 < 30:
+            print(pretty)
+        else:
+            print(json.dumps(compact, ensure_ascii=False, sort_keys=True, separators=(',', ':')))
+    else:
+        _print_result(result, summary_only=False)
+
+    st = result.get('status')
+    if st in ('DRY_RUN', 'COMPLETED'):
+        return EXIT_OK
+    if st == 'PARTIAL':
+        return EXIT_INCOMPLETE if args.strict else EXIT_OK
+    if st == 'AUTH_FAILED':
+        return EXIT_AUTH
+    return EXIT_INCOMPLETE
+
+
 def _add_select_options(parser, *, required_source=True):
     parser.add_argument('--source', choices=SUPPORTED_SOURCES, required=required_source)
     parser.add_argument('--scope', help='missing | explicit | stale | boards | catalog | envelope | douban')
     parser.add_argument('--job-id', required=required_source, help='stable job identifier')
     parser.add_argument('--targets', nargs='+', help='explicit movie_id:tmdb_id pairs or JSON file path')
-    parser.add_argument('--tmdb-ids', nargs='+', help='1..20 TMDB IDs for tmdb_catalog')
+    parser.add_argument('--tmdb-ids', nargs='+', help='1..500 TMDB IDs (ids, comma string, or .json path) for tmdb_catalog')
     parser.add_argument('--topics', help='comma-separated supplement topics')
     parser.add_argument('--limit', type=int, help='max movie count')
     parser.add_argument('--max-requests', type=int, help='request budget')
@@ -395,6 +469,28 @@ def build_parser():
     _add_select_options(p_select, required_source=True)
     p_select.add_argument('--out-plan', help='non-C: absolute output path for job-plan.json')
     p_select.add_argument('--summary-only', action='store_true')
+
+    p_disc = sub.add_parser('discover', help='discover deduplicated out-of-catalog TMDB movies and emit job-plan.json')
+    p_disc.add_argument('--job-id', required=True, help='stable job identifier')
+    p_disc.add_argument('--preset', default='popular', choices=('popular', 'top_rated', 'discover'))
+    p_disc.add_argument('--limit', type=int, default=20, help='target new movie count (1..500)')
+    p_disc.add_argument('--language', default='zh-CN')
+    p_disc.add_argument('--start-page', type=int, default=1)
+    p_disc.add_argument('--max-pages', type=int, default=20)
+    p_disc.add_argument('--max-requests', type=int, help='discovery list request budget')
+    p_disc.add_argument('--catalog-max-requests', type=int, help='capture request budget embedded into job-plan.json')
+    p_disc.add_argument('--sort-by', default='popularity.desc', choices=('popularity.desc', 'vote_average.desc', 'vote_count.desc'))
+    p_disc.add_argument('--min-vote-count', type=int)
+    p_disc.add_argument('--min-vote-average', type=float)
+    p_disc.add_argument('--existing-ids', help='JSON file of existing TMDB IDs for offline dedup')
+    p_disc.add_argument('--dsn-env', help='environment variable name holding read-only DSN')
+    p_disc.add_argument('--token-env', default='TMDB_READ_TOKEN')
+    p_disc.add_argument('--proxy', help='explicit http(s) proxy; omit to keep proxies disabled')
+    p_disc.add_argument('--reuse-connection', action='store_true')
+    p_disc.add_argument('--out-plan', help='non-C: absolute output path for job-plan.json')
+    p_disc.add_argument('--execute', action='store_true', help='required to perform network discovery and write plan')
+    p_disc.add_argument('--strict', action='store_true', help='exit 3 if selected count < limit')
+    p_disc.add_argument('--summary-only', action='store_true')
 
     p_capture = sub.add_parser('capture', help='bounded capture into archive_dir (dry-run by default)')
     p_capture.add_argument('--plan', help='path to job-plan.json')
@@ -450,6 +546,8 @@ def main(argv=None):
     try:
         if args.command == 'select':
             return _cmd_select(args)
+        if args.command == 'discover':
+            return _cmd_discover(args)
         if args.command == 'capture':
             return _cmd_capture(args)
         if args.command == 'verify':

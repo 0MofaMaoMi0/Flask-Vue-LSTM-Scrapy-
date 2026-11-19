@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import secrets
+import time
 import urllib.parse
 from collections import Counter
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from .contracts import (
     HubInputError,
     HubRejected,
     HubSecurityError,
+    atomic_write_bytes,
     atomic_write_json,
     canonical_json,
     is_positive_int,
@@ -160,7 +162,10 @@ def summary_envelope(receipt):
 
 
 def _capture_catalog_movie_request(tmdb_id, language, token):
-    query = urllib.parse.urlencode({'language': language, 'append_to_response': 'credits'})
+    query = urllib.parse.urlencode({
+        'language': language,
+        'append_to_response': ','.join(_capture.APPEND_FIELDS),
+    })
     return {
         'kind': 'catalog',
         'method': 'GET',
@@ -175,7 +180,62 @@ def _capture_catalog_movie_request(tmdb_id, language, token):
     }
 
 
-def _capture_tmdb_catalog(plan, archive_path, *, execute, token_env, fetch, proxy, reuse_connection):
+def _epoch_clock_fn(clock):
+    if clock is None:
+        return time.monotonic
+    def _now():
+        val = clock()
+        return val.timestamp() if isinstance(val, datetime) else float(val)
+    return _now
+
+
+def _load_resumable_catalog_items(job_dir, *, job_id, language):
+    manifest_path = job_dir / 'manifest.json'
+    if not manifest_path.is_file():
+        return {}
+    manifest = _read_json_safe(manifest_path, 'INVALID_MANIFEST')
+    if manifest.get('schema') != CATALOG_MANIFEST_SCHEMA or manifest.get('job_id') != job_id:
+        raise HubInputError('INVALID_MANIFEST', 'existing tmdb_catalog manifest mismatch')
+    if manifest.get('language') != language:
+        raise HubInputError('INPUT_MISMATCH', 'existing tmdb_catalog manifest has different language')
+    resumable = {}
+    for entry in manifest.get('items') or []:
+        if not isinstance(entry, dict) or entry.get('status') != 'HTTP_200':
+            continue
+        tid = entry.get('tmdb_id')
+        if not is_positive_int(tid):
+            continue
+        raw_path = job_dir / 'raw' / f'{tid}.json'
+        norm_path = job_dir / 'normalized' / f'{tid}.json'
+        if is_reparse(raw_path) or is_reparse(norm_path):
+            raise HubSecurityError('ARCHIVE_REPARSE_POINT', 'symlink/reparse file rejected')
+        if not raw_path.is_file() or not norm_path.is_file():
+            raise HubInputError('ARCHIVE_CORRUPT', f'missing resumed artifact for tmdb_id={tid}')
+        raw_bytes = raw_path.read_bytes()
+        norm_bytes = norm_path.read_bytes()
+        if sha256_bytes(raw_bytes) != entry.get('raw_sha256') or sha256_bytes(norm_bytes) != entry.get('normalized_sha256'):
+            raise HubInputError('ARCHIVE_CORRUPT', f'resumed artifact hash mismatch for tmdb_id={tid}')
+        try:
+            payload = json.loads(norm_bytes.decode('utf-8'))
+            _admin_importer.validate(payload)
+        except Exception:
+            raise HubInputError('ARCHIVE_CORRUPT', f'invalid resumed payload for tmdb_id={tid}') from None
+        resumable[tid] = dict(entry, resumed=True)
+    return resumable
+
+
+def _capture_tmdb_catalog(
+    plan,
+    archive_path,
+    *,
+    execute,
+    token_env,
+    fetch,
+    proxy,
+    reuse_connection,
+    clock=None,
+    sleep=None,
+):
     job_id = plan['job_id']
     tmdb_ids = [int(item['tmdb_id']) for item in plan['targets']]
     language = plan.get('language', 'zh-CN')
@@ -203,85 +263,145 @@ def _capture_tmdb_catalog(plan, archive_path, *, execute, token_env, fetch, prox
         token = _capture._read_token(lambda: os.environ.get(token_env, ''))
     except _capture.CaptureError as exc:
         raise HubInputError(exc.code, str(exc)) from None
+
+    now_fn = _epoch_clock_fn(clock)
+    pause_fn = sleep or time.sleep
+    min_interval = _capture.DEFAULT_MIN_INTERVAL
+    max_attempts = _capture.MAX_RETRIES + 1
+    max_retry_after = 60.0
+
     job_dir.mkdir(parents=True, exist_ok=True)
     (job_dir / 'raw').mkdir(parents=True, exist_ok=True)
     (job_dir / 'normalized').mkdir(parents=True, exist_ok=True)
+    resumable = _load_resumable_catalog_items(job_dir, job_id=job_id, language=language)
 
     items = []
     requests_used = 0
     succeeded = 0
+    resumed = 0
     failed = 0
-    for tid in tmdb_ids:
-        if requests_used >= max_requests:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'BUDGET_EXHAUSTED'})
-            failed += 1
-            continue
-        requests_used += 1
-        req = _capture_catalog_movie_request(tid, language, token)
-        try:
-            resp = actual_fetch(req)
-        except _capture.CaptureSecurityError:
-            raise
-        except _capture.CaptureError as exc:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'error_code': exc.code})
-            failed += 1
-            continue
-        except Exception:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'TRANSPORT_ERROR'})
-            failed += 1
-            continue
+    last_request_at = None
 
-        http_status = resp.get('status')
-        if http_status in (401, 403):
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'http_status': http_status, 'error_code': 'AUTH_FAILED'})
-            failed += 1
-            break
-        if http_status != 200:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'http_status': http_status, 'error_code': f'HTTP_{http_status}'})
-            failed += 1
-            continue
-        body = resp.get('body') or b''
-        try:
-            raw = json.loads(body.decode('utf-8'))
-        except (UnicodeDecodeError, ValueError):
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': 'INVALID_JSON'})
-            failed += 1
-            continue
-        if not isinstance(raw, dict) or raw.get('id') != tid:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': 'UPSTREAM_IDENTITY_MISMATCH'})
-            failed += 1
-            continue
-        try:
-            payload = _admin_importer.capture(raw)
-        except _admin_importer.ImportRejected as exc:
-            items.append({'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': str(exc)})
-            failed += 1
-            continue
-
-        raw_bytes = (json.dumps(raw, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
-        norm_bytes = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
-        (job_dir / 'raw' / f'{tid}.json').write_bytes(raw_bytes)
-        (job_dir / 'normalized' / f'{tid}.json').write_bytes(norm_bytes)
-        items.append({
-            'tmdb_id': tid,
-            'status': 'HTTP_200',
-            'http_status': 200,
-            'raw_sha256': sha256_bytes(raw_bytes),
-            'normalized_sha256': sha256_bytes(norm_bytes),
+    def _save_progress():
+        atomic_write_json(job_dir / 'manifest.json', {
+            'schema': CATALOG_MANIFEST_SCHEMA,
+            'job_id': job_id,
+            'language': language,
+            'requests_used': requests_used,
+            'max_requests': max_requests,
+            'items': items,
         })
-        succeeded += 1
 
-    manifest = {
-        'schema': CATALOG_MANIFEST_SCHEMA,
-        'job_id': job_id,
-        'language': language,
-        'requests_used': requests_used,
-        'max_requests': max_requests,
-        'items': items,
-    }
-    atomic_write_json(job_dir / 'manifest.json', manifest)
     atomic_write_json(job_dir / 'hub-plan.json', plan)
-    overall = 'COMPLETED' if failed == 0 else ('AUTH_FAILED' if any(i.get('error_code') == 'AUTH_FAILED' for i in items) else ('PARTIAL' if succeeded > 0 else 'FAILED'))
+
+    auth_failed = False
+    for tid in tmdb_ids:
+        if tid in resumable:
+            items.append(dict(resumable[tid]))
+            succeeded += 1
+            resumed += 1
+            continue
+
+        if auth_failed:
+            items.append({'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'AUTH_FAILED'})
+            failed += 1
+            continue
+
+        final_item = None
+        for attempt in range(1, max_attempts + 1):
+            if requests_used >= max_requests:
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'BUDGET_EXHAUSTED'}
+                break
+            if last_request_at is not None:
+                elapsed = now_fn() - last_request_at
+                if elapsed < min_interval:
+                    pause_fn(min_interval - elapsed)
+            last_request_at = now_fn()
+            requests_used += 1
+            req = _capture_catalog_movie_request(tid, language, token)
+
+            try:
+                resp = actual_fetch(req)
+            except _capture.CaptureSecurityError as exc:
+                raise HubSecurityError(exc.code, str(exc)) from None
+            except _capture.CaptureError as exc:
+                err_code = exc.code
+                if attempt < max_attempts and requests_used < max_requests:
+                    pause_fn(min(_capture.MAX_BACKOFF, _capture.DEFAULT_BACKOFF * attempt))
+                    continue
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'error_code': err_code}
+                break
+            except Exception:
+                if attempt < max_attempts and requests_used < max_requests:
+                    pause_fn(min(_capture.MAX_BACKOFF, _capture.DEFAULT_BACKOFF * attempt))
+                    continue
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'TRANSPORT_ERROR'}
+                break
+
+            http_status = resp.get('status')
+            if http_status in (401, 403):
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': http_status, 'error_code': 'AUTH_FAILED'}
+                auth_failed = True
+                break
+            if http_status == 429:
+                ra = _capture._parse_retry_after(_capture._header(resp.get('headers'), 'Retry-After'), now_fn())
+                wait_sec = min(max_retry_after, max(min_interval, float(ra))) if ra is not None else min(max_retry_after, 2.0 * attempt)
+                if attempt < max_attempts and requests_used < max_requests:
+                    pause_fn(wait_sec)
+                    continue
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': 429, 'error_code': 'HTTP_429'}
+                break
+            if isinstance(http_status, int) and 500 <= http_status < 600:
+                if attempt < max_attempts and requests_used < max_requests:
+                    pause_fn(min(_capture.MAX_BACKOFF, _capture.DEFAULT_BACKOFF * attempt))
+                    continue
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': http_status, 'error_code': f'HTTP_{http_status}'}
+                break
+            if http_status != 200:
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': http_status, 'error_code': f'HTTP_{http_status}'}
+                break
+
+            body = resp.get('body') or b''
+            try:
+                raw = json.loads(body.decode('utf-8'))
+            except (UnicodeDecodeError, ValueError):
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': 'INVALID_JSON'}
+                break
+            if not isinstance(raw, dict) or raw.get('id') != tid:
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': 'UPSTREAM_IDENTITY_MISMATCH'}
+                break
+            try:
+                payload = _admin_importer.capture(raw)
+            except _admin_importer.ImportRejected as exc:
+                final_item = {'tmdb_id': tid, 'status': 'FAILED', 'http_status': 200, 'error_code': str(exc)}
+                break
+
+            raw_bytes = (json.dumps(raw, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
+            norm_bytes = (json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + '\n').encode('utf-8')
+            atomic_write_bytes(job_dir / 'raw' / f'{tid}.json', raw_bytes)
+            atomic_write_bytes(job_dir / 'normalized' / f'{tid}.json', norm_bytes)
+            final_item = {
+                'tmdb_id': tid,
+                'status': 'HTTP_200',
+                'http_status': 200,
+                'raw_sha256': sha256_bytes(raw_bytes),
+                'normalized_sha256': sha256_bytes(norm_bytes),
+            }
+            break
+
+        if final_item is None:
+            final_item = {'tmdb_id': tid, 'status': 'FAILED', 'error_code': 'BUDGET_EXHAUSTED'}
+        items.append(final_item)
+        if final_item.get('status') == 'HTTP_200':
+            succeeded += 1
+        else:
+            failed += 1
+        _save_progress()
+        if auth_failed:
+            break
+
+    _save_progress()
+    overall = 'COMPLETED' if failed == 0 else ('AUTH_FAILED' if auth_failed else ('PARTIAL' if succeeded > 0 else 'FAILED'))
     return {
         'contract': HUB_CONTRACT,
         'rule_version': RULE_VERSION,
@@ -293,6 +413,7 @@ def _capture_tmdb_catalog(plan, archive_path, *, execute, token_env, fetch, prox
         'requests_used': requests_used,
         'request_budget': max_requests,
         'succeeded': succeeded,
+        'resumed': resumed,
         'failed': failed,
         'plan_digest': plan.get('plan_digest'),
     }
@@ -544,6 +665,8 @@ def run_capture(
             fetch=fetch,
             proxy=proxy,
             reuse_connection=reuse_connection,
+            clock=clock,
+            sleep=sleep,
         )
 
     if source == 'douban_archive':

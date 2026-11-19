@@ -960,5 +960,61 @@ class CaptureCliTests(unittest.TestCase):
             self.assertIn('TARGET_FILE_INVALID', run.stderr)
 
 
+class DiscoverRequestValidationTests(unittest.TestCase):
+    def _req(self, url, **overrides):
+        req = {
+            'kind': 'discover',
+            'method': 'GET',
+            'url': url,
+            'headers': {
+                'Accept': 'application/json',
+                'Authorization': 'Bearer ' + TOKEN,
+                'User-Agent': 'mi2-discover-test/1.0',
+            },
+            'timeout': 15.0,
+            'max_bytes': 1500000,
+        }
+        req.update(overrides)
+        return req
+
+    def test_accepts_bounded_popular_top_rated_and_discover_urls(self):
+        from catalog.tmdb_supplement.capture import _validate_request
+
+        valid_urls = [
+            'https://api.themoviedb.org/3/movie/popular?language=zh-CN&page=1',
+            'https://api.themoviedb.org/3/movie/top_rated?language=en-US&page=500',
+            'https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=3&include_adult=false&sort_by=popularity.desc&vote_count.gte=100&vote_average.gte=7.5',
+        ]
+        for url in valid_urls:
+            with self.subTest(url=url):
+                validated_url, headers, timeout, max_bytes = _validate_request(self._req(url))
+                self.assertEqual(validated_url, url)
+                self.assertEqual(headers['Accept'], 'application/json')
+                self.assertEqual(timeout, 15.0)
+                self.assertEqual(max_bytes, 1500000)
+
+    def test_rejects_disallowed_paths_pages_and_query_params(self):
+        from catalog.tmdb_supplement.capture import _validate_request
+
+        bad_cases = [
+            ('https://evil.example/3/movie/popular?language=zh-CN&page=1', 'URL_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/search/movie?language=zh-CN&page=1&query=abc', 'URL_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/movie/popular?language=zh-CN&page=0', 'PAGE_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/movie/popular?language=zh-CN&page=501', 'PAGE_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/movie/popular?language=zh-CN&page=1&sort_by=popularity.desc', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1&include_adult=true', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1&include_adult=false&sort_by=revenue.desc', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1&include_adult=false&vote_count.gte=-1', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1&include_adult=false&vote_average.gte=11', 'URL_QUERY_NOT_ALLOWED'),
+            ('https://api.themoviedb.org/3/discover/movie?language=zh-CN&page=1&include_adult=false&with_keywords=10', 'URL_QUERY_NOT_ALLOWED'),
+        ]
+        for url, expected_code in bad_cases:
+            with self.subTest(url=url):
+                with self.assertRaises(CaptureSecurityError) as caught:
+                    _validate_request(self._req(url))
+                self.assertEqual(caught.exception.code, expected_code)
+
+
 if __name__ == '__main__':
     unittest.main()
