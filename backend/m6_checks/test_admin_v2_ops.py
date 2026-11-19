@@ -392,7 +392,7 @@ def test_interest_match_reports_four_series_and_thresholds():
     assert '短缺' not in json.dumps(data['categories'], ensure_ascii=False)
 
 
-def test_interest_match_insufficient_sample_and_unsupported_country():
+def test_interest_match_insufficient_sample_across_dimensions():
     engine, md = _fixture_engine()
     _movie(engine, md, 1)
     _rows(engine, md, 'genres', [dict(genre_id=1, name_zh='剧情')])
@@ -405,8 +405,76 @@ def test_interest_match_insufficient_sample_and_unsupported_country():
                                            'country', now=NOW)
     assert data['status'] == 'insufficient_sample'
     assert all(item['status'] == 'insufficient_sample' for item in data['categories'])
-    assert country['status'] == 'not_instrumented'
+    assert country['status'] == 'insufficient_sample'
+    assert country['supply'] == {'active_movies': 1, 'classified_movies': 0, 'unknown_movies': 1}
     assert country['categories'] == [] and country['reason']
+    assert 'tmdb_movie_countries/movie_source_records' in country['source']
+
+
+def test_interest_match_country_dimension_aggregates_source_records():
+    engine, md, feedback = _interest_fixture()
+    _movie(engine, md, 9, 'Hidden', 2020, status='hidden')
+    _rows(engine, md, 'movie_source_records', [
+        dict(id=1, movie_id=1, source='tmdb', fetched_at=NOW, metadata_json={
+            'production_countries': [{'iso_3166_1': 'US'}]}),
+        dict(id=2, movie_id=2, source='legacy_movies2', fetched_at=NOW, metadata_json={
+            'production_countries': [{'iso_3166_1': 'US'}, {'iso_3166_1': 'JP'}]}),
+        dict(id=3, movie_id=9, source='tmdb', fetched_at=NOW, metadata_json={
+            'production_countries': [{'iso_3166_1': 'FR'}]}),
+    ])
+    with engine.connect() as connection:
+        data = dashboard.interest_match(connection, _repository(md), feedback, START, END,
+                                        'country', now=NOW)
+    assert data['dimension'] == 'country'
+    assert data['status'] == 'available'
+    assert 'tmdb_movie_countries/movie_source_records' in data['source']
+    assert data['supply'] == {'active_movies': 3, 'classified_movies': 2, 'unknown_movies': 1}
+    assert data['interest']['any_positive_pairs'] == 4
+    assert data['exposure']['attributable_impressions'] == 12
+    assert data['exposure']['clicks'] == 1
+    categories = {item['key']: item for item in data['categories']}
+    assert set(categories) == {'US', 'JP'}
+    assert categories['US']['supply'] == {'movies': 2, 'share': round(2 / 3, 6)}
+    assert categories['US']['interest']['positive_pairs'] == 4
+    assert categories['US']['exposure']['impressions'] == 12
+    assert categories['US']['clicks'] == {'clicks': 1, 'ctr': round(1 / 12, 6)}
+    assert categories['US']['status'] == 'available'
+    assert categories['JP']['supply']['movies'] == 1
+    assert categories['JP']['interest']['positive_pairs'] == 2
+    assert categories['JP']['exposure']['impressions'] == 6
+    assert categories['JP']['status'] == 'insufficient_sample'
+
+
+def test_interest_match_country_prefers_tmdb_movie_countries_with_fallback():
+    engine, md, feedback = _interest_fixture()
+    _movie(engine, md, 9, 'Hidden', 2020, status='hidden')
+    with engine.begin() as connection:
+        connection.execute(text(
+            'CREATE TABLE tmdb_movie_countries ('
+            'movie_id INTEGER NOT NULL, country_iso2 VARCHAR(2) NOT NULL, '
+            'country_name VARCHAR(255), PRIMARY KEY (movie_id, country_iso2))'
+        ))
+        connection.execute(text(
+            "INSERT INTO tmdb_movie_countries (movie_id, country_iso2, country_name) VALUES "
+            "(1, 'cn', 'China'), (1, 'HK', 'Hong Kong'), (9, 'FR', 'France')"
+        ))
+    _rows(engine, md, 'movie_source_records', [
+        dict(id=1, movie_id=1, source='tmdb', fetched_at=NOW, metadata_json={
+            'production_countries': [{'iso_3166_1': 'ZZ'}]}),
+        dict(id=2, movie_id=2, source='legacy_movies2', fetched_at=NOW, metadata_json={
+            'production_countries': [{'iso_3166_1': 'JP'}]}),
+    ])
+    with engine.connect() as connection:
+        data = dashboard.interest_match(connection, _repository(md), feedback, START, END,
+                                        'country', now=NOW)
+    assert data['status'] == 'available'
+    categories = {item['key']: item for item in data['categories']}
+    assert set(categories) == {'CN', 'HK', 'JP'}
+    assert categories['CN']['supply']['movies'] == 1
+    assert categories['CN']['exposure']['impressions'] == 6
+    assert categories['JP']['supply']['movies'] == 1
+    assert categories['JP']['exposure']['impressions'] == 6
+    assert 'ZZ' not in categories and 'FR' not in categories
 
 
 def test_interest_match_decade_dimension_uses_release_year():

@@ -8,7 +8,8 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
 from collections import Counter, defaultdict
 
-from sqlalchemy import (BigInteger, Numeric, and_, case, cast, distinct, func, or_, select, text)
+from sqlalchemy import (BigInteger, Numeric, and_, bindparam, case, cast, distinct, func,
+                        inspect, or_, select, text)
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import AuthSession, User
@@ -534,7 +535,11 @@ def _movie_decades(connection, movie_ids=None):
 
 
 def _movie_countries(connection, movie_ids):
-    """Latest TMDB (fallback legacy_movies2) production countries for bounded ids.
+    """Production countries (ISO2) for bounded active/requested movie ids.
+
+    Reads normalized ``tmdb_movie_countries`` first when available, and falls
+    back to latest TMDB / ``legacy_movies2`` ``movie_source_records`` only for
+    remaining ids (or all ids when the supplement table is absent).
 
     Never ORDER BY a query that selects ``metadata_json`` (avoids MySQL 1038
     Out of sort memory): pick winning PKs on narrow columns first, then read
@@ -543,27 +548,60 @@ def _movie_countries(connection, movie_ids):
     ids = {int(mid) for mid in movie_ids}
     if not ids:
         return {}
+    mapping = {}
+    try:
+        has_supplement = inspect(connection).has_table('tmdb_movie_countries')
+    except SQLAlchemyError:
+        has_supplement = False
+    if has_supplement:
+        if len(ids) <= 200:
+            rows = connection.execute(
+                text('SELECT movie_id, country_iso2 FROM tmdb_movie_countries WHERE movie_id IN :ids')
+                .bindparams(bindparam('ids', expanding=True)),
+                {'ids': sorted(ids)},
+            ).all()
+        else:
+            rows = connection.execute(
+                text('SELECT movie_id, country_iso2 FROM tmdb_movie_countries')
+            ).all()
+        buckets = defaultdict(set)
+        for mid, code in rows:
+            mid = int(mid)
+            if mid not in ids:
+                continue
+            iso2 = str(code or '').strip().upper()
+            if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
+                buckets[mid].add(iso2)
+        for mid, codes in buckets.items():
+            if codes:
+                mapping[mid] = sorted(codes)
+    remaining = sorted(ids - set(mapping))
+    if not remaining:
+        return mapping
     sources = CatalogBase.metadata.tables['movie_source_records']
-    key_rows = connection.execute(
-        select(sources.c.id, sources.c.movie_id, sources.c.source, sources.c.fetched_at)
-        .where(sources.c.movie_id.in_(ids), sources.c.source.in_(('tmdb', 'legacy_movies2')))
-    ).all()
     winners = {}
-    for row_id, mid, source, fetched_at in key_rows:
-        mid = int(mid)
-        rank = (1 if source == 'tmdb' else 0, fetched_at or datetime.min, int(row_id))
-        prev = winners.get(mid)
-        if prev is None or rank > prev[0]:
-            winners[mid] = (rank, int(row_id))
+    for start_idx in range(0, len(remaining), 500):
+        chunk = remaining[start_idx:start_idx + 500]
+        key_rows = connection.execute(
+            select(sources.c.id, sources.c.movie_id, sources.c.source, sources.c.fetched_at)
+            .where(sources.c.movie_id.in_(chunk), sources.c.source.in_(('tmdb', 'legacy_movies2')))
+        ).all()
+        for row_id, mid, source, fetched_at in key_rows:
+            mid = int(mid)
+            rank = (1 if source == 'tmdb' else 0, fetched_at or datetime.min, int(row_id))
+            prev = winners.get(mid)
+            if prev is None or rank > prev[0]:
+                winners[mid] = (rank, int(row_id))
     if not winners:
-        return {}
+        return mapping
     win_ids = [item[1] for item in winners.values()]
     chosen = {}
-    for mid, payload in connection.execute(
-            select(sources.c.movie_id, sources.c.metadata_json)
-            .where(sources.c.id.in_(win_ids))).all():
-        chosen[int(mid)] = payload
-    mapping = {}
+    for start_idx in range(0, len(win_ids), 500):
+        chunk = win_ids[start_idx:start_idx + 500]
+        for mid, payload in connection.execute(
+                select(sources.c.movie_id, sources.c.metadata_json)
+                .where(sources.c.id.in_(chunk))).all():
+            chosen[int(mid)] = payload
     for mid, payload in chosen.items():
         if isinstance(payload, str):
             try:
@@ -747,9 +785,13 @@ def interest_match(connection, repository, feedback, start, end, dimension='genr
     now = now or datetime.utcnow()
     if dimension not in ('genre', 'decade', 'country'):
         raise ValueError('Invalid dimension')
+    source_prefix = {
+        'genre': 'movies/movie_genres/genres',
+        'decade': 'movies',
+        'country': 'movies/tmdb_movie_countries/movie_source_records',
+    }[dimension]
     common = {'status': 'insufficient_sample', 'dimension': dimension, 'as_of': _stamp(now),
-              'source': ('movies/movie_genres/genres + user_movie_events + '
-                         'recommendation_impressions/clicks'),
+              'source': f'{source_prefix} + user_movie_events + recommendation_impressions/clicks',
               'sample_size': {}, 'categories': [], 'reason': None,
               'definition': {
                   'supply': '在架影片按类别去重数；份额分母=全部在架影片（含未分类）；类型多标签，份额之和可超过 100%',
@@ -759,15 +801,13 @@ def interest_match(connection, repository, feedback, start, end, dimension='genr
                   'notice': '仅描述性对比，不输出“短缺/推荐无效”等结论；样本不足不下判断'},
               'thresholds': {'min_interest_pairs': MIN_INTEREST_PAIRS,
                              'min_impressions': MIN_INTEREST_IMPRESSIONS}}
-    if dimension == 'country':
-        return dict(common, status='not_instrumented',
-                    supply={'active_movies': None, 'classified_movies': None, 'unknown_movies': None},
-                    interest={'signal_counts': {}, 'any_positive_pairs': None, 'users': None},
-                    exposure={'impressions': None, 'attributable_impressions': None,
-                              'unattributable_impressions': None, 'clicks': None},
-                    reason='制作国家维度需要逐片国家归属，首批未启用（country）')
     active_rows = _active_movies(connection)
-    mapping = _movie_genres(connection) if dimension == 'genre' else _movie_decades(connection)
+    if dimension == 'genre':
+        mapping = _movie_genres(connection)
+    elif dimension == 'decade':
+        mapping = _movie_decades(connection)
+    else:
+        mapping = _movie_countries(connection, [mid for mid, _ in active_rows])
     total_active = len(active_rows)
     supply = Counter()
     for labels in mapping.values():
