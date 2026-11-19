@@ -9,10 +9,16 @@ import {countryName} from '../../lib/globe/countryDisplay.js'
 
 use([MapChart,TooltipComponent,VisualMapComponent,AriaComponent,SVGRenderer])
 
-type CountryRow={iso2:string;count:number;name?:string}
+type CountryRow={iso2:string;count:number;name?:string;value?:number;samples?:number}
 type BoundaryFeature={type:'Feature';properties:{iso2?:string;iso3?:string;name?:string};geometry:unknown}
 type BoundaryCollection={type:'FeatureCollection';features:BoundaryFeature[]}
-const props=withDefaults(defineProps<{countries:CountryRow[];status?:string}>(),{status:'ready'})
+const props=withDefaults(defineProps<{
+  countries:CountryRow[]
+  status?:string
+  metric?:'count'|'rating'|'coverage'
+  scaleMin?:number
+  scaleMax?:number
+}>(),{status:'ready',metric:'count',scaleMin:0,scaleMax:undefined})
 const emit=defineEmits<{select:[iso2:string]}>()
 const mapHost=ref<HTMLDivElement>(),loading=ref(true),error=ref(''),boundaryCodes=ref<string[]>([]),boundaryByIso2=ref<Record<string,string>>({})
 let chart:EChartsType|undefined,observer:ResizeObserver|undefined,controller:AbortController|undefined
@@ -29,25 +35,33 @@ const state=computed(()=>props.status.toUpperCase())
 const dataPending=computed(()=>['LOADING','PENDING'].includes(state.value))
 const dataUnavailable=computed(()=>['ERROR','UNAVAILABLE','UNKNOWN'].includes(state.value))
 const rows=computed(()=>{
-  const unique=new Map<string,{iso2:string;iso3:string;name:string;count:number}>()
+  const unique=new Map<string,{iso2:string;iso3:string;name:string;count:number;value:number;samples:number}>()
   for(const row of props.countries){
     const iso2=typeof row.iso2==='string'?row.iso2.trim().toUpperCase():''
     const iso3=boundaryByIso2.value[iso2]||COUNTRY_CODES[iso2]
     if(!iso3||!Number.isFinite(row.count)||row.count<0)continue
-    unique.set(iso3,{iso2,iso3,name:countryName(COUNTRY_CODES[iso2]||iso3,row.name||iso2),count:Math.floor(row.count)})
+    const value=typeof row.value==='number'&&Number.isFinite(row.value)?row.value:row.count
+    unique.set(iso3,{iso2,iso3,name:countryName(COUNTRY_CODES[iso2]||iso3,row.name||iso2),count:Math.floor(row.count),value,samples:row.samples||0})
   }
-  return [...unique.values()].sort((a,b)=>b.count-a.count||a.iso3.localeCompare(b.iso3))
+  return [...unique.values()].sort((a,b)=>b.value-a.value||a.iso3.localeCompare(b.iso3))
 })
-const maxCount=computed(()=>Math.max(0,...rows.value.map(row=>row.count)))
-const description=computed(()=>dataUnavailable.value?'制作国家统计暂不可用。':dataPending.value?'正在读取制作国家统计。':rows.value.some(row=>row.count>0)?`世界电影分布，${rows.value.filter(row=>row.count>0).length} 个制作国家或地区有影片。合拍影片可计入多个国家，统计按国家内电影 ID 去重。`:'当前没有可定位的制作国家资料。')
+const maxValue=computed(()=>Math.max(0,...rows.value.map(row=>row.value)))
+const metricLabel=computed(()=>props.metric==='rating'?'有效平均 TMDB 评分':props.metric==='coverage'?'资料覆盖率':'影片数')
+const legendMin=computed(()=>props.metric==='count'?'0':props.metric==='rating'?'0 分':'0%')
+const legendMax=computed(()=>{
+  if(props.metric==='rating')return (props.scaleMax??10).toFixed(0)+' 分'
+  if(props.metric==='coverage')return ((props.scaleMax??1)*100).toFixed(0)+'%'
+  return maxValue.value.toLocaleString('zh-CN')+' 部'
+})
+const description=computed(()=>dataUnavailable.value?'制作国家统计暂不可用。':dataPending.value?'正在读取制作国家统计。':rows.value.some(row=>row.value>0)?`世界电影${metricLabel.value}分布，${rows.value.filter(row=>row.value>0).length} 个制作国家或地区有影片。合拍影片可计入多个国家，统计按国家内电影 ID 去重。`:'当前没有可定位的制作国家资料。')
 const unmappedCount=computed(()=>{
   const supported=new Set(boundaryCodes.value)
   return rows.value.filter(row=>row.count>0&&!supported.has(row.iso3)).length
 })
 
 function values(){
-  const counts=new Map(rows.value.map(row=>[row.iso3,row.count]))
-  return boundaries.map(feature=>({name:feature.properties.iso3!,value:counts.get(feature.properties.iso3!)||0}))
+  const values=new Map(rows.value.map(row=>[row.iso3,row.value]))
+  return boundaries.map(feature=>({name:feature.properties.iso3!,value:values.get(feature.properties.iso3!)}))
 }
 function tooltip(params:{name?:string}){
   if(dataPending.value||dataUnavailable.value)return description.value
@@ -55,13 +69,17 @@ function tooltip(params:{name?:string}){
   const row=rows.value.find(item=>item.iso3===iso3)
   const properties=boundaries.find(feature=>feature.properties.iso3===iso3)?.properties
   const name=row?.name||countryName(COUNTRY_CODES[properties?.iso2||'']||iso3,properties?.name||iso3)
-  return `${name}\n${(row?.count||0).toLocaleString('zh-CN')} 部影片`
+  if(!row)return `${name}\n暂无该指标的可用样本（不按 0 计）`
+  if(props.metric==='rating')return `${name}\n${row.value.toFixed(1)} 分 · ${row.samples.toLocaleString('zh-CN')} 个达标样本`
+  if(props.metric==='coverage')return `${name}\n资料覆盖率 ${(row.value*100).toFixed(1)}% · ${row.count.toLocaleString('zh-CN')} 部影片`
+  return `${name}\n${row.value.toLocaleString('zh-CN')} 部影片`
 }
 function draw(){
   if(!chart)return
-  const max=Math.max(1,maxCount.value)
+  const min=props.metric==='count'?0:(props.scaleMin??0)
+  const max=props.metric==='count'?Math.max(1,maxValue.value):(props.scaleMax??Math.max(1,maxValue.value))
   if(drawn){
-    chart.setOption({aria:{label:{description:description.value}},visualMap:{max},series:[{id:SERIES_ID,data:values(),silent:dataPending.value||dataUnavailable.value}]})
+    chart.setOption({aria:{label:{description:description.value}},visualMap:{min,max},series:[{id:SERIES_ID,data:values(),silent:dataPending.value||dataUnavailable.value}]})
     return
   }
   chart.setOption({
@@ -69,9 +87,9 @@ function draw(){
     backgroundColor:'transparent',
     aria:{enabled:true,label:{description:description.value}},
     tooltip:{trigger:'item',renderMode:'richText',confine:true,formatter:tooltip,backgroundColor:'#1c192b',borderColor:'#6d5a8c',borderWidth:1,padding:[9,12],textStyle:{color:'#f2edf9',fontSize:12,lineHeight:20}},
-    visualMap:{show:false,min:0,max,calculable:false,inRange:{color:['#292235','#4b3967','#77569e','#b9a0f4']}},
+    visualMap:{show:false,min,max,calculable:false,inRange:{color:['#292235','#4b3967','#77569e','#b9a0f4']}},
     series:[{
-      id:SERIES_ID,name:'制作国家影片分布',type:'map',map:MAP_NAME,nameProperty:'iso3',
+      id:SERIES_ID,name:'制作国家'+metricLabel.value+'分布',type:'map',map:MAP_NAME,nameProperty:'iso3',
       roam:true,scaleLimit:{min:1,max:6},...mapLayout,
       selectedMode:'single',silent:dataPending.value||dataUnavailable.value,
       label:{show:false},itemStyle:{areaColor:'#292235',borderColor:'#756587',borderWidth:.55},
@@ -112,7 +130,7 @@ async function loadMap(){
     if(!disposed&&(reason as Error).name!=='AbortError')error.value=(reason as Error).message||'世界地图暂不可用。'
   }finally{if(!disposed)loading.value=false}
 }
-watch([rows,state],draw)
+watch([rows,state,()=>props.metric],draw)
 onMounted(loadMap)
 onBeforeUnmount(()=>{disposed=true;controller?.abort();observer?.disconnect();chart?.dispose()})
 defineExpose({reset})
@@ -130,11 +148,11 @@ defineExpose({reset})
       <div v-else-if="dataUnavailable" class="map-message map-error" role="status">制作国家统计暂不可用。</div>
     </div>
     <div v-if="!error&&!loading&&!dataPending&&!dataUnavailable" class="map-caption">
-      <span class="map-legend" aria-label="颜色越浅代表影片越多"><span>0</span><i aria-hidden="true"/><span>{{maxCount.toLocaleString('zh-CN')}} 部</span></span>
-      <span>{{rows.some(row=>row.count>0)?'拖动平移 · 滚轮缩放':'暂无可定位的国家资料'}}</span>
+      <span class="map-legend" :aria-label="'颜色越浅代表'+metricLabel+'越高'"><span>{{legendMin}}</span><i aria-hidden="true"/><span>{{legendMax}}</span></span>
+      <span>{{rows.some(row=>row.value>0)?'拖动平移 · 滚轮缩放 · 点击国家查看速览':'暂无可定位的国家资料'}}</span>
     </div>
     <p v-if="unmappedCount&&!error&&!loading" class="map-unmapped">另有 {{unmappedCount}} 个国家或地区暂无边界轮廓，仍计入统计。</p>
-    <div class="map-data-table"><table><caption>制作国家影片数，合拍影片可计入多个国家</caption><thead><tr><th>国家或地区</th><th>影片数</th></tr></thead><tbody><tr v-for="row in rows" :key="row.iso3"><td>{{row.name}}</td><td>{{row.count}}</td></tr></tbody></table></div>
+    <div class="map-data-table"><table><caption>制作国家{{metricLabel}}，合拍影片可计入多个国家</caption><thead><tr><th>国家或地区</th><th>{{metricLabel}}</th></tr></thead><tbody><tr v-for="row in rows" :key="row.iso3"><td>{{row.name}}</td><td>{{metric==='count'?row.value:metric==='rating'?row.value.toFixed(1)+' 分 ('+row.samples+' 样本)':(row.value*100).toFixed(1)+'%'}}</td></tr></tbody></table></div>
   </div>
 </template>
 

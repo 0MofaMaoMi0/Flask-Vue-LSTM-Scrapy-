@@ -1,8 +1,11 @@
 <script setup lang="ts">
-import {computed,onBeforeUnmount,onMounted,ref} from 'vue'
+import {computed,onBeforeUnmount,onMounted,ref,watch} from 'vue'
 import {useRouter} from 'vue-router'
 import DashboardChart from './DashboardChart.vue'
 import DashboardWorldMap from './DashboardWorldMap.vue'
+import AdminKpiGroups from '../admin/AdminKpiGroups.vue'
+import {coverageOfCountry,fmtNumber,fmtPercent,loadAnalytics,type AnalyticsPayload} from '../admin/analytics'
+import {formatUtc} from '../admin/adminContext'
 import {countryName} from '../../lib/globe/countryDisplay.js'
 import {ISO2_TO_ISO3} from '../../lib/globe/iso2to3.js'
 
@@ -13,9 +16,16 @@ type Dashboard={
  behavior:{events:number;active_users:number;daily:{date:string;count:number}[];kinds:Count[];top_movies:{movie_id:number;title:string;count:number}[];current:Record<string,number>}
  users:{accounts_active:number;new_in_window:number;sessions_valid:number}
  ai:{status:string;calls:number|null;real_calls?:number;mock_calls?:number;unknown_provenance_calls?:number;real_input_tokens?:number|null;real_output_tokens?:number|null;real_unknown_calls?:number;known_input_tokens:number|null;known_output_tokens:number|null;unknown_calls:number|null;models:Count[];amount:null;amount_status:string}
+ recommendation?:{status?:string;source?:string;sample_size?:number|null;as_of?:string;impressions?:number|null;clicks?:number|null;ctr?:number|null;accounts?:number|null;channels?:{channel:string;impressions:number;clicks:number;ctr:number|null}[];daily?:unknown[];reason?:string|null}|null
+ system?:{status?:string;source?:string;as_of?:string;generated_at?:Record<string,string>;process_started_at?:string;note?:string;ai_failures?:number|null;ai_failure_status?:string}|null
  notes:string[]
 }
-const router=useRouter(),data=ref<Dashboard>(),busy=ref(false),error=ref(''),days=ref(30),autoRefresh=ref(false),selectedCountry=ref('')
+const props=withDefaults(defineProps<{days?:number;country?:string}>(),{days:30,country:''})
+const emit=defineEmits<{navigate:[tab:string];selectCountry:[iso2:string];days:[days:number]}>()
+const router=useRouter(),data=ref<Dashboard>(),busy=ref(false),error=ref(''),days=ref<number>(props.days),autoRefresh=ref(false),selectedCountry=ref(props.country||'')
+const analytics=ref<AnalyticsPayload|null>(null),analyticsStatus=ref<'loading'|'ready'|'error'>('loading'),analyticsError=ref('')
+const recommendation=ref<Dashboard['recommendation']|null>(null),recommendationStatus=ref<'loading'|'ready'|'error'>('loading'),forbidden=ref(false)
+const mapMetric=ref<'count'|'rating'|'coverage'>('count')
 let controller:AbortController|undefined,sequence=0,timer:ReturnType<typeof setInterval>|undefined
 const number=(value:number|null|undefined)=>value==null?'—':new Intl.NumberFormat('zh-CN').format(value)
 const compact=(value:number|null|undefined)=>value==null?'未知':new Intl.NumberFormat('zh-CN',{notation:'compact',maximumFractionDigits:1}).format(value)
@@ -23,10 +33,70 @@ const percent=(n:number|null|undefined,total:number)=>n==null||!total?'—':(n/t
 const nation=(iso2:string)=>countryName((ISO2_TO_ISO3 as Record<string,string>)[iso2]||iso2)
 const currentLabels:Record<string,string>={watched:'已看',favorite:'收藏',want:'想看',rated:'评分',not_interested:'不感兴趣'}
 const qualityLabels=[{key:'tmdb_mapped',name:'TMDB 身份映射'},{key:'posters',name:'电影海报资料'},{key:'cast',name:'演员阵容资料'},{key:'cast_photos',name:'演员照片资料'},{key:'overview',name:'剧情简介'}]
-const mapCountries=computed(()=>data.value?.catalog.countries||[])
-const selected=computed(()=>mapCountries.value.find(x=>x.iso2===selectedCountry.value))
-const topCountries=computed(()=>[...mapCountries.value].sort((a,b)=>b.count-a.count).slice(0,5))
+const fallbackCountries=computed(()=>data.value?.catalog.countries||[])
+interface MapRow{iso2:string;count:number;name?:string;value?:number;samples?:number}
+const coverageAvailable=computed(()=>{
+ const rows=analytics.value?.countries.rows||[]
+ return rows.some(row=>coverageOfCountry(row)!=null)
+})
+const mapRows=computed<MapRow[]>(()=>{
+ const payload=analytics.value
+ if(!payload){
+  return fallbackCountries.value.filter(row=>row.count>0).map(row=>({iso2:row.iso2,count:row.count}))
+ }
+ if(mapMetric.value==='count'){
+  return payload.countries.compact.items
+   .filter(row=>row.movie_count_distinct>0)
+   .map(row=>({iso2:row.country_iso2,count:row.movie_count_distinct,name:row.country_name}))
+ }
+ const rows=payload.countries.rows
+ if(mapMetric.value==='rating'){
+  return rows
+   .filter(row=>row.tmdb_avg_rating.valid_samples>0&&row.tmdb_avg_rating.unweighted_mean!=null)
+   .map(row=>({iso2:row.country_iso2,count:row.movie_count_distinct,name:row.country_name,value:row.tmdb_avg_rating.unweighted_mean as number,samples:row.tmdb_avg_rating.valid_samples}))
+ }
+ return rows.flatMap(row=>{
+  const coverage=coverageOfCountry(row)
+  return coverage==null?[]:[{iso2:row.country_iso2,count:row.movie_count_distinct,name:row.country_name,value:coverage}]
+ })
+})
+const mapStatus=computed(()=>{
+ if(mapRows.value.length)return 'ready'
+ if(analyticsStatus.value==='loading'&&!data.value)return 'loading'
+ if(analyticsStatus.value==='error'&&!fallbackCountries.value.length)return 'error'
+ return 'ready'
+})
+const mapMetricLabel=computed(()=>mapMetric.value==='rating'?'有效平均 TMDB 评分':mapMetric.value==='coverage'?'资料覆盖率':'电影数')
+const mapSource=computed(()=>analytics.value?'TMDB 补采分析':'基础目录快照（兼容旧口径）')
+const selected=computed(()=>mapRows.value.find(x=>x.iso2===selectedCountry.value))
+const topCountries=computed(()=>[...mapRows.value].sort((a,b)=>(b.value??b.count)-(a.value??a.count)).slice(0,5))
 const updated=computed(()=>data.value?new Date(data.value.as_of).toLocaleTimeString('zh-CN',{hour12:false}):'—')
+const scopeLine=computed(()=>{
+ const scope=analytics.value?.scope.catalog
+ if(scope?.status==='UNAVAILABLE')return '目录计数暂不可用（在架目录读取失败）；国家与评分统计仍按补采快照展示。'
+ const total=scope?.active_movies??scope?.active??data.value?.catalog.total
+ const mapped=scope?.tmdb_mapped??scope?.mapped??data.value?.catalog.tmdb_mapped
+ const unmapped=scope?.unmapped??(total!=null&&mapped!=null?Math.max(0,total-mapped):null)
+ if(total==null)return '在架 / 已关联 / 未关联数据暂不可得。'
+ return `在架 ${fmtNumber(total)} / 已关联 ${fmtNumber(mapped)} / 未关联 ${fmtNumber(unmapped)} 不参与 TMDB 国家与评分统计。`
+})
+const cacheLine=computed(()=>{
+ const cache=analytics.value?.scope.cache
+ if(!cache)return ''
+ const water=cache.watermark?.max_updated_at||cache.watermark?.max_fetched_at
+ return `文档缓存${cache.hit?'命中':'冷载'} · 载入 ${formatUtc(cache.loaded_at)}${water?' · 水位 '+formatUtc(water):''}`
+})
+const metricValueText=(row:MapRow)=>{
+ const value=row.value??row.count
+ if(mapMetric.value==='rating')return value.toFixed(1)+' 分'
+ if(mapMetric.value==='coverage')return (value*100).toFixed(1)+'%'
+ return fmtNumber(value)
+}
+const mapSubNote=computed(()=>{
+ if(mapMetric.value==='rating')return '仅显示达到投票门槛的样本；无有效样本的国家不显示 0 分。'
+ if(mapMetric.value==='coverage')return coverageAvailable.value?'按国家资料覆盖率着色，悬停查看影片数。':'按国家拆分的资料覆盖率暂未提供。'
+ return '制作国家分布 · 合拍影片可计入多个国家 · 点击国家打开速览。'
+})
 const states=computed(()=>Object.entries(data.value?.behavior.current||{}).filter(([key])=>key in currentLabels).map(([key,value])=>({name:currentLabels[key]!,value})))
 const genreRows=computed(()=>(data.value?.catalog.genres||[]).filter(x=>x.name!=='未分类').sort((a,b)=>b.count-a.count).slice(0,7).map(x=>({name:x.name,value:x.count})))
 const ratingRows=computed(()=>(data.value?.catalog.ratings||[]).map(x=>({name:x.name,value:x.count})))
@@ -40,19 +110,54 @@ const ratingsOption=computed(()=>({grid:{left:8,right:8,top:18,bottom:8,containL
 const decadesOption=computed(()=>({grid:{left:8,right:10,top:15,bottom:5,containLabel:true},xAxis:{type:'category',data:decadeRows.value.map(x=>x.name),axisLabel:{...chartInk,fontSize:10,rotate:30},axisLine,axisTick:{show:false}},yAxis:{type:'value',minInterval:1,axisLabel:chartInk,splitLine},series:[{type:'bar',data:decadeRows.value.map(x=>x.value),barMaxWidth:24,itemStyle:{color:'#8a9dc9',borderRadius:[3,3,0,0]}}]}))
 const dailyOption=computed(()=>({grid:{left:8,right:16,top:15,bottom:8,containLabel:true},tooltip:{trigger:'axis'},xAxis:{type:'category',boundaryGap:false,data:dailyRows.value.map(x=>x.name),axisLabel:{...chartInk,formatter:(v:string)=>v.slice(5)},axisLine,axisTick:{show:false}},yAxis:{type:'value',minInterval:1,axisLabel:chartInk,splitLine},series:[{name:'行为事件',type:'line',data:dailyRows.value.map(x=>x.value),smooth:false,showSymbol:dailyRows.value.length<10,symbolSize:5,lineStyle:{width:2,color:'#b99aee'},itemStyle:{color:'#c1a7ef'},areaStyle:{color:'rgba(168,132,229,.10)'}}]}))
 
-async function refresh(){
- const request=++sequence;controller?.abort();controller=new AbortController();busy.value=true;error.value=''
+async function loadResourceAnalytics(request:number,signal:AbortSignal){
+ analyticsStatus.value=analytics.value?'ready':'loading';analyticsError.value=''
  try{
-  const r=await fetch('/api/admin/dashboard?days='+days.value,{credentials:'same-origin',signal:controller.signal})
-  if(!r.ok){if(r.status===401||r.status===403)data.value=undefined;throw new Error(r.status===403?'仅管理员可以查看这份数据。':r.status===401?'登录已失效，请重新登录。':'驾驶舱数据暂时不可用，请稍后重试。')}
+  const payload=await loadAnalytics({countryLimit:200,top:10,limit:20},signal)
+  if(request!==sequence)return
+  analytics.value=payload;analyticsStatus.value='ready'
+ }catch(e){
+  if(request!==sequence||(e as Error).name==='AbortError')return
+  analyticsStatus.value='error';analyticsError.value=(e as Error).message
+ }
+}
+async function loadRecommendation(request:number,signal:AbortSignal){
+ recommendationStatus.value=recommendation.value?'ready':'loading'
+ try{
+  const r=await fetch('/api/admin/recommendation-feedback?days='+days.value+'&k=10',{credentials:'same-origin',signal})
+  if(!r.ok)throw new Error(r.status===403?'推荐指标需要管理员权限。':r.status===401?'登录已失效，请重新登录。':'推荐指标暂不可用。')
+  const body=await r.json();if(request!==sequence)return
+  recommendation.value=body?.data||null;recommendationStatus.value='ready'
+ }catch(e){
+  if(request!==sequence||(e as Error).name==='AbortError')return
+  recommendation.value=null;recommendationStatus.value='error'
+ }
+}
+async function refresh(){
+ const request=++sequence;controller?.abort();controller=new AbortController();busy.value=true;error.value='';forbidden.value=false
+ const signal=controller.signal
+ loadResourceAnalytics(request,signal)
+ try{
+  const r=await fetch('/api/admin/dashboard?days='+days.value,{credentials:'same-origin',signal})
+  if(!r.ok){if(r.status===401||r.status===403){data.value=undefined;forbidden.value=true;recommendationStatus.value='error'}throw new Error(r.status===403?'仅管理员可以查看这份数据。':r.status===401?'登录已失效，请重新登录。':'驾驶舱数据暂时不可用，请稍后重试。')}
   const body=await r.json();if(request!==sequence)return
   data.value=body.data
- }catch(e){if(request===sequence&&(e as Error).name!=='AbortError')error.value=(e as Error).message}
+  if(body.data?.recommendation){recommendationStatus.value='ready'}
+  else{loadRecommendation(request,signal)}
+ }catch(e){
+  if(request===sequence&&(e as Error).name!=='AbortError'){
+   error.value=(e as Error).message
+   if(!forbidden.value)loadRecommendation(request,signal)
+  }
+ }
  finally{if(request===sequence)busy.value=false}
 }
-function chooseWindow(value:number){if(days.value===value)return;days.value=value;refresh()}
+function chooseWindow(value:number){if(days.value===value)return;days.value=value;refresh();emit('days',value as 7|30|90)}
 function setAuto(){if(timer)clearInterval(timer);timer=undefined;if(autoRefresh.value)timer=setInterval(()=>{if(!document.hidden&&!busy.value)refresh()},60000)}
 function openMovie(movieId:number){router.push({path:'/movies',hash:'#movie/'+movieId,query:{from:'admin'}})}
+function openCountry(iso2:string){selectedCountry.value=iso2;emit('selectCountry',iso2)}
+watch(()=>props.days,value=>{if(value!==days.value){days.value=value;refresh()}})
+watch(()=>props.country,value=>{selectedCountry.value=value||''})
 onMounted(refresh)
 onBeforeUnmount(()=>{++sequence;controller?.abort();if(timer)clearInterval(timer)})
 defineExpose({refresh})
@@ -68,27 +173,48 @@ defineExpose({refresh})
    </div>
   </div>
   <div v-if="error" class="screen-message failure" role="alert">{{error}}<span v-if="data"> 保留上次成功快照；当前数据未更新。</span><button @click="refresh">重新读取</button></div>
-  <div v-if="!data" class="dashboard-wait" role="status"><span v-if="busy" class="loading-line"/>{{busy?'正在汇总电影、用户行为与模型用量…':'尚未取得驾驶舱数据。'}}</div>
-  <template v-else>
-   <div class="summary-strip">
-    <article><span>在架影片</span><strong>{{number(data.catalog.total)}}<small>部</small></strong><p>全电影库 · ID 去重</p></article>
-    <article><span>TMDB 身份映射</span><strong>{{percent(data.catalog.tmdb_mapped,data.catalog.total)}}</strong><p>{{number(data.catalog.tmdb_mapped)}} 部已建立映射</p></article>
-    <article><span>窗口活跃用户</span><strong>{{number(data.behavior.active_users)}}<small>人</small></strong><p>有效账号 {{number(data.users.accounts_active)}} 个</p></article>
-    <article><span>用户行为事件</span><strong>{{number(data.behavior.events)}}<small>次</small></strong><p>近 {{data.window.days}} 天 · UTC</p></article>
-    <article><span>BYOK 模型派发</span><strong>{{data.ai.status==='AVAILABLE'?number(data.ai.real_calls):'—'}}<small v-if="data.ai.status==='AVAILABLE'">次</small></strong><p>{{data.ai.status==='AVAILABLE'?'Mock '+number(data.ai.mock_calls)+' 次，独立统计':'用量数据暂不可得'}}</p></article>
-   </div>
-   <div class="dashboard-columns">
+  <div v-if="!data && !analytics && !recommendation" class="dashboard-wait" role="status"><span v-if="busy" class="loading-line"/>{{busy?'正在汇总电影、用户行为与模型用量…':'尚未取得驾驶舱数据。'}}</div>
+  <template v-if="data || analytics">
+   <AdminKpiGroups
+     :dashboard="data ?? null"
+     :analytics="analytics"
+     :feedback="recommendation"
+     :recommendation-status="recommendationStatus"
+     :analytics-status="analyticsStatus"
+     :analytics-error="analyticsError"
+     :days="days"
+     @navigate="emit('navigate',$event)"/>
+   <div v-if="!data" class="screen-message failure" role="status">驾驶舱基础快照暂不可用；以上为资源分析接口的数据，单项失败未影响其他模块。</div>
+   <div v-if="data" class="dashboard-columns">
     <div class="dashboard-column profile-column">
      <section class="screen-panel genre-panel"><header><h2>电影类型</h2><span>TOP {{genreRows.length}}</span></header><DashboardChart label="电影类型分布，一部影片可以属于多个类型" :rows="genreRows" :option="genresOption" unit="部"/></section>
      <section class="screen-panel rating-panel"><header><h2>来源评分分布</h2><span>{{data.catalog.rating_source==='douban'?'豆瓣 · 10分制':data.catalog.rating_source}}</span></header><DashboardChart label="来源评分分布，按每部电影同一来源评分统计" :rows="ratingRows" :option="ratingsOption" unit="部"/></section>
      <section class="screen-panel decades-panel"><header><h2>电影年代</h2><span>上映年份分组</span></header><DashboardChart label="按上映年代统计的全库电影数量" :rows="decadeRows" :option="decadesOption" unit="部"/></section>
     </div>
     <div class="dashboard-column discovery-column">
-     <section class="screen-panel world-panel"><header><div><h2>世界电影版图</h2><p>制作国家分布 · 合拍影片可计入多个国家</p></div><strong>{{mapCountries.length}}<small>个国家 / 地区</small></strong></header>
-     <DashboardWorldMap :countries="mapCountries" @select="selectedCountry=$event"/>
-     <div class="country-leaders"><button v-for="(item,index) in topCountries" :key="item.iso2" :class="{selected:selectedCountry===item.iso2}" @click="selectedCountry=item.iso2"><span class="country-rank">{{String(index+1).padStart(2,'0')}}</span><span>{{nation(item.iso2)}}</span><b>{{number(item.count)}}</b></button></div>
-     <p class="map-footnote" aria-live="polite"><span v-if="selected">{{nation(selected.iso2)}}：{{number(selected.count)}} 部；</span>有国家资料 {{number(data.catalog.countries_covered_movies)}} 部，未提供 {{number(data.catalog.countries_unknown_movies)}} 部。</p>
-    </section>
+     <section class="screen-panel world-panel">
+      <header>
+       <div><h2>世界电影版图</h2><p>{{mapSubNote}}</p></div>
+       <div class="map-head-right">
+        <div class="map-metrics" role="group" aria-label="地图指标切换">
+         <button type="button" :aria-pressed="mapMetric==='count'" @click="mapMetric='count'">电影数</button>
+         <button type="button" :aria-pressed="mapMetric==='rating'" @click="mapMetric='rating'">平均评分</button>
+         <button type="button" :aria-pressed="mapMetric==='coverage'" :disabled="!coverageAvailable" :title="coverageAvailable?'':'资料覆盖率字段未就绪'" @click="mapMetric='coverage'">资料覆盖</button>
+        </div>
+        <strong>{{mapRows.length}}<small>{{mapMetric==='count'?'个国家 / 地区':'个有样本国家'}}</small></strong>
+       </div>
+      </header>
+      <DashboardWorldMap :countries="mapRows" :status="mapStatus" :metric="mapMetric" :scale-min="mapMetric==='rating'?0:0" :scale-max="mapMetric==='rating'?10:mapMetric==='coverage'?1:undefined" @select="openCountry"/>
+      <div class="country-leaders"><button v-for="(item,index) in topCountries" :key="item.iso2" :class="{selected:selectedCountry===item.iso2}" @click="openCountry(item.iso2)"><span class="country-rank">{{String(index+1).padStart(2,'0')}}</span><span>{{nation(item.iso2)}}</span><b>{{metricValueText(item)}}</b></button></div>
+      <p class="map-footnote" aria-live="polite">
+       <span v-if="selected">{{nation(selected.iso2)}}：{{metricValueText(selected)}}；</span>{{scopeLine}}
+      </p>
+      <div class="map-source-line">
+       <span>地图来源：{{mapSource}} · {{mapMetricLabel}}</span>
+       <button v-if="selectedCountry" type="button" @click="openCountry(selectedCountry)">打开 {{nation(selectedCountry)}} 速览 →</button>
+      </div>
+      <p v-if="cacheLine" class="cache-line">{{cacheLine}}</p>
+     </section>
      <section class="screen-panel popular-panel"><header><h2>热门互动影片</h2><span>近 {{data.window.days}} 天</span></header><ol v-if="data.behavior.top_movies.length" class="popular-list"><li v-for="(item,index) in data.behavior.top_movies.slice(0,5)" :key="item.movie_id"><button @click="openMovie(item.movie_id)"><span class="rank" :class="{leading:index<3}">{{String(index+1).padStart(2,'0')}}</span><span class="popular-title">{{item.title}}</span><b>{{number(item.count)}}<small>次</small></b></button></li></ol><p v-else class="empty-panel">这个时间窗口还没有影片交互。</p><div class="behavior-states" aria-label="当前用户行为状态，可重叠"><span v-for="item in states" :key="item.name">{{item.name}} <b>{{number(item.value)}}</b></span></div><p class="panel-caption">榜单按事件次数；下方为独立的当前状态，可重叠。</p></section>
     </div>
     <div class="dashboard-column operation-column">
@@ -97,7 +223,7 @@ defineExpose({refresh})
      <section class="screen-panel ai-panel"><header><h2>AI 服务观察</h2><span>近 {{data.window.days}} 天</span></header><template v-if="data.ai.status==='AVAILABLE'"><div class="token-figures"><div><span>真实派发 · 已知输入 Token</span><strong>{{compact(data.ai.real_input_tokens)}}</strong></div><div><span>真实派发 · 已知输出 Token</span><strong>{{compact(data.ai.real_output_tokens)}}</strong></div></div><div class="ai-rows"><div><span>真实派发中用量未确认</span><b>{{number(data.ai.real_unknown_calls)}} 次</b></div><div><span>实际账单</span><b class="unknown-bill">金额未知</b></div></div><div class="model-list"><span>Mock {{number(data.ai.mock_calls)}} 次</span><span>来源未确认 {{number(data.ai.unknown_provenance_calls)}} 次</span></div><p class="panel-caption">仅汇总已有账本，Token 不等于实际扣费。本页不会触发模型调用。</p></template><p v-else class="empty-panel">模型用量暂不可得，不将未知记为零。</p></section>
     </div>
    </div>
-   <footer class="dashboard-footer"><span>统计窗口仅影响行为与模型；电影库和当前状态为全量快照。</span><details><summary>指标口径</summary><ul><li v-for="note in data.notes" :key="note">{{note}}</li></ul></details></footer>
+   <footer v-if="data" class="dashboard-footer"><span>统计窗口仅影响行为与模型；电影库和当前状态为全量快照。</span><details><summary>指标口径</summary><ul><li v-for="note in data.notes" :key="note">{{note}}</li></ul></details></footer>
   </template>
  </section>
 </template>
@@ -108,6 +234,16 @@ defineExpose({refresh})
 .summary-strip{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));margin-bottom:16px;padding:14px 0 16px;border-top:1px solid #ffffff14;border-bottom:1px solid #ffffff14}.summary-strip article{padding:0 22px;border-right:1px solid #ffffff10;min-width:0}.summary-strip article:first-child{padding-left:0}.summary-strip article:last-child{border:0;padding-right:0}.summary-strip article>span{display:block;font-size:11px;color:#b6abc6}.summary-strip strong{display:block;font-size:clamp(25px,2.25vw,38px);font-weight:650;letter-spacing:-.03em;line-height:1.25;margin:6px 0 3px}.summary-strip strong small{font-size:11px;font-weight:400;letter-spacing:0;color:#aa9dbe;margin-left:7px}.summary-strip p{font-size:10px;color:#988ba9;margin:0;line-height:1.6}
 .dashboard-columns{display:grid;grid-template-columns:minmax(220px,1fr) minmax(320px,1.6fr) minmax(240px,1fr);gap:16px;min-height:690px;flex:1}.dashboard-column{display:flex;flex-direction:column;gap:16px;min-width:0;min-height:0}.profile-column .screen-panel{flex:1;min-height:210px}.discovery-column .world-panel{flex:1;min-height:410px}.operation-column .activity-panel{flex:1;min-height:220px}.quality-panel,.ai-panel,.popular-panel{flex:none}.screen-panel{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--panel);border:1px solid #ffffff10;border-radius:12px;padding:17px 17px 13px;overflow:hidden}.screen-panel>header{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-shrink:0;margin-bottom:12px}.screen-panel h2{font-size:13px;line-height:1.5;font-weight:600;margin:0;color:#e6dff0}.screen-panel header>span{font-size:10px;color:#a799b9;white-space:nowrap}.screen-panel :deep(.dashboard-chart){flex:1;min-height:0}
 .world-panel{background:#10101b;padding:19px 22px 12px}.world-panel>header{margin-bottom:0;align-items:flex-start}.world-panel h2{font-size:16px}.world-panel header p{font-size:10px;line-height:1.6;color:#a99bbd;margin:6px 0 0}.world-panel header strong{font-size:25px;font-weight:550;color:#d5bee9;text-align:right;line-height:1}.world-panel header strong small{display:block;font-size:9px;color:#a99aba;font-weight:400;margin-top:7px}.world-panel :deep(.dashboard-world){flex:1;min-height:0;height:auto}.country-leaders{display:flex;gap:7px;flex-shrink:0;border-top:1px solid #ffffff10;padding-top:12px}.country-leaders button{flex:1;min-width:0;position:relative;border:0;border-bottom:2px solid transparent;background:transparent;color:#b8a8ca;text-align:left;padding:3px 0 8px;font-size:10px;cursor:pointer}.country-leaders button span:not(.country-rank){display:block;white-space:nowrap;text-overflow:ellipsis;overflow:hidden;margin:3px 0}.country-leaders b{font-size:16px;font-weight:550;color:#e4d8f0}.country-rank{font-size:9px;color:#a28db5}.country-leaders button:hover,.country-leaders button.selected{border-bottom-color:#a98bd0}.map-footnote{font-size:10px;color:#aa9ab9;line-height:1.7;margin:7px 0 0;flex-shrink:0}
+.map-head-right{display:flex;flex-direction:column;align-items:flex-end;gap:8px;flex-shrink:0}
+.map-metrics{display:flex;gap:2px;padding:2px;background:#171321;border:1px solid #ffffff10;border-radius:7px}
+.map-metrics button{font:inherit;font-size:10px;color:#aea4bf;border:0;background:transparent;border-radius:5px;padding:4px 7px;cursor:pointer}
+.map-metrics button:hover:not(:disabled){color:#fff;background:#332842}
+.map-metrics button[aria-pressed=true]{background:#332842;color:#f0e7fb}
+.map-metrics button:disabled{opacity:.4;cursor:default}
+.map-source-line{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;font-size:10px;color:#9e8fae;margin-top:5px;flex-shrink:0}
+.map-source-line button{border:0;background:transparent;color:#c1a7ef;font:inherit;font-size:10px;cursor:pointer;padding:0}
+.map-source-line button:hover{color:#fff;text-decoration:underline;text-underline-offset:2px}
+.cache-line{font-size:10px;color:#9e8fae;margin:3px 0 0;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .quality-list{display:flex;flex-direction:column;gap:5px;margin:0 0 6px}.quality-copy{display:flex;justify-content:space-between;gap:6px;font-size:10px;line-height:1.2;color:#bfb3cf;margin-bottom:3px}.quality-copy b{font-size:10px;font-weight:500;color:#c4aadf}.quality-list progress{display:block;width:100%;height:3px;border:0;border-radius:2px;overflow:hidden;background:#242030;accent-color:#9e81c6}.quality-list progress::-webkit-progress-bar{background:#242030}.quality-list progress::-webkit-progress-value{background:#9e81c6}.quality-list progress::-moz-progress-bar{background:#9e81c6}.quality-unknown{font-size:10px;color:#ad9dba}.panel-caption{color:#9e8fae;font-size:9px;line-height:1.7;margin:8px 0 0}
 .popular-list{list-style:none;margin:0;padding:0;flex:none;max-height:160px;overflow:auto}.popular-list button{width:100%;display:flex;align-items:center;gap:10px;text-align:left;border:0;background:transparent;color:#c6b9d4;font:inherit;font-size:11px;line-height:1.2;padding:3px 0;cursor:pointer;border-bottom:1px solid #ffffff07}.popular-list button:hover{color:white;background:#ffffff04}.rank{font-size:11px;color:#a28db5;min-width:18px}.rank.leading{color:#c3a9e1}.popular-title{font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.popular-list b{font-size:12px;font-weight:550;color:#d8c2e8}.popular-list b small{font-size:9px;color:#a190af;margin-left:4px;font-weight:400}.behavior-states{display:flex;gap:10px;flex-wrap:wrap;border-top:1px solid #ffffff0e;padding-top:8px;margin-top:8px}.behavior-states span{font-size:9px;color:#a493b3}.behavior-states b{font-weight:550;color:#d7c9e6;margin-left:4px}
 .token-figures{display:flex;gap:10px;margin:4px 0 14px}.token-figures>div{flex:1}.token-figures span{font-size:10px;color:#b2a2c2;display:block}.token-figures strong{display:block;color:#d8b8df;font-size:25px;font-weight:550;margin-top:7px}.ai-rows>div{display:flex;justify-content:space-between;gap:10px;font-size:10px;color:#ad9abd;padding:6px 0;border-top:1px solid #ffffff0c}.ai-rows b{font-weight:500;color:#d3c2e4}.ai-rows b.unknown-bill{color:#cbb38f}.model-list{display:flex;gap:8px;flex-wrap:wrap;margin-top:10px}.model-list span{font-size:9px;color:#ac9cbd;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.model-list b{margin-left:4px;color:#cfbce0;font-weight:500}
