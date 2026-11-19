@@ -5,6 +5,18 @@ Flask 使用的应用表由显式后处理步骤生成或同步。
 
 ## 数据流
 
+### 推荐路径：统一离线归档与清洗入库管线（`mi2-ingest-hub-v1`，零直连写库风险）
+```text
+1) Scrapy 合规采集（MI2_DOUBAN_ARCHIVE_ONLY=1 + ArchiveEnvelopePipeline）
+   -> 非 C 盘标准信封归档目录（envelope.json + supplementary/persons.jsonl, comments.jsonl）
+2) 或历史豆瓣原始 JSON/JSONL：
+   ..\.local-cache\auth-venv\Scripts\python.exe ..\scripts\data_collector.py convert-douban --input F:\...\raw.json --job-id db-01 --archive F:\...\archives --strict --summary-only
+3) 统一离线校验与幂等事务入库（AI 默认加 --summary-only 仅读 <30 行摘要与 commit_seal）：
+   ..\.local-cache\auth-venv\Scripts\python.exe ..\scripts\data_collector.py verify --archive F:\...\archives\db-01 --strict --summary-only
+   ..\.local-cache\auth-venv\Scripts\python.exe ..\scripts\data_collector.py commit --archive F:\...\archives\db-01 --dsn-env MI2_DATABASE_URL --execute --summary-only
+```
+
+### 兼容路径：传统旧表采集流
 ```text
 movie_subject -> subjects
 subjects -> movie_meta -> movies

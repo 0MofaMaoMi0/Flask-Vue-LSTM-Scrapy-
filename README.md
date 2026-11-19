@@ -6,10 +6,12 @@
 
 ```text
 项目源码/
-├─ backend/                 Flask 正式应用
+├─ backend/                 Flask 正式应用（含 catalog/ingest_hub/ 统一采集清洗入库内核）
 ├─ movie-web/               Vue 3 正式前端（Vite，5174）
-├─ scrapy/                  豆瓣采集辅助（保留限速/robots）
+├─ scrapy/                  豆瓣采集辅助（保留限速/robots，支持 ArchiveEnvelopePipeline 离线归档）
 ├─ scripts/                 项目级运行工具
+│  ├─ data_collector.py     统一数据采集与清洗入库 CLI（select / capture / verify / commit / convert-douban）
+│  ├─ tmdb_supplement.py    TMDB 补采兼容 CLI
 │  ├─ launch_frontend.py    canonical 前端启动器
 │  ├─ windows/
 │  │  ├─ start-frontend.cmd 正常前端入口
