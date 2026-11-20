@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref,computed,onMounted,onBeforeUnmount} from 'vue'
 import {useRouter,useRoute} from 'vue-router'
-import M9Sidebar from '../components/M9Sidebar.vue'
+import AppSidebar from '../components/AppSidebar.vue'
 import MovieGlobe from '../components/MovieGlobe.vue'
 import {movieArtwork} from '../services/movieArtwork'
 import {personalRequest} from '../services/personalFeatures'
@@ -170,7 +170,7 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 </script>
 <template>
 <div class="my-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}">
-  <M9Sidebar @expanded-change="expanded=$event"/>
+  <AppSidebar @expanded-change="expanded=$event"/>
   <main class="my-page">
     <header class="my-head"><h1>我的电影</h1><nav class="my-crumb" aria-label="当前视图"><strong>{{viewLabel}}</strong></nav></header>
     <p v-if="busy" class="my-state" role="status">正在读取你的观影记录…</p>
