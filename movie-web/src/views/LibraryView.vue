@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref,computed,watch,onBeforeUnmount,nextTick} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
-import M9Sidebar from '../components/M9Sidebar.vue'
+import AppSidebar from '../components/AppSidebar.vue'
 import {usePosterGrid} from '../composables/usePosterGrid'
 import MovieDetailView from './MovieDetailView.vue'
 import MyMoviesView from './MyMoviesView.vue'
@@ -54,7 +54,7 @@ window.addEventListener('mi2-behavior-changed',onBehavior)
 onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disconnect();window.removeEventListener('mi2-behavior-changed',onBehavior)})
 </script>
 <template>
-<MovieDetailView v-if="route.hash.startsWith('#movie/')"/><MyMoviesView v-else-if="route.hash==='#behavior'"/><div v-else class="library-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="expanded=$event"/><main class="page">
+<MovieDetailView v-if="route.hash.startsWith('#movie/')"/><MyMoviesView v-else-if="route.hash==='#behavior'"/><div v-else class="library-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><AppSidebar @expanded-change="expanded=$event"/><main class="page">
 <h1 class="visually-hidden">全部电影</h1>
 <div class="rail">
 <form class="filters" aria-label="电影筛选和排序" @submit.prevent="apply()">

@@ -1405,3 +1405,40 @@ def test_convert_catalog_to_supplement_handles_partial_release_language_without_
         assert exc_inc.value.code == 'SUPPLEMENT_CAPTURE_INCOMPLETE'
 
 
+def test_tmdb_catalog_capture_truncates_overlong_character_and_original_name(monkeypatch):
+    monkeypatch.setenv('HUB_TEST_TMDB_TOKEN', SYNTHETIC_TOKEN)
+    with non_c_archive() as root:
+        plan = select_targets(source='tmdb_catalog', job_id='cat-long-char', tmdb_ids=[9473])
+
+        def fake_fetch(req):
+            payload = _tmdb_movie_payload(9473, imdb_id='tt0158983')
+            payload['credits']['cast'][0]['character'] = 'Voice ' + ('X' * 342)
+            payload['credits']['cast'][0]['original_name'] = 'Orig ' + ('Y' * 280)
+            return {
+                'status': 200,
+                'headers': {},
+                'body': json.dumps(payload, ensure_ascii=False).encode('utf-8'),
+                'url': req['url'],
+            }
+
+        cap = run_capture(plan, archive_dir=str(root), execute=True, token_env='HUB_TEST_TMDB_TOKEN', fetch=fake_fetch)
+        assert cap['status'] == 'COMPLETED'
+        assert cap['succeeded'] == 1
+        assert cap['failed'] == 0
+
+        job_dir = Path(cap['archive_dir'])
+        raw_doc = json.loads((job_dir / 'raw' / '9473.json').read_text(encoding='utf-8'))
+        norm_doc = json.loads((job_dir / 'normalized' / '9473.json').read_text(encoding='utf-8'))
+        assert len(raw_doc['credits']['cast'][0]['character']) == 348
+        assert len(norm_doc['entries'][0]['character']) == 255
+        assert len(norm_doc['entries'][0]['original_name']) == 255
+
+        verified = verify_archive(job_dir, now=NOW)
+        assert verified['status'] == 'READY_TO_COMMIT'
+        assert verified['counts']['valid'] == 1
+        assert verified['commit_seal']
+
+        committed = commit_archive(job_dir, execute=True, seal=verified['commit_seal'], importer=_FakeCatalogAdapter(), now=NOW)
+        assert committed['status'] == 'COMMITTED'
+        assert committed['counts']['valid'] == 1
+

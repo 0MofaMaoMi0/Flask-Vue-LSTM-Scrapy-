@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import {computed, ref} from 'vue'
 import {useRoute, useRouter} from 'vue-router'
-import M9Sidebar from '../components/M9Sidebar.vue'
+import AppSidebar from '../components/AppSidebar.vue'
 import AdminAIAnalysis from '../components/AdminAIAnalysis.vue'
 import AdminDashboard from '../components/dashboard/AdminDashboard.vue'
-import AdminCatalogPanel from '../components/admin/ops/AdminCatalogPanel.vue'
+import AdminCatalogPanel from '../components/admin/AdminCatalogPanel.vue'
 import AdminUsersPanel from '../components/admin/ops/AdminUsersPanel.vue'
 import AdminRecommendPanel from '../components/admin/ops/AdminRecommendPanel.vue'
 import AdminHealthPanel from '../components/admin/ops/AdminHealthPanel.vue'
@@ -123,7 +123,7 @@ const activeFilterChips = computed(() => {
 
 <template>
   <div class="admin-shell" :style="{'--nav-width': expanded ? '280px' : '52.5px'}">
-    <M9Sidebar @expanded-change="expanded = $event"/>
+    <AppSidebar @expanded-change="expanded = $event"/>
     <main class="admin-page">
       <header class="admin-head">
         <div><h1>数据驾驶舱</h1><p>电影资产 · 用户行为 · 智能服务</p></div>

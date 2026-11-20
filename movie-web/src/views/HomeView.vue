@@ -2,7 +2,7 @@
 import {ref,onMounted,computed,onBeforeUnmount,nextTick,watch} from 'vue'
 import {useRouter} from 'vue-router'
 import {useAuthStore} from '../stores/auth'
-import M9Sidebar from '../components/M9Sidebar.vue'
+import AppSidebar from '../components/AppSidebar.vue'
 import {movieArtwork as art} from '../services/movieArtwork'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 const RAIL=13
@@ -253,7 +253,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
 </script>
 <template>
   <div class="cinema-source" :style="{'--navigation-width':sidebarExpanded?'280px':'52.5px'}">
-    <M9Sidebar @expanded-change="sidebarExpanded=$event"/>
+    <AppSidebar @expanded-change="sidebarExpanded=$event"/>
     <main class="source-content">
       <div v-if="loading" class="source-state source-loading" role="status">
         <h1>正在选片</h1>

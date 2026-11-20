@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import {ref} from 'vue'
-import AdminImports from '../../AdminImports.vue'
-import DataQualityPanel from '../DataQualityPanel.vue'
-import MovieAssetsPanel from '../MovieAssetsPanel.vue'
-import '../admin-ui.css'
+import AdminImports from '../AdminImports.vue'
+import DataQualityPanel from './DataQualityPanel.vue'
+import MovieAssetsPanel from './MovieAssetsPanel.vue'
+import './admin-ui.css'
 
 const props = defineProps<{ country?: string; countryLabel?: string }>()
 const emit = defineEmits<{openMovie: [id: number]}>()

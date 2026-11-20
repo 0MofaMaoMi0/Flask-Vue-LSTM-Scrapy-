@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref,shallowRef,computed,onMounted,onBeforeUnmount,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
-import M9Sidebar from '../components/M9Sidebar.vue'
+import AppSidebar from '../components/AppSidebar.vue'
 import {accountSettingsTarget} from '../services/accountSettings'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
@@ -52,7 +52,7 @@ watch(()=>route.fullPath,()=>{if(channels.value.length)load()})
 onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
 </script>
 <template>
- <div class="recommend-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><M9Sidebar @expanded-change="expanded=$event"/>
+ <div class="recommend-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><AppSidebar @expanded-change="expanded=$event"/>
  <main class="recommend-main"><h1 class="visually-hidden">推荐频道</h1>
 <div class="top-actions"><router-link to="/home">返回影院首页</router-link></div>
  <nav class="channel-nav" aria-label="推荐频道"><button v-for="c in channels" :key="c.id" :aria-pressed="channel===c.id" :class="{active:channel===c.id}" @click="change(c.id)">{{c.title}}</button></nav>
