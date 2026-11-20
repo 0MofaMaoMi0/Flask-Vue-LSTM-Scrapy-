@@ -1,46 +1,41 @@
 # 项目源码文档导航
 
-详细说明、交接、计划、巡检与总结仍统一放在仓库外的 `项目工作日志/`；本目录只保留源码仓库内的简洁导航，不另造大报告或平行“最新版”。
+详细开发记录、交接、运维与验收文档统一保存在仓库外的 `项目工作日志/`；本文件仅保留源码仓库内的常用入口与结构导航。
 
-## 先看现行入口
+## 现行文档入口
 
 | 用途 | 位置 |
 |---|---|
+| 仓库总览、脚本与边界说明 | [README.md](../README.md) |
+| 一键启动说明 | [启动说明.md](../启动说明.md) |
 | 当前项目总览（权威现状） | [`项目工作日志/00-索引/当前项目总览.md`](../../项目工作日志/00-索引/当前项目总览.md) |
 | 项目工作日志索引 | [`项目工作日志/00-索引/README.md`](../../项目工作日志/00-索引/README.md) |
-| M10 冻结交付与已知限制 | [`项目工作日志/06-开发与验证/M10-20261115/final-delivery/`](../../项目工作日志/06-开发与验证/M10-20261115/final-delivery/) |
-| 旧源码清理执行核验 | [`项目工作日志/05-环境与运维/旧源码清理-20261115/最终清理核验.json`](../../项目工作日志/05-环境与运维/旧源码清理-20261115/最终清理核验.json) |
-| 本次标准结构整理结果 | [`项目工作日志/05-环境与运维/项目结构整理-20261115/最终结构核验.json`](../../项目工作日志/05-环境与运维/项目结构整理-20261115/最终结构核验.json) |
+| 统一数据采集与清洗使用手册 | [`项目工作日志/06-开发与验证/统一采集清洗组件-20261119/`](../../项目工作日志/06-开发与验证/统一采集清洗组件-20261119/) |
 | 历史保留资产说明 | [legacy/README.md](../legacy/README.md) |
 
-## 标准目录与入口
+## 目录结构
 
 ```text
 项目源码/
-├─ backend/       Flask 正式应用
-├─ movie-web/     Vue 3 正式前端
-├─ scrapy/        豆瓣采集辅助
-├─ scripts/       canonical 启动器与 Windows 入口
+├─ backend/       模块化 Flask 正式后端（含 catalog/ingest_hub/）
+├─ movie-web/     Vue 3 + Vite 正式前端（5174）
+├─ scrapy/        豆瓣采集辅助（支持 ArchiveEnvelopePipeline 离线归档）
+├─ scripts/       统一启动器、隧道维护、统一采集清洗 CLI（data_collector.py）与 Windows 入口
 ├─ docs/          本导航
-├─ data/          数据/素材
-└─ legacy/        旧 Flask/vue 保护物
+├─ data/          数据与素材
+└─ legacy/        历史保留资产（模型/词表/静态保护物）
 ```
 
-Windows 日常入口：
+## 常用入口与运行链路
+
+- **一键启动（隧道 + 前端 + 浏览器）**：双击或执行根目录 `启动项目.cmd`（支持 `--check` / `--health` / `--no-browser`）
+- **仅前端 / 仅后端检查**：
 
 ```bat
 scripts\windows\start-frontend.cmd
-scripts\windows\check-backend.cmd
 scripts\windows\start-frontend.cmd --check
+scripts\windows\check-backend.cmd
 ```
 
-当前运行链路为 5174 前端 → 3629 受控 SSH 隧道 → 隔离 Ubuntu 5000；不要使用旧 8091 作为正常后端，也不要把只读验收端口 1461/3575 当入口。配置、秘密、数据、模型和环境边界见仓库根 `README.md`。
-
-## 历史文档去向
-
-- `docs/M9_HANDOFF_20261112.md`、`docs/M9_LOOP_D_FEEDBACK_DESIGN.md` 是历史设计/交接材料，保留供追溯，不代表当前运行入口。
-- 2026-10-31 的盘点、交接和阶段报告是历史记录，不再称为“最新”；其归档位置和文件去向以 `项目工作日志/00-索引/README.md` 及其中链接为准。
-- 原 `docs/architecture.md`、`data-flow.md`、`troubleshooting.md` 已迁出/归档，恢复方法与历史提交见工作日志索引；不要在 `docs/` 重建重复版本。
-- 旧 Flask/Vue2 代码与保护物不再位于仓库根；历史结构只在 `legacy/` 或旧检查点中理解，当前实施以 `backend/`、`movie-web/` 为准。
-
-M9 仍为桌面限定结项状态；M10 交付仍待所有者验收。文档入口更新不代表历史验收状态、凭据事件或未归因 HTTP201 状态改变。
+- **统一采集与清洗入库 CLI**：`.local-cache\auth-venv\Scripts\python.exe scripts\data_collector.py --help`
+- **当前运行链路**：本机前端 `127.0.0.1:5174` → 受控 SSH 隧道 `127.0.0.1:3629` → 隔离 Ubuntu 后端 `127.0.0.1:5000`
