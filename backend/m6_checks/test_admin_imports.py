@@ -25,6 +25,22 @@ def test_capture_reuses_movie_validator_and_rejects_bad_assets():
  for changed in ({'adult':True},{'poster_path':'http://internal/'},{'vote_count':-1},{'genres':'bad'}):
   with pytest.raises((ValueError,TypeError)):capture(dict(raw(),**changed))
 
+def test_capture_truncates_overlong_character_and_original_name_while_preserving_strict_validation():
+ from catalog.admin_importer import validate
+ base=raw()
+ base['credits']['cast'][0]['character']='C'*348
+ base['credits']['cast'][0]['original_name']='O'*300
+ captured=capture(base)
+ entry=captured['entries'][0]
+ assert len(entry['character'])==255 and entry['character']=='C'*255
+ assert len(entry['original_name'])==255 and entry['original_name']=='O'*255
+ validate(captured)
+ for bad_patch in ({'name':'N'*256},{'character':12345},{'original_name':['bad']}):
+  bad=raw();bad['credits']['cast'][0].update(bad_patch)
+  with pytest.raises(ImportRejected,match='INVALID_PERSON_TEXT'):capture(bad)
+ direct=capture(raw());direct['entries'][0]['character']='C'*256
+ with pytest.raises(ImportRejected,match='INVALID_PERSON_TEXT'):validate(direct)
+
 def test_durable_approval_idempotence_and_ownership(tmp_path):
  adapter,jobs,job=fixture(tmp_path)
  with pytest.raises(PermissionError):jobs.get(job['job_id'],2)

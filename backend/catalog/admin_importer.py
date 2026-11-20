@@ -25,6 +25,8 @@ def capture(raw):
         for p in rows:
             if type(p) is not dict:raise ImportRejected('INVALID_PERSON')
             entry={k:p.get(k) for k in ('id','name','original_name','credit_id','character','order','profile_path')}
+            for field in ('original_name','character'):
+                if type(entry[field]) is str and len(entry[field])>255:entry[field]=entry[field][:255]
             entry['role']=role;entries.append(entry)
     payload['entries']=entries
     validate(payload)
