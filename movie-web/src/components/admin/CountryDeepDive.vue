@@ -140,7 +140,7 @@ const topGenres = computed(() => (row.value?.top_genres || []).slice(0, 10))
 const maxGenre = computed(() => Math.max(1, ...topGenres.value.map(item => item.count)))
 const decades = computed(() => (row.value?.decade_distribution || []).filter(item => item.count > 0))
 const maxDecade = computed(() => Math.max(1, ...decades.value.map(item => item.count)))
-const matrix = computed(() => row.value?.genre_by_decade || [])
+const matrix = computed(() => (row.value?.genre_by_decade || []).slice(0, 15))
 const matrixDecades = computed(() => {
   const set = new Set<number>()
   for (const line of matrix.value) for (const cell of line.decades) if (cell.decade != null) set.add(cell.decade)
@@ -184,9 +184,10 @@ async function load() {
   controller.value?.abort()
   const current = new AbortController()
   controller.value = current
+  if (row.value && row.value.country_iso2 !== iso2.value) payload.value = null
   busy.value = true; error.value = ''
   try {
-    payload.value = await loadAnalytics({
+    const next = await loadAnalytics({
       countries: [iso2.value],
       detailCountry: iso2.value,
       genre: props.filters.genre || undefined,
@@ -201,8 +202,12 @@ async function load() {
       order: orderInput.value,
       top: 10, limit: PAGE, offset: offset.value,
     }, current.signal)
+    if (controller.value !== current || current.signal.aborted) return
+    payload.value = next
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') error.value = (e as Error).message
+    if (controller.value === current && !current.signal.aborted && (e as Error).name !== 'AbortError') {
+      error.value = (e as Error).message
+    }
   } finally {
     if (controller.value === current) busy.value = false
   }
@@ -214,16 +219,16 @@ function page(delta: number) {
   emit('update:detail-offset', next)
   load()
 }
-watch(() => [props.country, props.filters.genre, props.filters.decade, props.filters.yearFrom, props.filters.yearTo, props.filters.minVotes], () => {
-  offset.value = Math.max(0, props.detailOffset ?? 0)
-  load()
-})
-watch(() => props.detailOffset, value => {
-  const next = Math.max(0, value ?? 0)
-  if (next === offset.value) return
-  offset.value = next
-  load()
-})
+watch(
+  () => [props.country, props.filters.genre, props.filters.decade, props.filters.yearFrom, props.filters.yearTo, props.filters.minVotes, props.detailOffset] as const,
+  ([nextCountry, nextGenre, nextDecade, nextFrom, nextTo, nextVotes, nextOffset], [prevCountry, prevGenre, prevDecade, prevFrom, prevTo, prevVotes]) => {
+    const filterChanged = nextCountry !== prevCountry || nextGenre !== prevGenre || nextDecade !== prevDecade || nextFrom !== prevFrom || nextTo !== prevTo || nextVotes !== prevVotes
+    const normalizedOffset = Math.max(0, nextOffset ?? 0)
+    if (!filterChanged && normalizedOffset === offset.value) return
+    offset.value = normalizedOffset
+    load()
+  },
+)
 watch(() => props.filters, value => {
   genreInput.value = value.genre; decadeInput.value = value.decade
   yearFromInput.value = value.yearFrom == null ? '' : String(value.yearFrom)
@@ -232,6 +237,7 @@ watch(() => props.filters, value => {
 })
 onMounted(load)
 onBeforeUnmount(() => controller.value?.abort())
+defineExpose({refresh: load})
 </script>
 
 <template>
@@ -296,7 +302,7 @@ onBeforeUnmount(() => controller.value?.abort())
       <p class="adm-note">一套筛选联动 A–F 全部模块；筛选作用于制作国家、类型、上映年份范围与评分门槛，年代筛选过滤的是影片发行年份，不是统计观察日期。</p>
     </div>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }} <button type="button" class="link-btn" @click="load">重试</button></p>
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="row">（已保留上一份可用快照）</span> <button type="button" class="link-btn" @click="load">重试</button></p>
     <p v-else-if="busy && !row" class="adm-state">正在读取 {{ zh(iso2) }} 的深度统计…</p>
 
     <template v-if="row">
@@ -473,7 +479,7 @@ onBeforeUnmount(() => controller.value?.abort())
           <table>
             <thead><tr><th>片名</th><th>年份</th><th>类型</th><th>制作国家</th><th class="num">TMDB 评分</th><th class="num">票数</th><th class="num">热度</th><th>缺失主题 / 原因</th></tr></thead>
             <tbody>
-              <tr v-for="movie in details?.items || []" :key="movie.movie_id">
+              <tr v-for="movie in (details?.items || []).slice(0, PAGE)" :key="movie.movie_id">
                 <td><button type="button" class="link-btn" @click="emit('openMovie', movie.movie_id)">{{ movie.title }}</button><br><small>#{{ movie.movie_id }} · TMDB {{ movie.tmdb_id ?? '—' }}</small></td>
                 <td>{{ movie.release_year || '—' }}</td>
                 <td><small>{{ movie.genres.slice(0, 3).join(' / ') || '—' }}</small></td>
@@ -513,33 +519,33 @@ onBeforeUnmount(() => controller.value?.abort())
 <style scoped>
 .deep-view{min-width:0}
 .deep-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:2px 0 16px}
-.deep-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:26px;font-weight:500;color:#f3eee4}
-.deep-en{margin-left:10px;font-size:11px;letter-spacing:.06em;color:#a9a294;font-family:var(--sans)}
-.deep-meta{margin:0;font-size:10.5px;color:#8f8a80;line-height:1.7}
+.deep-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:26px;font-weight:500;color:var(--mi-text-ivory)}
+.deep-en{margin-left:10px;font-size:11px;letter-spacing:.06em;color:var(--mi-text-secondary);font-family:var(--sans)}
+.deep-meta{margin:0;font-size:10.5px;color:var(--mi-text-muted);line-height:1.7}
 .filter-panel{padding:16px 18px}
 .filter-panel .adm-note{margin-top:4px}
 .vertical{flex-direction:column;gap:6px;align-items:flex-start}
-.mini-title{margin:0 0 6px;font-size:10.5px;color:#a9a294;letter-spacing:.04em}
+.mini-title{margin:0 0 6px;font-size:10.5px;color:var(--mi-text-secondary);letter-spacing:.04em}
 .adm-two-col.compact{gap:12px}
-.link-btn{border:0;background:transparent;color:#dcc49b;font:inherit;font-size:12px;cursor:pointer;padding:0;text-align:left;text-decoration:underline;text-underline-offset:2px}
-.link-btn:hover{color:#fff}
+.link-btn{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:12px;cursor:pointer;padding:0;text-align:left;text-decoration:underline;text-underline-offset:2px}
+.link-btn:hover{color:var(--mi-text)}
 .adm-bar.clickable{cursor:pointer;border-radius:5px;padding:2px 4px;margin:-2px -4px;transition:background-color .15s ease}
-.adm-bar.clickable:hover,.adm-bar.clickable:focus-visible{background:rgba(175,145,231,.10)}
-.adm-bar.clickable:focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
-.detail-filters{border-top:1px dashed rgba(241,236,226,.10);margin-top:12px;padding-top:10px}
+.adm-bar.clickable:hover,.adm-bar.clickable:focus-visible{background:var(--mi-chip-hover)}
+.adm-bar.clickable:focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
+.detail-filters{border-top:1px dashed var(--mi-border);margin-top:12px;padding-top:10px}
 .detail-filter-line{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap}
-.detail-label{font-size:10.5px;color:#8f83a0;align-self:center;white-space:nowrap}
+.detail-label{font-size:10.5px;color:var(--mi-text-muted);align-self:center;white-space:nowrap}
 .adm-field.inline{flex:0 0 auto}
 .adm-field.inline select{padding:6px 8px}
 .missing-picks{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:9px}
-.missing-pick{display:inline-flex;align-items:center;gap:5px;border:1px solid rgba(241,236,226,.14);border-radius:999px;padding:4px 9px;font-size:10.5px;color:#a9a294;cursor:pointer;background:#131219}
-.missing-pick input{accent-color:#9e81c6;margin:0}
-.missing-pick.on{border-color:#8e72b8;color:#e7dcf7;background:#1d1827}
-.detail-chip{border-color:#8e72b8;color:#d9c9ef}
-.missing-tag{display:inline-block;font-size:10px;line-height:1.5;border-radius:3px;padding:0 4px;margin:0 3px 2px 0;background:#22202a;color:#b7a9c6;white-space:nowrap}
-.missing-tag.reason-empty{color:#9b9388;background:#20201f}
-.missing-tag.reason-failed{color:#e7b2a8;background:#2d2020}
-.missing-tag.reason-missing,.missing-tag.reason-not_fetched{color:#dcc49b;background:#2a2419}
-.missing-ok{color:#8f8a80;font-size:10px}
+.missing-pick{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--mi-border);border-radius:999px;padding:4px 9px;font-size:10.5px;color:var(--mi-text-secondary);cursor:pointer;background:var(--mi-surface-warm)}
+.missing-pick input{accent-color:var(--mi-accent);margin:0}
+.missing-pick.on{border-color:var(--mi-accent-border);color:var(--mi-text);background:var(--mi-accent-soft)}
+.detail-chip{border-color:var(--mi-accent-border);color:var(--mi-accent-text)}
+.missing-tag{display:inline-block;font-size:10px;line-height:1.5;border-radius:3px;padding:0 4px;margin:0 3px 2px 0;background:var(--mi-surface-raised);color:var(--mi-text-secondary);white-space:nowrap}
+.missing-tag.reason-empty{color:var(--mi-text-muted);background:var(--mi-surface-raised)}
+.missing-tag.reason-failed{color:var(--mi-negative);background:var(--mi-negative-soft)}
+.missing-tag.reason-missing,.missing-tag.reason-not_fetched{color:var(--mi-warning);background:var(--mi-warning-soft)}
+.missing-ok{color:var(--mi-text-muted);font-size:10px}
 @media(max-width:760px){.deep-head{align-items:flex-start}}
 </style>

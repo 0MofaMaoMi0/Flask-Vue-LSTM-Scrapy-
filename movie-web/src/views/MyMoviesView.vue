@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {ref,computed,onMounted,onBeforeUnmount} from 'vue'
+import {ref,computed,watch,onMounted,onBeforeUnmount} from 'vue'
 import {useRouter,useRoute} from 'vue-router'
 import AppSidebar from '../components/AppSidebar.vue'
 import MovieGlobe from '../components/MovieGlobe.vue'
@@ -18,14 +18,18 @@ const countryMap=ref<Record<string,string[]>>({...MOVIE_COUNTRIES})
 function countriesOf(id:any){return countryMap.value[String(id)]||[]}
 const metric=ref('catalog_count'),selected=ref(''),globeSearch=ref(''),labels=ref<string[]>([]),autoRotate=ref(true),globeRef=ref<any>(null)
 const controller=new AbortController()
+let loadController:AbortController|undefined,loadSeq=0,selfBehaviorEvent=false
+const MAX_CATALOG_PAGES=10,LIST_STEP=48,listLimit=ref(LIST_STEP)
 const viewLabel=computed(()=>({globe:'世界电影分布',seen:'观看记录',favorite:'收藏清单',want:'想看清单',insights:'观影数据'} as Record<Tab,string>)[tab.value])
 const tab=computed<Tab>(()=>{const v=String(route.query.view||'globe');return (['globe','seen','favorite','want','insights'] as string[]).includes(v)?v as Tab:'globe'})
+watch(tab,()=>{listLimit.value=LIST_STEP})
 const list=computed(()=>{
   const all=movies.value
   if(tab.value==='seen')return all.filter(m=>behavior.value[String(m.movie_id)]?.watched)
   if(tab.value==='favorite')return all.filter(m=>behavior.value[String(m.movie_id)]?.favorite)
   return all.filter(m=>behavior.value[String(m.movie_id)]?.want)
 })
+const visibleList=computed(()=>list.value.slice(0,listLimit.value))
 const watchedMovies=computed(()=>movies.value.filter(m=>behavior.value[String(m.movie_id)]?.watched))
 const insights=computed(()=>{
   const list=watchedMovies.value
@@ -138,35 +142,74 @@ async function saveEdit(){
     }
     behavior.value=(await api('behavior')).state
     const previous=movieNotes.value[String(m.movie_id)]
-    if(notesReady.value&&editNote.value!==(previous?.note||'')){const saved=await personalRequest('movie-notes',{movie_id:m.movie_id,note:editNote.value,version:previous?.version||0});movieNotes.value[String(m.movie_id)]=saved}
-    window.dispatchEvent(new Event('mi2-behavior-changed'))
+    if(notesReady.value&&editNote.value!==(previous?.note||'')){const saved=await personalRequest('movie-notes',{movie_id:m.movie_id,note:editNote.value,version:previous?.version||0},controller.signal);movieNotes.value[String(m.movie_id)]=saved}
+    selfBehaviorEvent=true;try{window.dispatchEvent(new Event('mi2-behavior-changed'))}finally{selfBehaviorEvent=false}
     editOpen.value=false;editMovie.value=null
   }catch(e){editError.value=(e as Error).message}finally{editSaving.value=false}
 }
 function open(m:any){router.push({path:'/movies',query:{from:'behavior',view:tab.value},hash:'#movie/'+m.movie_id})}
-async function api(path:string){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:controller.signal});let body:any=null;try{body=await r.json()}catch{body=null};if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':'个人片库暂时不可用，请重试。');if(!body||body.code!=='OK'||body.data==null)throw new Error('个人片库响应异常，请重试。');return body.data}
-async function load(){busy.value=true;error.value='';try{
-  const all:any[]=[];let offset=0
-  while(true){const page=await api('movies?limit=100&sort=id&offset='+offset);all.push(...page.items);if(page.items.length<page.limit)break;offset+=page.limit}
-  const state=await api('behavior')
-  movies.value=all
-  behavior.value=state.state||{}
-  try{movieNotes.value=(await personalRequest('movie-notes')).items;notesReady.value=true}catch{notesReady.value=false}
+async function api(path:string,outerSignal?:AbortSignal){
+  const signals=[controller.signal,AbortSignal.timeout(20000)];if(outerSignal)signals.push(outerSignal)
+  const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:AbortSignal.any(signals)});let body:any=null;try{body=await r.json()}catch{body=null}
+  if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'个人片库缓存正在预热，请稍后重试。':'个人片库暂时不可用，请重试。')
+  if(!body||body.code!=='OK'||body.data==null)throw new Error('个人片库响应异常，请重试。')
+  return body.data
+}
+async function load(){
+  const ticket=++loadSeq;loadController?.abort();const current=new AbortController();loadController=current
+  const signal=current.signal
+  busy.value=true;error.value=''
   try{
-    const cc=await api('production-countries')
-    const next:Record<string,string[]>={}
-    for(const it of cc.items||[]){
-      const isos=(it.countries||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[c.iso2]).filter(Boolean)
-      if(isos.length)next[String(it.movie_id)]=isos
+    const [firstPage,state]=await Promise.all([api('movies?limit=100&sort=id&offset=0',signal),api('behavior',signal)])
+    if(ticket!==loadSeq||signal.aborted)return
+    const byId=new Map<number,any>()
+    const addRows=(rows:any[])=>{for(const item of rows||[])if(item?.movie_id!=null&&!byId.has(item.movie_id))byId.set(item.movie_id,item)}
+    const firstItems=firstPage.items||[]
+    addRows(firstItems)
+    const pageLimit=Number(firstPage.limit)||100
+    let reachedEnd=firstItems.length<pageLimit
+    let pageIndex=1
+    while(!reachedEnd&&pageIndex<MAX_CATALOG_PAGES){
+      const batchOffsets:number[]=[]
+      for(let i=0;i<3&&pageIndex<MAX_CATALOG_PAGES;i++,pageIndex++)batchOffsets.push(pageIndex*pageLimit)
+      const pages=await Promise.all(batchOffsets.map(off=>api('movies?limit='+pageLimit+'&sort=id&offset='+off,signal)))
+      if(ticket!==loadSeq||signal.aborted)return
+      for(const p of pages){
+        const items=p.items||[]
+        addRows(items)
+        if(items.length<pageLimit)reachedEnd=true
+      }
     }
-    if(Object.keys(next).length)countryMap.value=next
-  }catch{}
-}catch(e){if(!controller.signal.aborted)error.value=(e as Error).message}finally{busy.value=false}}
+    if(!reachedEnd){
+      const statePages=await Promise.all([
+        api('movies?limit=100&sort=updated&state=watched',signal).catch(()=>({items:[]})),
+        api('movies?limit=100&sort=updated&state=favorite',signal).catch(()=>({items:[]})),
+        api('movies?limit=100&sort=updated&state=want',signal).catch(()=>({items:[]})),
+      ])
+      if(ticket!==loadSeq||signal.aborted)return
+      for(const sp of statePages)addRows(sp.items||[])
+    }
+    movies.value=[...byId.values()]
+    behavior.value=state.state||{}
+    try{const notes=await personalRequest('movie-notes',undefined,signal);if(ticket===loadSeq&&!signal.aborted){movieNotes.value=notes.items;notesReady.value=true}}catch{if(ticket===loadSeq)notesReady.value=false}
+    try{
+      const cc=await api('production-countries',signal)
+      if(ticket!==loadSeq||signal.aborted)return
+      const next:Record<string,string[]>={}
+      for(const it of cc.items||[]){
+        const isos=(it.countries||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[c.iso2]).filter(Boolean)
+        if(isos.length)next[String(it.movie_id)]=isos
+      }
+      if(Object.keys(next).length)countryMap.value=next
+    }catch{}
+  }catch(e){if(ticket===loadSeq&&!controller.signal.aborted&&!signal.aborted&&(e as Error).name!=='AbortError')error.value=(e as Error).message}
+  finally{if(ticket===loadSeq)busy.value=false}
+}
 function closeFiltersOnOutside(e:PointerEvent){if(filterOpen.value&&!(e.target as HTMLElement)?.closest?.('.g-rank'))filterOpen.value=false}
 function closeFiltersOnEscape(e:KeyboardEvent){if(e.key!=='Escape')return;filterOpen.value=false;if(editOpen.value)closeEdit()}
-const refreshBehavior=()=>api('behavior').then(b=>behavior.value=b.state||{}).catch(()=>{error.value='个人状态刷新失败，请重试。'})
+const refreshBehavior=()=>{if(selfBehaviorEvent)return;api('behavior').then(b=>behavior.value=b.state||{}).catch(()=>{if(!controller.signal.aborted)error.value='个人状态刷新失败，请重试。'})}
 onMounted(()=>{load();window.addEventListener('mi2-behavior-changed',refreshBehavior);document.addEventListener('pointerdown',closeFiltersOnOutside);document.addEventListener('keydown',closeFiltersOnEscape)})
-onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior-changed',refreshBehavior);document.removeEventListener('pointerdown',closeFiltersOnOutside);document.removeEventListener('keydown',closeFiltersOnEscape)})
+onBeforeUnmount(()=>{++loadSeq;loadController?.abort();controller.abort();window.removeEventListener('mi2-behavior-changed',refreshBehavior);document.removeEventListener('pointerdown',closeFiltersOnOutside);document.removeEventListener('keydown',closeFiltersOnEscape)})
 </script>
 <template>
 <div class="my-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}">
@@ -278,7 +321,7 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
       <table class="records-table">
         <thead><tr><th scope="col">影片</th><th scope="col">观看时间</th><th scope="col">评分</th><th scope="col">收藏</th><th scope="col">操作</th></tr></thead>
         <tbody>
-          <tr v-for="m in list" :key="m.movie_id">
+          <tr v-for="m in visibleList" :key="m.movie_id">
             <td class="rec-film"><button type="button" class="rec-open" :aria-label="'查看'+m.title+'详情'" @click="open(m)"><img v-if="(movieArtwork[String(m.movie_id)]?.poster||m.poster)&&!failed['p'+m.movie_id]" :src="movieArtwork[String(m.movie_id)]?.poster||m.poster" :alt="m.title+'海报'" loading="lazy" @error="failed['p'+m.movie_id]=true"/><span v-else class="rec-thumb">{{m.title.slice(0,1)}}</span><span><b>{{m.title}}</b><small>{{m.release_year||'年份未知'}}<template v-if="genres(m)"> · {{genres(m)}}</template></small></span></button></td>
             <td>{{watchedAt(m)}}</td>
             <td>{{stateOf(m).rating?'★ '+stateOf(m).rating:'—'}}</td>
@@ -287,10 +330,11 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
           </tr>
         </tbody>
       </table>
+      <div v-if="list.length>listLimit" class="my-state" style="margin:16px 0"><button type="button" @click="listLimit+=LIST_STEP">显示更多（已展示 {{visibleList.length}} / {{list.length}} 部）</button></div>
     </section>
 
     <section v-else-if="tab!=='globe'&&tab!=='insights'&&tab!=='seen'&&list.length" class="my-grid" aria-label="我的电影列表">
-      <article v-for="m in list" :key="m.movie_id" class="my-card">
+      <article v-for="m in visibleList" :key="m.movie_id" class="my-card">
         <button class="my-poster" :class="{empty:!movieArtwork[String(m.movie_id)]||failed['p'+m.movie_id]}" :aria-label="'查看'+m.title+'详情'" @click="open(m)" type="button">
           <img v-if="(movieArtwork[String(m.movie_id)]?.poster||m.poster)&&!failed['p'+m.movie_id]" :src="movieArtwork[String(m.movie_id)]?.poster||m.poster" :alt="m.title+'海报'" loading="lazy" @error="failed['p'+m.movie_id]=true"/>
           <span v-else class="fallback">{{m.title}}</span>
@@ -300,6 +344,7 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
         <p class="meta">{{m.release_year||'年份未知'}}<template v-if="genres(m)"> · {{genres(m)}}</template></p>
         <p v-if="stateOf(m).rating" class="rating">★ {{stateOf(m).rating}}</p>
       </article>
+      <div v-if="list.length>listLimit" class="my-state" style="grid-column:1/-1;margin:12px 0"><button type="button" @click="listLimit+=LIST_STEP">显示更多（已展示 {{visibleList.length}} / {{list.length}} 部）</button></div>
     </section>
 
     <section v-else-if="tab!=='globe'&&tab!=='insights'&&!list.length" class="my-empty">
@@ -329,14 +374,14 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 </div>
 </template>
 <style scoped>
-:global(body:has(.my-shell)){margin:0;background:#0c0d0f;color:#fff}
-.my-shell{--ink:#0c0d0f;--ink-soft:#141519;--paper:#fff;--paper-dim:rgba(255,255,255,.82);--muted:rgba(255,255,255,.58);--line:rgba(241,236,226,.14);--line-strong:rgba(241,236,226,.26);--accent:#c8a46a;--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;height:100dvh;overflow:hidden;background:var(--ink);color:var(--paper);font-family:var(--sans)}
+:global(body:has(.my-shell)){margin:0;background:var(--mi-bg);color:var(--mi-text)}
+.my-shell{--ink:var(--mi-bg);--ink-soft:var(--mi-surface);--paper:var(--mi-text);--paper-dim:var(--mi-text-soft);--muted:var(--mi-text-muted);--line:var(--mi-border);--line-strong:var(--mi-border-strong);--accent:var(--mi-accent);--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;height:100dvh;overflow:hidden;background:var(--ink);color:var(--paper);font-family:var(--sans)}
 .my-shell *{box-sizing:border-box}
 .my-shell button,.my-shell input,.my-shell select,.my-shell textarea{font:inherit}
 .my-shell button{cursor:pointer}
 .my-shell a{color:inherit}
 .my-shell :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.my-shell ::selection{background:var(--accent);color:var(--ink)}
+.my-shell ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
 .my-head{flex:none;display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin:0 0 14px}
 .my-head h1{font-family:var(--serif);font-size:30px;font-weight:500;line-height:1.1;letter-spacing:-.02em;margin:0;color:var(--paper)}
@@ -344,13 +389,13 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .my-crumb .sep{color:var(--muted);font-size:12px}
 .my-crumb strong{color:var(--paper);font-size:12px;font-weight:500}
 .my-page{margin-left:var(--nav-width,52.5px);width:calc(100% - var(--nav-width,52.5px));transition:margin-left .25s ease;padding:22px clamp(16px,2.4vw,36px) 18px;height:100dvh;display:flex;flex-direction:column;min-height:0}
-.my-grid{flex:1;min-height:0;overflow-y:auto;align-content:start;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:24px 16px;padding:2px 4px 14px 0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent}
+.my-grid{flex:1;min-height:0;overflow-y:auto;align-content:start;display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:24px 16px;padding:2px 4px 14px 0;scrollbar-width:thin;scrollbar-color:var(--mi-scroll-thumb) transparent}
 .my-card{min-width:0}
-.my-poster{position:relative;display:block;width:100%;aspect-ratio:2/3;padding:0;border:1px solid rgba(255,255,255,.16);border-radius:14px;overflow:hidden;background:var(--ink-soft);cursor:pointer;transition:transform .22s,border-color .22s,box-shadow .22s;box-shadow:0 5px 17px #0003}
-.my-poster:hover,.my-poster:focus-visible{transform:translateY(-4px);border-color:rgba(241,236,226,.38);outline:0;box-shadow:0 16px 35px #0009}
+.my-poster{position:relative;display:block;width:100%;aspect-ratio:2/3;padding:0;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--ink-soft);cursor:pointer;transition:transform .22s,border-color .22s,box-shadow .22s;box-shadow:var(--mi-shadow-sm)}
+.my-poster:hover,.my-poster:focus-visible{transform:translateY(-4px);border-color:var(--mi-accent);outline:0;box-shadow:var(--mi-shadow-md)}
 .my-poster img{width:100%;height:100%;object-fit:cover;display:block}
 .my-poster .fallback{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;padding:14px;text-align:center;font-family:var(--serif);font-weight:500;font-size:17px;line-height:1.25;color:var(--paper);background:var(--ink-soft)}
-.badge{position:absolute;top:9px;left:9px;padding:4px 8px;border-radius:999px;background:rgba(12,13,15,.74);border:1px solid rgba(255,255,255,.3);backdrop-filter:blur(3px);font-size:9px;line-height:1.2;color:var(--paper)}
+.badge{position:absolute;top:9px;left:9px;padding:4px 8px;border-radius:999px;background:rgba(12,13,15,.78);border:1px solid rgba(255,255,255,.3);backdrop-filter:blur(3px);font-size:9px;line-height:1.2;color:#fff}
 .my-card h3{margin:10px 0 4px;font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--paper)}
 .my-card .meta{margin:0;color:var(--muted);font-size:11px;line-height:1.5;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .my-card .rating{margin:6px 0 0;color:var(--accent);font-size:11px;font-variant-numeric:tabular-nums}
@@ -369,10 +414,10 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 
 .g-search{width:100%;height:38px;border-radius:7px;border:1px solid var(--line);background:var(--ink);color:var(--paper);padding:0 10px;font-size:12px;outline:0;margin-bottom:10px}
 .g-search:focus{border-color:var(--line-strong)}
-.g-search::placeholder{color:var(--muted)}
+.g-search::placeholder{color:var(--mi-text-subtle)}
 .g-list{display:flex;flex-direction:column;gap:2px}
 .g-row{display:flex;align-items:center;gap:6px;border-radius:7px;padding-right:6px;transition:background-color .15s}
-.g-row:hover,.g-row.on{background:rgba(255,255,255,.055)}
+.g-row:hover,.g-row.on{background:var(--mi-chip-hover)}
 .g-pick{flex:1;min-width:0;display:flex;align-items:center;gap:9px;padding:7px 4px;border:0;background:transparent;color:var(--paper-dim);text-align:left;cursor:pointer}
 .g-num{color:var(--muted);font-size:10px;font-variant-numeric:tabular-nums}
 .g-name{min-width:0;display:flex;flex-direction:column;font-size:12px;color:var(--paper);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -382,17 +427,17 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .g-row input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px}
 .country-flag{display:block;object-fit:cover;border-radius:2px}
 .g-empty{color:var(--muted);font-size:12px;line-height:1.7;padding:12px 4px}
-.g-stage{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:#0f1013;min-height:460px;isolation:isolate}
-.g-stage:before{content:'';position:absolute;inset:0;z-index:0;background:url('/m9/globe/assets/mi2-sky-g2b.jpg') center/cover no-repeat;opacity:.16;filter:saturate(.45) brightness(.7);pointer-events:none}
-.g-stage:after{content:'';position:absolute;inset:0;z-index:0;background:linear-gradient(0deg,rgba(12,13,15,.66),transparent 55%);pointer-events:none}
+.g-stage{position:relative;border:1px solid var(--line);border-radius:14px;overflow:hidden;background:var(--mi-surface-raised);min-height:460px;isolation:isolate}
+.g-stage:before{content:'';position:absolute;inset:0;z-index:0;display:var(--mi-stage-sky-display);background:url('/m9/globe/assets/mi2-sky-g2b.jpg') center/cover no-repeat;opacity:.16;filter:saturate(.45) brightness(.7);pointer-events:none}
+.g-stage:after{content:'';position:absolute;inset:0;z-index:0;background:var(--mi-stage-sky-after);pointer-events:none}
 .g-stage>.globe-viewport,.g-stage>.globe-stage{position:absolute;inset:0;z-index:1}
-.g-sky-b{position:absolute;inset:-10%;z-index:0;background:url('/m9/globe/assets/mi2-sky-g2b.jpg') center/cover no-repeat;opacity:.08;pointer-events:none}
+.g-sky-b{position:absolute;inset:-10%;z-index:0;display:var(--mi-stage-sky-display);background:url('/m9/globe/assets/mi2-sky-g2b.jpg') center/cover no-repeat;opacity:.08;pointer-events:none}
 .g-stage .globe-stage,.g-stage .globe-viewport{min-height:100%}
 .g-actions{position:absolute;top:12px;right:12px;display:flex;gap:7px;z-index:5}
-.g-actions button{height:32px;padding:0 11px;border-radius:7px;border:1px solid rgba(255,255,255,.25);background:rgba(12,13,15,.72);backdrop-filter:blur(3px);color:var(--paper);font-size:11px;cursor:pointer}
-.g-actions button:hover{background:rgba(255,255,255,.1)}
+.g-actions button{height:32px;padding:0 11px;border-radius:7px;border:1px solid var(--line-strong);background:var(--mi-surface);backdrop-filter:blur(3px);color:var(--paper);font-size:11px;cursor:pointer;box-shadow:var(--mi-shadow-sm)}
+.g-actions button:hover{background:var(--mi-surface-hover)}
 .g-actions button:disabled{opacity:.4;cursor:default}
-.g-empty-stage{position:absolute;inset:0;display:grid;place-content:center;text-align:center;z-index:4;color:var(--muted);font-size:12px;background:rgba(12,13,15,.86)}
+.g-empty-stage{position:absolute;inset:0;display:grid;place-content:center;text-align:center;z-index:4;color:var(--muted);font-size:12px;background:var(--mi-bg)}
 .g-detail h2{margin-bottom:14px}
 .g-country{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .g-country small{display:block;color:var(--muted);font-size:10px;margin-top:2px}
@@ -415,7 +460,7 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .insight-panel{border:1px solid var(--line);border-radius:12px;background:var(--ink-soft);padding:16px 18px;overflow:auto;min-width:0}
 .insight-panel h2{margin:0 0 14px;font-family:var(--serif);font-size:21px;font-weight:500;letter-spacing:-.01em}
 .genre-row{display:grid;grid-template-columns:62px 1fr 28px;align-items:center;gap:10px;margin-bottom:10px;font-size:11.5px;color:var(--paper-dim)}
-.genre-row .track{height:6px;border-radius:99px;background:rgba(255,255,255,.08);overflow:hidden}
+.genre-row .track{height:6px;border-radius:99px;background:var(--mi-bar-track);overflow:hidden}
 .genre-row .fill{height:100%;border-radius:99px;background:var(--accent);opacity:.78}
 .genre-row em{font-style:normal;color:var(--muted);text-align:right;font-size:10.5px;font-variant-numeric:tabular-nums}
 .country-row{display:flex;align-items:center;gap:9px;padding:8px 0;border-top:1px solid var(--line);font-size:11.5px;color:var(--paper-dim)}
@@ -425,12 +470,12 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .g-searchrow{display:flex;gap:8px;margin-bottom:10px}
 .g-searchrow .g-search{margin-bottom:0;flex:1;min-width:0}
 .g-filter-btn{flex:none;height:38px;padding:0 11px;border-radius:7px;border:1px solid var(--line-strong);background:transparent;color:var(--paper);font-size:11px;cursor:pointer;display:flex;align-items:center;gap:6px}
-.g-filter-count{background:var(--accent);color:var(--ink);border-radius:999px;padding:1px 6px;font-size:10px}
+.g-filter-count{background:var(--accent);color:var(--mi-accent-on);border-radius:999px;padding:1px 6px;font-size:10px}
 .g-tools{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 0 8px;border-bottom:1px solid var(--line);margin-bottom:8px;color:var(--muted);font-size:10.5px}
 .g-tools button{border:1px solid var(--line);background:transparent;color:var(--paper-dim);border-radius:6px;padding:5px 8px;font-size:10.5px;cursor:pointer}
 .g-tools button:hover{border-color:var(--line-strong);color:var(--paper)}
 .g-caption{display:flex;justify-content:space-between;margin:0 0 8px;color:var(--muted);font-size:10px}
-.g-filter{position:absolute;z-index:20;top:84px;left:0;right:0;border:1px solid var(--line-strong);border-radius:10px;background:var(--ink-soft);box-shadow:0 18px 44px #000a;padding:12px}
+.g-filter{position:absolute;z-index:20;top:84px;left:0;right:0;border:1px solid var(--line-strong);border-radius:10px;background:var(--ink-soft);box-shadow:var(--mi-shadow-lg);padding:12px}
 .g-filter-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
 .g-filter-head strong{font-size:12px;font-weight:500}
 .g-filter-head button{border:0;background:transparent;color:var(--muted);font-size:18px;cursor:pointer}
@@ -442,16 +487,16 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .g-filter-foot{display:flex;justify-content:flex-end;gap:8px;padding-top:6px}
 .g-filter-foot button{border:1px solid var(--line);background:transparent;color:var(--paper-dim);border-radius:6px;padding:6px 11px;font-size:11px;cursor:pointer}
 .g-filter-foot .g-done{border-color:var(--paper);color:var(--paper)}
-.g-country-icon{width:42px;height:42px;flex:none;display:grid;place-items:center;border-radius:8px;background:rgba(255,255,255,.05);border:1px solid var(--line);color:var(--paper-dim)}
+.g-country-icon{width:42px;height:42px;flex:none;display:grid;place-items:center;border-radius:8px;background:var(--mi-surface-raised);border:1px solid var(--line);color:var(--paper-dim)}
 .g-country-icon svg{width:24px;height:24px;fill:none;stroke:currentColor;stroke-width:1.6}
 .g-country strong{font-size:14px}
 .g-country small{font-size:10px}
 .records{flex:1;min-height:0;overflow-y:auto;border:1px solid var(--line);border-radius:12px;background:var(--ink-soft)}
 .records-table{width:100%;border-collapse:collapse;font-size:12px}
-.records-table th{position:sticky;top:0;background:var(--ink-soft);text-align:left;color:var(--muted);font-weight:500;font-size:10.5px;letter-spacing:.02em;padding:11px 14px;border-bottom:1px solid var(--line)}
+.records-table th{position:sticky;top:0;background:var(--mi-surface-raised);text-align:left;color:var(--muted);font-weight:500;font-size:10.5px;letter-spacing:.02em;padding:11px 14px;border-bottom:1px solid var(--line)}
 .records-table td{padding:9px 14px;border-bottom:1px solid var(--line);color:var(--paper-dim);vertical-align:middle}
 .records-table tr:last-child td{border-bottom:0}
-.records-table tr:hover td{background:rgba(255,255,255,.035)}
+.records-table tr:hover td{background:var(--mi-chip-hover)}
 .rec-film{width:46%}
 .rec-open{display:flex;align-items:center;gap:11px;width:100%;padding:0;border:0;background:none;color:inherit;text-align:left;cursor:pointer}
 .rec-open img,.rec-thumb{width:34px;height:48px;flex:none;border-radius:4px;object-fit:cover;border:1px solid var(--line);background:var(--ink);display:grid;place-items:center;color:var(--paper-dim);font-family:var(--serif);font-weight:500}
@@ -460,8 +505,8 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .rec-tag{display:inline-block;padding:3px 8px;border-radius:999px;background:transparent;border:1px solid var(--line);color:var(--paper-dim);font-size:10px}
 .rec-edit{border:1px solid var(--line);background:transparent;color:var(--paper);border-radius:6px;padding:6px 11px;font-size:11px;cursor:pointer}
 .rec-edit:hover{border-color:var(--line-strong)}
-.r41-backdrop{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:20px;background:rgba(4,5,7,.76);backdrop-filter:blur(3px)}
-.r41-dialog{width:min(520px,100%);max-height:88vh;overflow:auto;border:1px solid var(--line-strong);border-radius:14px;background:var(--ink-soft);box-shadow:0 30px 80px #000b;color:var(--paper)}
+.r41-backdrop{position:fixed;inset:0;z-index:200;display:grid;place-items:center;padding:20px;background:var(--mi-backdrop);backdrop-filter:blur(3px)}
+.r41-dialog{width:min(520px,100%);max-height:88vh;overflow:auto;border:1px solid var(--line-strong);border-radius:14px;background:var(--ink-soft);box-shadow:var(--mi-shadow-lg);color:var(--paper)}
 .r41-head{display:flex;align-items:flex-start;justify-content:space-between;gap:16px;padding:18px 20px 14px;border-bottom:1px solid var(--line)}
 .r41-head h2{margin:0;font-family:var(--serif);font-size:24px;font-weight:500}
 .r41-close{border:0;background:transparent;color:var(--muted);font-size:22px;line-height:1;cursor:pointer}
@@ -476,7 +521,7 @@ onBeforeUnmount(()=>{controller.abort();window.removeEventListener('mi2-behavior
 .r41-select,.r41-note{width:100%;border-radius:7px;border:1px solid var(--line);background:var(--ink);color:var(--paper);font-size:12px;padding:9px 10px;outline:0}
 .r41-select:focus,.r41-note:focus{border-color:var(--line-strong)}
 .r41-note{resize:vertical;min-height:46px;opacity:.8}
-.r41-error{margin:10px 0 0;color:#e7b2bf;font-size:11px}
+.r41-error{margin:10px 0 0;color:var(--mi-negative);font-size:11px}
 .r41-foot{display:flex;justify-content:flex-end;gap:10px;padding:14px 20px 18px;border-top:1px solid var(--line)}
 .r41-cancel,.r41-save{border-radius:7px;padding:9px 16px;font-size:12px;cursor:pointer}
 .r41-cancel{border:1px solid var(--line);background:transparent;color:var(--paper-dim)}

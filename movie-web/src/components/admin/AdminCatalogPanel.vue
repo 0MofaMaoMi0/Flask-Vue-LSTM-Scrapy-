@@ -9,10 +9,12 @@ const props = defineProps<{ country?: string; countryLabel?: string }>()
 const emit = defineEmits<{openMovie: [id: number]}>()
 const assets = ref<InstanceType<typeof MovieAssetsPanel>>()
 const quality = ref<InstanceType<typeof DataQualityPanel>>()
+const imports = ref<InstanceType<typeof AdminImports>>()
 
 function refresh() {
   assets.value?.refresh()
   quality.value?.refresh()
+  imports.value?.refresh()
 }
 defineExpose({refresh})
 </script>
@@ -21,7 +23,7 @@ defineExpose({refresh})
   <div class="catalog-panel">
     <DataQualityPanel ref="quality" />
     <MovieAssetsPanel ref="assets" :country="props.country" :country-label="props.countryLabel" @open-movie="emit('openMovie', $event)"/>
-    <AdminImports />
+    <AdminImports ref="imports" />
   </div>
 </template>
 

@@ -67,43 +67,65 @@ async function loadMissing(parentSignal?: AbortSignal) {
   missingError.value = ''
   try {
     const page = await loadMissingPage(missingOffset.value, LIMIT, signal)
-    if (missingController !== current || parentSignal?.aborted) return
-    missing.value = page.items || []
+    if (missingController !== current || current.signal.aborted || parentSignal?.aborted) return
+    missing.value = (page.items || []).slice(0, LIMIT)
     hasMore.value = Boolean(page.has_more)
   } catch (e) {
-    if ((e as Error).name !== 'AbortError' && missingController === current) missingError.value = (e as Error).message
+    if ((e as Error).name !== 'AbortError' && missingController === current && !parentSignal?.aborted) {
+      missingError.value = (e as Error).message
+    }
   }
 }
-async function loadQualityData() {
+async function loadQualityData(parentSignal?: AbortSignal) {
   qualityController?.abort()
   const current = new AbortController()
   qualityController = current
+  const signal = parentSignal && typeof AbortSignal.any === 'function'
+    ? AbortSignal.any([parentSignal, current.signal])
+    : current.signal
   qualityBusy.value = true; qualityError.value = ''
   try {
-    quality.value = await loadQuality({
+    const next = await loadQuality({
       denominator: denominator.value, top: 20, limit: PROBLEM_LIMIT, offset: problemOffset.value,
       topic: problemTopic.value || undefined, category: problemCategory.value || undefined,
-    }, current.signal)
+    }, signal)
+    if (qualityController !== current || current.signal.aborted || parentSignal?.aborted) return
+    quality.value = next
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') {
-      quality.value = null
+    if ((e as Error).name !== 'AbortError' && qualityController === current && !parentSignal?.aborted) {
       qualityError.value = (e as Error).message
     }
   } finally {
     if (qualityController === current) qualityBusy.value = false
   }
 }
-async function loadBatchesData() {
+async function loadBatchesData(parentSignal?: AbortSignal) {
   batchesController?.abort()
   const current = new AbortController()
   batchesController = current
+  const signal = parentSignal && typeof AbortSignal.any === 'function'
+    ? AbortSignal.any([parentSignal, current.signal])
+    : current.signal
   batchesBusy.value = true; batchError.value = ''
   try {
-    batches.value = await loadBatches({limit: BATCH_LIMIT, offset: 0, status: batchStatus.value || undefined}, current.signal)
+    const next = await loadBatches({limit: BATCH_LIMIT, offset: 0, status: batchStatus.value || undefined}, signal)
+    if (batchesController !== current || current.signal.aborted || parentSignal?.aborted) return
+    batches.value = next
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') { batches.value = null; batchError.value = (e as Error).message }
+    if ((e as Error).name !== 'AbortError' && batchesController === current && !parentSignal?.aborted) {
+      batchError.value = (e as Error).message
+    }
   } finally {
     if (batchesController === current) batchesBusy.value = false
+  }
+}
+async function loadCoverageData(parentSignal: AbortSignal) {
+  coverageError.value = ''
+  try {
+    const next = await loadCoverage(parentSignal)
+    if (!parentSignal.aborted) coverage.value = next
+  } catch (e) {
+    if ((e as Error).name !== 'AbortError' && !parentSignal.aborted) coverageError.value = (e as Error).message
   }
 }
 async function load() {
@@ -111,13 +133,12 @@ async function load() {
   controller.value?.abort()
   const current = new AbortController()
   controller.value = current
-  coverageError.value = ''
-  try {
-    coverage.value = await loadCoverage(current.signal)
-  } catch (e) {
-    if ((e as Error).name !== 'AbortError') coverageError.value = (e as Error).message
-  }
-  await Promise.all([loadMissing(current.signal), loadQualityData(), loadBatchesData()])
+  await Promise.all([
+    loadCoverageData(current.signal),
+    loadMissing(current.signal),
+    loadQualityData(current.signal),
+    loadBatchesData(current.signal),
+  ])
   if (controller.value === current) busy.value = false
 }
 function page(delta: number) {
@@ -192,8 +213,8 @@ defineExpose({refresh: load})
           <button type="button" :aria-pressed="denominator === 'mapped'" @click="setDenominator('mapped')">已关联 mapped</button>
         </div>
       </div>
-      <p v-if="qualityError" class="adm-errobox" role="alert">{{ qualityError }} <button type="button" class="link-btn" @click="loadQualityData">重试</button></p>
-      <p v-else-if="qualityBusy && !quality" class="adm-state">正在读取质量矩阵…</p>
+      <p v-if="qualityError" class="adm-errobox" role="alert">{{ qualityError }}<span v-if="quality">（已保留上一份可用快照）</span> <button type="button" class="link-btn" @click="loadQualityData()">重试</button></p>
+      <p v-if="qualityBusy && !quality" class="adm-state">正在读取质量矩阵…</p>
       <template v-else-if="quality">
         <div class="adm-tablewrap">
           <table>
@@ -218,14 +239,14 @@ defineExpose({refresh: load})
           <span>背景图 <b>{{ fmtNumber(quality.assets.backdrop_present) }}</b></span>
         </div>
       </template>
-      <p v-else class="adm-empty">质量矩阵暂不可用；不展示未确认字段。</p>
+      <p v-else-if="!qualityError" class="adm-empty">质量矩阵暂不可用；不展示未确认字段。</p>
     </section>
 
     <section v-if="quality" class="adm-panel">
       <h2>按国家 / 类型 / 年代的严重度 <small>缺失率 = 缺资料影片 / 该组影片</small></h2>
       <p class="adm-note">{{ severity?.definition || '按缺失影片占比排序，仅统计有分组资料的影片。' }} 国家未知 {{ fmtNumber(severity?.unknown_country_movies) }} 部。</p>
       <div class="severity-grid">
-        <div v-for="group in [{key:'country', title:'国家', rows: severity?.by_country || []}, {key:'genre', title:'类型', rows: severity?.by_genre || []}, {key:'decade', title:'年代', rows: severity?.by_decade || []}]" :key="group.key">
+        <div v-for="group in [{key:'country', title:'国家', rows: (severity?.by_country || []).slice(0, 20)}, {key:'genre', title:'类型', rows: (severity?.by_genre || []).slice(0, 20)}, {key:'decade', title:'年代', rows: (severity?.by_decade || []).slice(0, 20)}]" :key="group.key">
           <h3>{{ group.title }} <small>TOP {{ group.rows.length }}</small></h3>
           <div v-if="group.rows.length" class="adm-tablewrap">
             <table>
@@ -264,12 +285,12 @@ defineExpose({refresh: load})
           </label>
         </div>
       </div>
-      <p v-if="qualityBusy" class="adm-state">正在读取问题清单…</p>
+      <p v-if="qualityBusy && !quality.problems.items.length" class="adm-state">正在读取问题清单…</p>
       <div v-else class="adm-tablewrap">
         <table>
           <thead><tr><th>影片</th><th>主题</th><th>类别</th><th>可处理</th><th>最近采集</th></tr></thead>
           <tbody>
-            <tr v-for="item in quality.problems.items" :key="item.movie_id + '-' + item.topic + '-' + item.category">
+            <tr v-for="item in quality.problems.items.slice(0, PROBLEM_LIMIT)" :key="item.movie_id + '-' + item.topic + '-' + item.category">
               <td><button type="button" class="link-btn" @click="router.push({path:'/movies', query:{from:'admin'}, hash:'#movie/' + item.movie_id})">{{ item.title }}</button><br><small>#{{ item.movie_id }} · TMDB {{ item.tmdb_id ?? '—' }} · {{ item.release_year || '—' }}</small></td>
               <td>{{ TOPIC_LABELS[item.topic] || item.topic }}<br><small>{{ item.topic }}</small></td>
               <td><span class="category-tag" :class="'cat-' + item.category.toLowerCase()">{{ STATUS_LABELS[item.category] || item.category }}</span></td>
@@ -293,7 +314,7 @@ defineExpose({refresh: load})
         <h2>最近补采批次 <small>{{ batches?.total != null ? '共 ' + fmtNumber(batches.total) + ' 批' : '加载中' }}</small></h2>
         <div class="problem-filters">
           <label class="adm-field inline"><span>状态</span>
-            <select v-model="batchStatus" @change="loadBatchesData">
+            <select v-model="batchStatus" @change="loadBatchesData()">
               <option value="">全部状态</option>
               <option v-for="status in (batches?.statuses || Object.keys(BATCH_STATUS_LABELS))" :key="status" :value="status">{{ BATCH_STATUS_LABELS[status] || status }}</option>
             </select>
@@ -301,13 +322,13 @@ defineExpose({refresh: load})
           <button type="button" class="adm-btn" @click="goAudit">操作审计 →</button>
         </div>
       </div>
-      <p v-if="batchError" class="adm-errobox" role="alert">{{ batchError }} <button type="button" class="link-btn" @click="loadBatchesData">重试</button></p>
-      <p v-else-if="batchesBusy && !batches" class="adm-state">正在读取批次…</p>
+      <p v-if="batchError" class="adm-errobox" role="alert">{{ batchError }}<span v-if="batches">（已保留上一份可用快照）</span> <button type="button" class="link-btn" @click="loadBatchesData()">重试</button></p>
+      <p v-if="batchesBusy && !batches" class="adm-state">正在读取批次…</p>
       <div v-else-if="batches?.items.length" class="adm-tablewrap">
         <table>
           <thead><tr><th>批次</th><th>状态</th><th>开始 / 结束</th><th class="num">目标</th><th class="num">成功 / 失败 / 跳过</th><th>错误码</th></tr></thead>
           <tbody>
-            <tr v-for="batch in batches.items" :key="batch.batch_id">
+            <tr v-for="batch in batches.items.slice(0, BATCH_LIMIT)" :key="batch.batch_id">
               <td>#{{ batch.batch_id }}<br><small>{{ batch.source }} · {{ batch.mode }}</small></td>
               <td><span class="batch-tag" :class="'batch-' + batch.status.toLowerCase()">{{ BATCH_STATUS_LABELS[batch.status] || batch.status }}</span></td>
               <td>{{ formatUtc(batch.started_at) }}<br><small>{{ formatUtc(batch.finished_at) }}</small></td>
@@ -379,40 +400,40 @@ defineExpose({refresh: load})
 <style scoped>
 .quality-view{min-width:0}
 .quality-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:0 0 14px}
-.quality-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:#f3eee4}
-.quality-meta{margin:0;font-size:11px;color:#8f8a80;line-height:1.7}
+.quality-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:var(--mi-text-ivory)}
+.quality-meta{margin:0;font-size:11px;color:var(--mi-text-muted);line-height:1.7}
 .quality-title-row{display:flex;justify-content:space-between;align-items:flex-end;gap:12px;flex-wrap:wrap}
 .quality-title-row h2{margin-bottom:8px}
 .problem-filters{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px}
 .problem-filters .adm-field.inline select{padding:5px 8px}
 .status-hints{display:flex;gap:14px;flex-wrap:wrap;margin-top:8px}
-.status-hints span{font-size:11px;color:#8f83a0}
-.status-hints b{color:#b7a9c6;font-weight:400}
-.asset-quality{display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:#a9a294}
-.asset-quality b{color:#e6dff0;font-weight:500}
+.status-hints span{font-size:11px;color:var(--mi-text-muted)}
+.status-hints b{color:var(--mi-text-secondary);font-weight:400}
+.asset-quality{display:flex;gap:18px;flex-wrap:wrap;margin-top:8px;font-size:11px;color:var(--mi-text-secondary)}
+.asset-quality b{color:var(--mi-text);font-weight:500}
 .severity-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
 .severity-grid > div{min-width:0}
-.severity-grid h3{margin:2px 0 7px;font-size:11.5px;color:#d8d1c6;font-weight:500}
-.severity-grid h3 small{color:#8f83a0;font-weight:400}
+.severity-grid h3{margin:2px 0 7px;font-size:11.5px;color:var(--mi-text-soft);font-weight:500}
+.severity-grid h3 small{color:var(--mi-text-muted);font-weight:400}
 .severity-grid table{min-width:0;width:100%;font-size:11.5px}
 .severity-grid th,.severity-grid td{padding:6px 7px}
 .severity-grid td:first-child,.severity-grid td:last-child{white-space:normal;overflow-wrap:anywhere}
-.category-tag,.batch-tag{display:inline-block;font-size:11px;border-radius:3px;padding:1px 6px;background:#23212b;color:#c3b7d2;white-space:nowrap}
-.cat-empty{color:#a39a8e;background:#22211f}
-.cat-failed{color:#e7b2a8;background:#2d2020}
-.cat-missing,.cat-not_fetched{color:#dcc49b;background:#2a2419}
-.cat-unmapped{color:#c7b7df;background:#241f2d}
-.batch-completed,.batch-succeeded{color:#b7d6b1;background:#1c271c}
-.batch-failed{color:#e7b2a8;background:#2d2020}
-.batch-partial{color:#dcc49b;background:#2a2419}
-.legacy-quality-fold{margin:0 0 14px;border:1px solid rgba(255,255,255,.07);border-radius:10px;background:rgba(16,15,20,.65);padding:10px 14px}
-.legacy-quality-fold > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;font-weight:500;color:#cfc7bb;user-select:none}
+.category-tag,.batch-tag{display:inline-block;font-size:11px;border-radius:3px;padding:1px 6px;background:var(--mi-surface-raised);color:var(--mi-text-secondary);white-space:nowrap}
+.cat-empty{color:var(--mi-text-muted);background:var(--mi-surface-raised)}
+.cat-failed{color:var(--mi-negative);background:var(--mi-negative-soft)}
+.cat-missing,.cat-not_fetched{color:var(--mi-warning);background:var(--mi-warning-soft)}
+.cat-unmapped{color:var(--mi-accent-text);background:var(--mi-accent-soft)}
+.batch-completed,.batch-succeeded{color:var(--mi-positive);background:var(--mi-positive-soft)}
+.batch-failed{color:var(--mi-negative);background:var(--mi-negative-soft)}
+.batch-partial{color:var(--mi-warning);background:var(--mi-warning-soft)}
+.legacy-quality-fold{margin:0 0 14px;border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:10px 14px}
+.legacy-quality-fold > summary{cursor:pointer;list-style:none;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:12.5px;font-weight:500;color:var(--mi-text-soft);user-select:none}
 .legacy-quality-fold > summary::-webkit-details-marker{display:none}
-.legacy-quality-fold > summary::after{content:'展开 ▾';font-size:11px;color:#9d91b0;flex-shrink:0}
+.legacy-quality-fold > summary::after{content:'展开 ▾';font-size:11px;color:var(--mi-text-muted);flex-shrink:0}
 .legacy-quality-fold[open] > summary::after{content:'收起 ▴'}
-.legacy-quality-fold > summary small{font-size:11px;font-weight:400;color:#8f8a80;margin-left:8px}
-.legacy-quality-fold[open] > summary{margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid rgba(255,255,255,.06)}
-.weak{color:#625d55!important}
-.link-btn{border:0;background:transparent;color:#dcc49b;font:inherit;font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
+.legacy-quality-fold > summary small{font-size:11px;font-weight:400;color:var(--mi-text-muted);margin-left:8px}
+.legacy-quality-fold[open] > summary{margin-bottom:12px;padding-bottom:8px;border-bottom:1px solid var(--mi-border-subtle)}
+.weak{color:var(--mi-text-subtle)!important}
+.link-btn{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
 @media(max-width:1100px){.severity-grid{grid-template-columns:minmax(0,1fr)}}
 </style>

@@ -40,9 +40,64 @@ watch(busy,()=>nextTick(syncCastArrows),{flush:'post'})
 onMounted(()=>{window.addEventListener('resize',syncCastArrows);nextTick(syncCastArrows)})
 const actions=[{kind:'want',name:'想看',path:'M12 5v14M5 12h14'},{kind:'watched',name:'已看',path:'m5 12 4 4L19 6'},{kind:'favorite',name:'收藏',path:'M20.8 4.6a5.5 5.5 0 0 0-7.8 0L12 5.7l-1.1-1.1a5.5 5.5 0 0 0-7.8 7.8L12 21l8.8-8.6a5.5 5.5 0 0 0 0-7.8Z'},{kind:'not_interested',name:'不感兴趣',path:'M5 5l14 14M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0'}]
 let controller:AbortController|undefined,serial=0,disposed=false
-async function api(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});let body:any=null;try{body=await r.json()}catch{body=null};if(!r.ok)throw new Error(r.status===404?'没有找到这部电影。':r.status===401?'登录已失效，请重新登录。':'资料暂时无法读取，请重试。');if(!body||body.code!=='OK'||body.data==null)throw new Error('电影资料响应异常，请重试。');return body.data}
+const MAX_CREDIT_PAGES=3,COUNTRY_CACHE_TTL_MS=5*60*1000
+let cachedCountryMap:Map<string,string[]>|null=null,cachedCountryAt=0,inFlightCountryPromise:Promise<Map<string,string[]>>|null=null
+async function api(path:string,signal?:AbortSignal){
+ const timeout=AbortSignal.timeout(20000)
+ const combined=signal?AbortSignal.any([signal,timeout]):timeout
+ const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:combined});let body:any=null;try{body=await r.json()}catch{body=null}
+ if(!r.ok)throw new Error(r.status===404?'没有找到这部电影。':r.status===401?'登录已失效，请重新登录。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'电影详情缓存正在预热，请稍后重试。':'资料暂时无法读取，请重试。')
+ if(!body||body.code!=='OK'||body.data==null)throw new Error('电影资料响应异常，请重试。')
+ return body.data
+}
+async function getProductionCountryMap(signal?:AbortSignal):Promise<Map<string,string[]>>{
+ if(cachedCountryMap&&Date.now()-cachedCountryAt<COUNTRY_CACHE_TTL_MS)return cachedCountryMap
+ if(!inFlightCountryPromise){
+  inFlightCountryPromise=(async()=>{
+   try{
+    const cc=await api('production-countries')
+    const map=new Map<string,string[]>()
+    for(const row of cc.items||[]){
+     const list=(row?.countries||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[c.iso2]).filter(Boolean)
+     if(list.length)map.set(String(row.movie_id),list)
+    }
+    cachedCountryMap=map;cachedCountryAt=Date.now()
+    return map
+   }finally{inFlightCountryPromise=null}
+  })()
+ }
+ if(signal?.aborted)throw new Error('Aborted')
+ return inFlightCountryPromise
+}
 async function readBehavior(signal?:AbortSignal){const target=id.value;const b=await api('behavior',signal);if(disposed||signal?.aborted||target!==id.value)return;state.value=b.state[target]||{};rating.value=String(state.value.rating??4);behaviorReady.value=true}
-async function load(){controller?.abort();controller=new AbortController();const signal=controller.signal,n=++serial;busy.value=true;error.value='';movie.value=null;notice.value='';actionError.value='';posterFailed.value=false;backdropFailed.value=false;photoFailures.value={};behaviorReady.value=false;state.value={};recommendations.value=[];countries.value=[];try{if(!/^[1-9]\d*$/.test(id.value))throw new Error('电影编号无效。');const data=await api('movies/'+id.value,signal);if(disposed||n!==serial)return;if(data.credits_has_more){const all:any[]=[];let offset=0;while(true){const page=await api('movies/'+id.value+'/credits?limit=100&offset='+offset,signal);if(disposed||n!==serial)return;all.push(...page.items);if(!page.has_more)break;if(!Number.isSafeInteger(page.next_offset)||page.next_offset<=offset)throw new Error('演职员分页异常，请重试。');offset=page.next_offset}data.credits=all}movie.value=data;document.title=(data.title||'电影详情')+' · MovieInsight';try{await readBehavior(signal)}catch{if(!disposed&&!signal.aborted&&n===serial)actionError.value='个人状态读取失败，请刷新状态后操作。'}try{const cc=await api('production-countries',signal);if(!disposed&&n===serial){const row=(cc.items||[]).find((x:any)=>String(x.movie_id)===id.value);countries.value=((row?.countries)||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[c.iso2]).filter(Boolean)}}catch{}try{const r=await api('recommendations?limit=6',signal);if(!disposed&&n===serial)recommendations.value=r.items.filter((m:any)=>String(m.movie_id)!==id.value).slice(0,3)}catch{}}catch(e){if(!disposed&&!signal.aborted&&n===serial)error.value=(e as Error).message}finally{if(!disposed&&n===serial)busy.value=false}}
+async function load(){
+ controller?.abort();controller=new AbortController();const signal=controller.signal,n=++serial
+ busy.value=true;error.value='';movie.value=null;notice.value='';actionError.value='';posterFailed.value=false;backdropFailed.value=false;photoFailures.value={};behaviorReady.value=false;state.value={};recommendations.value=[];countries.value=[]
+ try{
+  if(!/^[1-9]\d*$/.test(id.value))throw new Error('电影编号无效。')
+  const data=await api('movies/'+id.value,signal)
+  if(disposed||n!==serial||signal.aborted)return
+  if(data.credits_has_more){
+   const all:any[]=[];let offset=0,pages=0
+   while(pages<MAX_CREDIT_PAGES){
+    const page=await api('movies/'+id.value+'/credits?limit=100&offset='+offset,signal)
+    if(disposed||n!==serial||signal.aborted)return
+    all.push(...page.items);pages++
+    if(!page.has_more)break
+    if(!Number.isSafeInteger(page.next_offset)||page.next_offset<=offset)throw new Error('演职员分页异常，请重试。')
+    offset=page.next_offset
+   }
+   data.credits=all
+  }
+  movie.value=data;document.title=(data.title||'电影详情')+' · MovieInsight'
+  await Promise.all([
+   readBehavior(signal).catch(()=>{if(!disposed&&!signal.aborted&&n===serial)actionError.value='个人状态读取失败，请刷新状态后操作。'}),
+   getProductionCountryMap(signal).then(map=>{if(!disposed&&!signal.aborted&&n===serial)countries.value=map.get(id.value)||[]}).catch(()=>{}),
+   api('recommendations?limit=6',signal).then(r=>{if(!disposed&&!signal.aborted&&n===serial)recommendations.value=(r.items||[]).filter((m:any)=>String(m.movie_id)!==id.value).slice(0,3)}).catch(()=>{}),
+  ])
+ }catch(e){if(!disposed&&!signal.aborted&&n===serial&&(e as Error).name!=='AbortError')error.value=(e as Error).message}
+ finally{if(!disposed&&n===serial)busy.value=false}
+}
 watch(id,load,{immediate:true})
 function back(){if(route.query.from==='ai'||route.query.from==='floating'){router.push(assistantReturnTarget(route.query.from,route.query.return_to));return}if(route.query.from==='recommendations'){const query={...route.query};delete query.from;router.push({path:'/recommendations',query});return}if(route.query.from==='admin'){router.push('/admin');return}if(route.query.from==='home'){router.push('/home');return}if(route.query.from==='behavior'){router.push({path:'/movies',hash:'#behavior',query:{view:route.query.view}});return}const query={...route.query};delete query.from;router.push({path:'/movies',query,hash:''})}
 function openMovie(mid:number){router.push({path:'/movies',query:route.query,hash:'#movie/'+mid})}
@@ -58,15 +113,15 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 </div></div>
 </template>
 <style scoped>
-:global(body:has(.detail-shell)){margin:0;background:#0c0d0f;color:#fff}
-.detail-shell{--ink:#0c0d0f;--ink-soft:#141519;--paper:#fff;--paper-dim:rgba(255,255,255,.82);--muted:rgba(255,255,255,.58);--line:rgba(241,236,226,.14);--line-strong:rgba(241,236,226,.26);--accent:#c8a46a;--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;position:relative;z-index:1;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
+:global(body:has(.detail-shell)){margin:0;background:var(--mi-bg);color:var(--mi-text)}
+.detail-shell{--ink:var(--mi-bg);--ink-soft:var(--mi-surface);--paper:var(--mi-text);--paper-dim:var(--mi-text-soft);--muted:var(--mi-text-muted);--line:var(--mi-border);--line-strong:var(--mi-border-strong);--accent:var(--mi-accent);--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;position:relative;z-index:1;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
 .detail-shell *{box-sizing:border-box}
 .detail-shell button,.detail-shell select{font:inherit}
 .detail-shell button{cursor:pointer}
 .detail-shell button:disabled{opacity:.45;cursor:default}
 .detail-shell :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
 .detail-shell a{color:inherit}
-.detail-shell ::selection{background:var(--accent);color:var(--ink)}
+.detail-shell ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 .detail-content{margin-left:var(--nav-width);width:calc(100% - var(--nav-width));transition:margin-left .25s ease;min-width:0}
 .container{width:min(1500px,calc(100% - clamp(36px,6vw,108px)));margin:0 auto}
 .breadcrumb{height:58px;display:flex;align-items:center;gap:10px;color:var(--muted);font-size:12px;min-width:0}
@@ -74,10 +129,10 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 .breadcrumb .divider{opacity:.5}
 .breadcrumb strong{font-weight:500;color:var(--paper);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .hero{position:relative;min-height:560px;isolation:isolate;background:var(--ink-soft);overflow:hidden;border-bottom:1px solid var(--line)}
-.backdrop-art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 38%;z-index:-2;opacity:.72;filter:saturate(.72) contrast(1.04) brightness(.62)}
-.hero:after{content:"";position:absolute;z-index:-1;inset:0;background:linear-gradient(90deg,var(--ink) 0%,rgba(12,13,15,.94) 34%,rgba(12,13,15,.42) 76%,rgba(12,13,15,.72) 100%),linear-gradient(0deg,var(--ink) 0%,transparent 46%)}
+.backdrop-art{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:center 38%;z-index:-2;opacity:var(--mi-detail-backdrop-opacity);filter:var(--mi-hero-backdrop-filter)}
+.hero:after{content:"";position:absolute;z-index:-1;inset:0;background:var(--mi-hero-shade)}
 .hero-grid{display:grid;grid-template-columns:minmax(200px,280px) minmax(0,1fr);gap:48px;align-items:end;min-height:560px;padding:32px 0 54px}
-.poster{width:100%;max-width:280px;aspect-ratio:2/3;border:1px solid rgba(255,255,255,.3);border-radius:14px;overflow:hidden;box-shadow:0 18px 48px #000c;background:var(--ink-soft);display:grid;place-items:center}
+.poster{width:100%;max-width:280px;aspect-ratio:2/3;border:1px solid var(--line-strong);border-radius:14px;overflow:hidden;box-shadow:var(--mi-shadow-lg);background:var(--ink-soft);display:grid;place-items:center}
 .poster img{width:100%;height:100%;object-fit:cover;display:block;grid-area:1/1;opacity:1;transition:none}
 .hero-copy{padding-bottom:4px;max-width:780px;min-width:0}
 
@@ -86,19 +141,19 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 .en{font-size:15px;color:var(--paper-dim);letter-spacing:.01em;margin-bottom:20px;line-height:1.5}
 .meta{display:flex;flex-wrap:wrap;align-items:center;gap:9px 12px;color:var(--paper);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
 .meta .sep{color:var(--muted)}
-.genre{display:inline-flex;padding:4px 9px;border:1px solid var(--line-strong);background:rgba(12,13,15,.44);border-radius:999px;color:var(--paper);font-size:11px;backdrop-filter:blur(3px)}
+.genre{display:inline-flex;padding:4px 9px;border:1px solid var(--line-strong);background:var(--mi-surface-raised);border-radius:999px;color:var(--paper);font-size:11px;backdrop-filter:blur(3px)}
 .hero-intro{margin:20px 0 22px;color:var(--paper-dim);font-size:14px;line-height:1.9;max-width:640px;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-line}
 .cta{display:flex;flex-wrap:wrap;gap:9px;align-items:center}
 .btn{border-radius:8px;border:1px solid var(--line-strong);background:transparent;color:var(--paper);padding:11px 15px;display:inline-flex;align-items:center;justify-content:center;gap:8px;font-weight:500;font-size:12px;transition:background-color .16s,border-color .16s,color .16s}
-.btn:hover{background:rgba(255,255,255,.07);border-color:var(--paper)}
+.btn:hover{background:var(--mi-surface-hover);border-color:var(--paper)}
 .btn.primary{background:transparent;color:var(--paper);border-color:var(--paper)}
-.btn.primary:hover{background:rgba(255,255,255,.08)}
-.btn[aria-pressed=true]{background:rgba(200,164,106,.12);border-color:var(--accent);color:var(--paper)}
-.btn.danger[aria-pressed=true]{background:rgba(178,94,109,.12);border-color:rgba(220,142,152,.7)}
+.btn.primary:hover{background:var(--mi-surface-hover)}
+.btn[aria-pressed=true]{background:var(--mi-accent-soft);border-color:var(--accent);color:var(--paper)}
+.btn.danger[aria-pressed=true]{background:var(--mi-negative-soft);border-color:var(--mi-negative-border)}
 .btn svg{width:16px;height:16px;flex:none}
 .tmdb-link{text-decoration:none}
 .banner-state{font-size:11px;color:var(--muted);margin-top:15px;line-height:1.6}
-.action-error{color:#e7b2bf;font-size:12px;line-height:1.8}
+.action-error{color:var(--mi-negative);font-size:12px;line-height:1.8}
 .textlink{border:0;padding:0;background:none;color:var(--paper-dim);font-size:12px;text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line-strong)}
 .textlink:hover{color:var(--paper)}
 .content{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:32px;padding:34px 0 72px}
@@ -115,20 +170,20 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 .cast-carousel{position:relative}
 .cast-strip{display:flex;gap:12px;overflow-x:auto;padding:2px 2px 10px;scrollbar-width:none;-ms-overflow-style:none}
 .cast-strip::-webkit-scrollbar{display:none}
-.cast-arrow{position:absolute;z-index:3;top:2px;bottom:10px;height:auto;width:64px;display:grid;place-items:center;padding:0;border:0;border-radius:12px;color:#fff;cursor:pointer;opacity:.92;transition:opacity .16s ease}
-.cast-arrow.left{left:2px;justify-items:start;padding-left:10px;background:linear-gradient(90deg,rgba(12,13,15,.92),rgba(12,13,15,.58) 58%,transparent)}
-.cast-arrow.right{right:2px;justify-items:end;padding-right:10px;background:linear-gradient(270deg,rgba(12,13,15,.92),rgba(12,13,15,.58) 58%,transparent)}
+.cast-arrow{position:absolute;z-index:3;top:2px;bottom:10px;height:auto;width:64px;display:grid;place-items:center;padding:0;border:0;border-radius:12px;color:var(--paper);cursor:pointer;opacity:.92;transition:opacity .16s ease}
+.cast-arrow.left{left:2px;justify-items:start;padding-left:10px;background:var(--mi-rail-left)}
+.cast-arrow.right{right:2px;justify-items:end;padding-right:10px;background:var(--mi-rail-right)}
 .cast-arrow:hover{opacity:1}
 .cast-arrow svg{display:block;width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
-.cast-arrow:focus-visible{outline:2px solid #fff;outline-offset:-3px}
+.cast-arrow:focus-visible{outline:2px solid var(--paper);outline-offset:-3px}
 @media(max-width:600px){.cast-arrow{width:48px}.cast-arrow svg{width:24px;height:24px}}
 @media(prefers-reduced-motion:reduce){.cast-arrow{transition:none}}
 .credit{display:flex;flex-direction:column;gap:0;align-items:stretch;border:1px solid var(--line);border-radius:12px;padding:0;background:var(--ink-soft);flex:0 0 140px;min-width:0;min-height:243px;overflow:hidden}
-.credit-photo,.avatar{flex:none;display:grid;place-items:center;width:100%;height:175px;border-radius:0;background:#1d1e22;color:var(--paper-dim);font:500 36px var(--serif);object-fit:cover;object-position:center 24%;border:0}
+.credit-photo,.avatar{flex:none;display:grid;place-items:center;width:100%;height:175px;border-radius:0;background:var(--mi-surface-raised);color:var(--paper-dim);font:500 36px var(--serif);object-fit:cover;object-position:center 24%;border:0}
 .credit b{display:block;padding:10px 10px 0;font-size:13px;line-height:1.4;font-weight:600;white-space:normal;overflow-wrap:anywhere;color:var(--paper)}
 .credit small{display:block;padding:4px 10px 12px;font-size:11px;line-height:1.4;color:var(--muted);white-space:normal;overflow-wrap:anywhere}
 .cast-full{align-self:flex-end;flex:0 0 auto;color:var(--paper-dim);font-size:11px;text-decoration:underline;text-underline-offset:3px;padding:0 6px 6px;white-space:nowrap}
-.recommend{display:flex;align-items:center;gap:14px;padding:12px;background:rgba(12,13,15,.3);border-radius:10px;border:1px solid var(--line);max-width:620px;margin-bottom:10px}
+.recommend{display:flex;align-items:center;gap:14px;padding:12px;background:var(--mi-surface-warm);border-radius:10px;border:1px solid var(--line);max-width:620px;margin-bottom:10px}
 .recommend .recommend-poster{padding:0;background:none;border:0;flex:none;border-radius:6px;overflow:hidden}
 .recommend img{width:72px;aspect-ratio:2/3;object-fit:cover;border-radius:6px;display:block}
 .recommend b{font-size:13px;display:block;font-weight:500;color:var(--paper)}
@@ -145,7 +200,7 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 .score-sub{font-size:11px;color:var(--muted);line-height:1.7}
 .stars{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .star{border:1px solid var(--line-strong);border-radius:7px;padding:7px 9px;color:var(--muted);background:transparent;font-size:18px;line-height:1}
-.star.active{background:rgba(200,164,106,.12);color:var(--accent);border-color:rgba(200,164,106,.55)}
+.star.active{background:var(--mi-accent-soft);color:var(--accent);border-color:var(--mi-accent-border)}
 .rate{margin-top:15px;color:var(--muted);font-size:12px}
 .rating-form{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:18px}
 .rating-form label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:8px}

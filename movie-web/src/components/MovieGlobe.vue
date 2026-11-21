@@ -1,6 +1,7 @@
 <script setup>
 import {onMounted,onBeforeUnmount,ref,watch} from 'vue';
 import {createMovieGlobe} from '../lib/globe/globeEngine.js';
+import {siteTheme} from '../services/theme';
 const props=defineProps({stats:{type:Object,required:true},metric:{type:String,required:true},selectedIso3:{type:String,default:''},theme:{type:String,default:'cinema'},effects:{type:String,default:'vivid'},initialView:{type:Object,default:()=>({lat:18,lng:-35})},labelIso3:{type:Array,default:()=>[]},autoRotate:{type:Boolean,default:true}});
 const emit=defineEmits(['hover','select']);
 const mountEl=ref(null);
@@ -30,7 +31,7 @@ onMounted(async()=>{
   }catch(e){error.value=e?.message||String(e);status.value='error';}
 });
 watch(()=>props.stats,stat=>{recentStats=stat;engine?.refresh();});
-watch([()=>props.theme,()=>props.effects],()=>engine?.setVisuals({themeId:props.theme,effects:props.effects}));
+watch([()=>props.theme,()=>props.effects,siteTheme],()=>engine?.setVisuals({themeId:props.theme,effects:props.effects}));
 watch(()=>props.labelIso3,codes=>engine?.setLabelIso3(codes),{deep:true});
 watch(()=>props.autoRotate,value=>engine?.setAutoRotate(value));
 watch(()=>props.metric,metric=>{recentMetric=metric;engine?.refresh();});

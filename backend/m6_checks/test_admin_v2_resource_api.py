@@ -307,7 +307,6 @@ def build_app(tables, *, username='deepseek'):
     app.config['ADMIN_USERS'] = ['deepseek']
     app.extensions['auth_db'] = FakeAuthDb(FakeUser(username))
     app.extensions['catalog_engine'] = FakeEngine(tables)
-    api_module._DOCUMENT_CACHE = api_module.DocumentCache()
     api_module.install(app)
     return app
 

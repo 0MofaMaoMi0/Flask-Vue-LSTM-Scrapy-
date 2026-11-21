@@ -6,10 +6,15 @@ including the partial current day. Missing telemetry is never represented as zer
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 import json
+import math
+import os
+import threading
+import time
 from collections import Counter, defaultdict
+from weakref import WeakKeyDictionary
 
-from sqlalchemy import (BigInteger, Numeric, and_, bindparam, case, cast, distinct, func,
-                        inspect, or_, select, text)
+from sqlalchemy import (BigInteger, Numeric, and_, bindparam, case, cast, column,
+                        distinct, func, inspect, or_, select, table, text, true)
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import AuthSession, User
@@ -18,6 +23,10 @@ from catalog.read_queries import _PERSON_ASSETS
 
 
 ALLOWED_DAYS = frozenset((7, 30, 90))
+DEFAULT_CATALOG_CACHE_TTL = 120.0
+CATALOG_CACHE_REBUILD_INTERVALS = 10
+_CATALOG_CACHE = WeakKeyDictionary()
+_CATALOG_CACHE_LOCK = threading.Lock()
 EVENT_LABELS = {
     'watched': '已看', 'favorite': '收藏', 'want': '想看',
     'rating': '评分', 'not_interested': '不感兴趣',
@@ -288,12 +297,89 @@ def ai_snapshot(app, start, end):
         return unavailable
 
 
-def build_dashboard(app, days, now=None):
+class _CatalogCacheEntry:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.data = None
+        self.watermark = None
+        self.checked_at = 0.0
+        self.generated_at = None
+        self.built_at = 0.0
+
+
+def invalidate_dashboard_cache(engine=None):
+    """Discard cached catalog aggregates for one engine or for the process."""
+    with _CATALOG_CACHE_LOCK:
+        if engine is None:
+            _CATALOG_CACHE.clear()
+        else:
+            _CATALOG_CACHE.pop(engine, None)
+
+
+def _catalog_cache_ttl(app, override):
+    if override is None:
+        override = getattr(app, 'config', {}).get(
+            'ADMIN_DASHBOARD_CACHE_TTL', os.environ.get('MI2_ADMIN_DASHBOARD_CACHE_TTL'))
+    try:
+        ttl = float(override)
+    except (TypeError, ValueError):
+        return DEFAULT_CATALOG_CACHE_TTL
+    return ttl if math.isfinite(ttl) and ttl >= 0 else DEFAULT_CATALOG_CACHE_TTL
+
+
+def _catalog_watermark(connection):
+    tables = CatalogBase.metadata.tables
+    movies, assets, credits = (tables[name] for name in ('movies', 'movie_assets', 'movie_credits'))
+
+    def aggregate(source, *high_water_columns):
+        values = [func.count().label('row_count')]
+        values.extend(func.max(col).label(col.name) for col in high_water_columns)
+        return select(*values).select_from(source).subquery()
+
+    blocks = [aggregate(movies, movies.c.movie_id, movies.c.updated_at),
+              aggregate(assets, assets.c.asset_id, assets.c.updated_at),
+              aggregate(credits, credits.c.credit_id)]
+    if inspect(connection).has_table('tmdb_movie_metadata'):
+        metadata = table('tmdb_movie_metadata', column('fetched_at'), column('updated_at'))
+        blocks.append(aggregate(metadata, metadata.c.fetched_at, metadata.c.updated_at))
+    combined = blocks[0]
+    for block in blocks[1:]:
+        combined = combined.join(block, true())
+    statement = select(*(col for block in blocks for col in block.c)).select_from(combined)
+    return tuple(connection.execute(statement).one())
+
+
+def _cached_catalog_snapshot(connection, ttl, refresh):
+    engine = getattr(connection, 'engine', None)
+    if engine is None or ttl == 0:
+        return catalog_snapshot(connection), _stamp(datetime.utcnow())
+    with _CATALOG_CACHE_LOCK:
+        entry = _CATALOG_CACHE.get(engine)
+        if entry is None:
+            entry = _CATALOG_CACHE[engine] = _CatalogCacheEntry()
+    with entry.lock:
+        current = time.monotonic()
+        if not refresh and entry.data is not None and current - entry.checked_at < ttl:
+            return entry.data, entry.generated_at
+        watermark = _catalog_watermark(connection)
+        # Ratings, genres and edits to existing credits can leave these high waters unchanged.
+        rebuild_due = current - entry.built_at >= ttl * CATALOG_CACHE_REBUILD_INTERVALS
+        if refresh or entry.data is None or watermark != entry.watermark or rebuild_due:
+            entry.data = catalog_snapshot(connection)
+            entry.watermark = watermark
+            entry.generated_at = _stamp(datetime.utcnow())
+            entry.built_at = time.monotonic()
+        entry.checked_at = time.monotonic()
+        return entry.data, entry.generated_at
+
+
+def build_dashboard(app, days, now=None, *, catalog_cache_ttl=None, refresh_catalog=False):
     start, end = window_for(days, now)
     generated = {}
     with app.extensions['auth_engine'].connect() as connection:
-        catalog = catalog_snapshot(connection)
-        generated['catalog'] = _stamp(datetime.utcnow())
+        catalog, generated['catalog'] = _cached_catalog_snapshot(
+            connection, _catalog_cache_ttl(app, catalog_cache_ttl), refresh_catalog,
+        )
         behavior = behavior_snapshot(connection, app.extensions['m6_behavior'], start, end)
         generated['behavior'] = _stamp(datetime.utcnow())
         users = users_snapshot(connection, start, end)
@@ -534,7 +620,8 @@ def _movie_decades(connection, movie_ids=None):
             for mid, year in connection.execute(statement).all()}
 
 
-def _movie_countries(connection, movie_ids):
+def _movie_countries(connection, movie_ids, *, has_supplement=None,
+                     fallback_sources=('tmdb', 'legacy_movies2')):
     """Production countries (ISO2) for bounded active/requested movie ids.
 
     Reads normalized ``tmdb_movie_countries`` first when available, and falls
@@ -549,32 +636,26 @@ def _movie_countries(connection, movie_ids):
     if not ids:
         return {}
     mapping = {}
-    try:
-        has_supplement = inspect(connection).has_table('tmdb_movie_countries')
-    except SQLAlchemyError:
-        has_supplement = False
+    if has_supplement is None:
+        try:
+            has_supplement = inspect(connection).has_table('tmdb_movie_countries')
+        except SQLAlchemyError:
+            has_supplement = False
     if has_supplement:
-        if len(ids) <= 200:
-            rows = connection.execute(
-                text('SELECT movie_id, country_iso2 FROM tmdb_movie_countries WHERE movie_id IN :ids')
-                .bindparams(bindparam('ids', expanding=True)),
-                {'ids': sorted(ids)},
-            ).all()
-        else:
-            rows = connection.execute(
-                text('SELECT movie_id, country_iso2 FROM tmdb_movie_countries')
-            ).all()
+        sorted_ids = sorted(ids)
+        country_query = text(
+            'SELECT movie_id, country_iso2 FROM tmdb_movie_countries WHERE movie_id IN :ids'
+        ).bindparams(bindparam('ids', expanding=True))
         buckets = defaultdict(set)
-        for mid, code in rows:
-            mid = int(mid)
-            if mid not in ids:
-                continue
-            iso2 = str(code or '').strip().upper()
-            if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
-                buckets[mid].add(iso2)
-        for mid, codes in buckets.items():
-            if codes:
-                mapping[mid] = sorted(codes)
+        for start_idx in range(0, len(sorted_ids), 500):
+            rows = connection.execute(
+                country_query, {'ids': sorted_ids[start_idx:start_idx + 500]},
+            )
+            for mid, code in rows:
+                iso2 = str(code or '').strip().upper()
+                if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
+                    buckets[int(mid)].add(iso2)
+        mapping = {mid: sorted(codes) for mid, codes in buckets.items()}
     remaining = sorted(ids - set(mapping))
     if not remaining:
         return mapping
@@ -584,7 +665,7 @@ def _movie_countries(connection, movie_ids):
         chunk = remaining[start_idx:start_idx + 500]
         key_rows = connection.execute(
             select(sources.c.id, sources.c.movie_id, sources.c.source, sources.c.fetched_at)
-            .where(sources.c.movie_id.in_(chunk), sources.c.source.in_(('tmdb', 'legacy_movies2')))
+            .where(sources.c.movie_id.in_(chunk), sources.c.source.in_(fallback_sources))
         ).all()
         for row_id, mid, source, fetched_at in key_rows:
             mid = int(mid)
@@ -608,13 +689,15 @@ def _movie_countries(connection, movie_ids):
                 payload = json.loads(payload)
             except ValueError:
                 payload = None
+        raw_countries = payload.get('production_countries') if isinstance(payload, dict) else None
+        if not isinstance(raw_countries, list):
+            continue
         countries = []
-        if isinstance(payload, dict):
-            for item in payload.get('production_countries') or []:
-                if isinstance(item, dict):
-                    iso2 = str(item.get('iso_3166_1') or '').strip().upper()
-                    if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
-                        countries.append(iso2)
+        for item in raw_countries:
+            if isinstance(item, dict):
+                iso2 = str(item.get('iso_3166_1') or '').strip().upper()
+                if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
+                    countries.append(iso2)
         if countries:
             mapping[mid] = sorted(set(countries))
     return mapping

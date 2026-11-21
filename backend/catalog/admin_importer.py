@@ -120,8 +120,17 @@ class CatalogImporter:
                 committing=True
             verified=self.receipt(jobid)
             if verified!=result:raise ImportRejected('COMMIT_REQUIRES_RECONCILIATION')
-            from .recommendation_data import invalidate
-            invalidate(self.engine)
+            try:
+                from .recommendation_data import invalidate
+                invalidate(self.engine)
+            except Exception:
+                # The verified commit must still return its receipt.
+                pass
+            try:
+                from .recommendation_boards import invalidate_board_cache
+                invalidate_board_cache(self.engine)
+            except Exception:
+                pass
             return result
         except Exception as e:
             if committing:raise ImportRejected('COMMIT_REQUIRES_RECONCILIATION') from None

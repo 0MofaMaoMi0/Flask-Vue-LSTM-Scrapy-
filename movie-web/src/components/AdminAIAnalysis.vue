@@ -43,19 +43,24 @@ async function load() {
   busy.value = true
   error.value = ''
   try {
-    data.value = await loadAiAnalytics(activeDays.value, current.signal)
+    const next = await loadAiAnalytics(activeDays.value, current.signal)
+    if (current.signal.aborted || mine !== ticket) return
+    data.value = next
     legacy.value = null
   } catch (e) {
-    if (current.signal.aborted || mine !== ticket) return
+    if (current.signal.aborted || mine !== ticket || (e as Error).name === 'AbortError') return
     const failure = e as Error & {status?: number}
     if (failure.status === 401 || failure.status === 403) {
       error.value = failure.message
       return
     }
     try {
-      legacy.value = await loadAiUsageLegacy(activeDays.value, current.signal)
+      const fallback = await loadAiUsageLegacy(activeDays.value, current.signal)
+      if (current.signal.aborted || mine !== ticket) return
+      legacy.value = fallback
       data.value = null
-    } catch {
+    } catch (inner) {
+      if (current.signal.aborted || mine !== ticket || (inner as Error).name === 'AbortError') return
       error.value = failure.message
     }
   } finally {
@@ -78,7 +83,7 @@ watch(() => props.days, value => {
   load()
 })
 onMounted(load)
-onBeforeUnmount(() => controller?.abort())
+onBeforeUnmount(() => { ++ticket; controller?.abort() })
 defineExpose({refresh})
 
 const dailyPoints = computed<TrendPoint[]>(() => {
@@ -139,10 +144,10 @@ const legacyRows = computed(() => (legacy.value?.groups || []).map(row => ({
       </p>
     </div>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }}
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="data || legacy">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="refresh">重新读取</button>
     </p>
-    <p v-else-if="busy && !data && !legacy" class="adm-state" role="status">正在读取 AI 用量账本…</p>
+    <p v-if="busy && !data && !legacy" class="adm-state" role="status">正在读取 AI 用量账本…</p>
 
     <template v-else-if="data">
       <p v-if="data.status === 'unavailable'" class="adm-warnbox" role="status">
@@ -339,34 +344,34 @@ const legacyRows = computed(() => (legacy.value?.groups || []).map(row => ({
 </template>
 
 <style scoped>
-.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:#8f8a80;font-size:11px}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:var(--mi-text-muted);font-size:11px}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
 .ops-chips{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 6px}
-.ops-trend{margin:0;border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:10px 12px 6px}
+.ops-trend{margin:0;border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:10px 12px 6px}
 .ops-chart{height:160px;min-width:0}
-.ops-token{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:12px 14px}
+.ops-token{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:12px 14px}
 .ops-token-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin:10px 0 0}
-.ops-token-grid div{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid rgba(241,236,226,.08);border-radius:8px;background:#141519}
-.ops-token-grid span{color:#a9a294;font-size:10.5px}
-.ops-token-grid b{font-size:16px;font-weight:500;color:#f0eadf;font-variant-numeric:tabular-nums}
-.ops-token-unknown b{color:#dcc49b}
+.ops-token-grid div{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--mi-border-subtle);border-radius:8px;background:var(--mi-surface)}
+.ops-token-grid span{color:var(--mi-text-secondary);font-size:10.5px}
+.ops-token-grid b{font-size:16px;font-weight:500;color:var(--mi-text);font-variant-numeric:tabular-nums}
+.ops-token-unknown b{color:var(--mi-warning)}
 .ops-grid3{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px;margin-top:16px}
-.ops-block{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:4px 14px 12px;min-width:0}
+.ops-block{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:4px 14px 12px;min-width:0}
 .ops-block h3{margin-top:14px}
-.ops-body{margin:4px 0 0;color:#c9c2b8;font-size:11.5px;line-height:1.7}
-.ops-disclosure{margin-top:16px;border-top:1px solid rgba(241,236,226,.08);padding-top:12px}
-.ops-disclosure summary{cursor:pointer;font-size:12px;color:#c9c2b8}
+.ops-body{margin:4px 0 0;color:var(--mi-text-soft);font-size:11.5px;line-height:1.7}
+.ops-disclosure{margin-top:16px;border-top:1px solid var(--mi-border-subtle);padding-top:12px}
+.ops-disclosure summary{cursor:pointer;font-size:12px;color:var(--mi-text-soft)}
 .ops-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-ai :is(.ops-status, .ops-token-grid span, .ops-meta){font-size:11px}
 .ops-ai .ops-body {font-size: 12px}
-.ops-ai :is(button,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-ai :is(button,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 /* AdminView already frames the AI tab in `.panel`; drop our frame there. */
 :global(.panel) > .ops-ai{border:0;background:transparent;padding:0;margin:0}
 @media (max-width: 1100px){

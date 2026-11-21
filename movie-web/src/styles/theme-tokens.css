@@ -1,0 +1,194 @@
+/* MovieInsight 2.0 Dual-Theme Semantic Tokens (unslop Warm Paper Light + Cinema Dark) */
+:root[data-theme="light"] {
+  color-scheme: light;
+  color: #000000;
+  /* Surfaces (Warm Archival Paper ramp) */
+  --mi-bg: #F7F4EE;
+  --mi-bg-deep: #EFE9DF;
+  --mi-surface: #FFFFFF;
+  --mi-surface-warm: #FDFBF7;
+  --mi-surface-raised: #EFE9DF;
+  --mi-surface-hover: #EAE2D5;
+  --mi-surface-active: #E5DCCB;
+  --mi-input-bg: #FFFFFF;
+  --mi-sidebar-bg: #F3EFE6;
+  --mi-sidebar-active: #E6DFD1;
+  --mi-sidebar-hover: rgba(31, 27, 22, 0.055);
+  --mi-sidebar-border: rgba(31, 27, 22, 0.09);
+
+  /* Text Hierarchy (default black on light theme) */
+  --mi-text: #000000;
+  --mi-text-ivory: #000000;
+  --mi-text-soft: #000000;
+  --mi-text-secondary: #000000;
+  --mi-text-muted: #000000;
+  --mi-text-subtle: rgba(0, 0, 0, 0.56);
+
+  /* Hairlines & Borders */
+  --mi-border: rgba(31, 27, 22, 0.12);
+  --mi-border-strong: rgba(31, 27, 22, 0.24);
+  --mi-border-subtle: rgba(31, 27, 22, 0.07);
+
+  /* Single Accent (Deep Bronze Amber, >=4.5:1 on light paper) */
+  --mi-accent: #8C6226;
+  --mi-accent-hover: #754F1B;
+  --mi-accent-text: #754F1B;
+  --mi-accent-soft: rgba(140, 98, 38, 0.10);
+  --mi-accent-border: rgba(140, 98, 38, 0.36);
+  --mi-accent-on: #FFFFFF;
+
+  /* Primary Button (Ink on light) */
+  --mi-primary-btn-bg: #000000;
+  --mi-primary-btn-hover: #222222;
+  --mi-primary-btn-text: #FFFFFF;
+
+  /* Semantic Colors */
+  --mi-positive: #15803D;
+  --mi-positive-soft: rgba(22, 163, 74, 0.10);
+  --mi-positive-border: rgba(22, 163, 74, 0.32);
+  --mi-negative: #C82828;
+  --mi-negative-soft: rgba(220, 38, 38, 0.08);
+  --mi-negative-border: rgba(220, 38, 38, 0.34);
+  --mi-warning: #A16207;
+  --mi-warning-soft: rgba(161, 98, 7, 0.10);
+
+  /* Neutral Shadows & Scrims */
+  --mi-shadow-sm: 0 1px 2px rgba(31, 27, 22, 0.05);
+  --mi-shadow-md: 0 8px 24px rgba(31, 27, 22, 0.08);
+  --mi-shadow-lg: 0 18px 48px rgba(31, 27, 22, 0.12);
+  --mi-backdrop: rgba(31, 27, 22, 0.36);
+  --mi-composer-fade: linear-gradient(180deg, rgba(247, 244, 238, 0.90) 0%, #F7F4EE 45%);
+
+  /* Hero & Rail gradients */
+  --mi-hero-shade: linear-gradient(90deg, rgba(247, 244, 238, 0.98) 0%, rgba(247, 244, 238, 0.90) 42%, rgba(247, 244, 238, 0.50) 70%, rgba(247, 244, 238, 0.12) 100%), linear-gradient(0deg, #F7F4EE 0%, transparent 24%), linear-gradient(180deg, rgba(247, 244, 238, 0.45) 0%, transparent 18%);
+  --mi-hero-shade-mobile: linear-gradient(0deg, #F7F4EE 0%, rgba(247, 244, 238, 0.62) 38%, rgba(247, 244, 238, 0.14) 100%);
+  --mi-rail-left: linear-gradient(90deg, rgba(247, 244, 238, 0.95), rgba(247, 244, 238, 0.65) 58%, transparent);
+  --mi-rail-right: linear-gradient(270deg, rgba(247, 244, 238, 0.95), rgba(247, 244, 238, 0.65) 58%, transparent);
+
+  /* Scrollbars & Selection */
+  --mi-scroll-thumb: #C8BFA9;
+  --mi-scroll-track: #EFE9DF;
+  --mi-selection-bg: rgba(140, 98, 38, 0.20);
+  --mi-selection-text: #000000;
+
+  /* Data viz & Heatmap steps */
+  --mi-bar-track: #E7E0D3;
+  --mi-bar-fill: #8C6226;
+  --mi-heat-0: rgba(140, 98, 38, 0.04);
+  --mi-heat-1: rgba(140, 98, 38, 0.14);
+  --mi-heat-2: rgba(140, 98, 38, 0.26);
+  --mi-heat-3: rgba(140, 98, 38, 0.42);
+  --mi-heat-4: rgba(140, 98, 38, 0.60);
+  --mi-avatar-empty-bg: #E7E0D3;
+  --mi-avatar-empty-fg: #000000;
+
+  /* Status badges */
+  --mi-badge-bg: rgba(140, 98, 38, 0.10);
+  --mi-badge-border: rgba(140, 98, 38, 0.28);
+  --mi-badge-text: #754F1B;
+  --mi-chip-hover: rgba(31, 27, 22, 0.06);
+  --mi-chip-active: rgba(31, 27, 22, 0.09);
+
+  /* Hero & Stage media adjustments */
+  --mi-hero-backdrop-opacity: .42;
+  --mi-detail-backdrop-opacity: .42;
+  --mi-hero-backdrop-filter: saturate(.85) contrast(1.02) brightness(1.0);
+  --mi-stage-sky-display: none;
+  --mi-stage-sky-after: linear-gradient(0deg, rgba(239, 233, 223, 0.55), transparent 45%);
+}
+
+:root,
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  color: #FFFFFF;
+  --mi-bg: #0c0d0f;
+  --mi-bg-deep: #090a0f;
+  --mi-surface: #141519;
+  --mi-surface-warm: #141519;
+  --mi-surface-raised: #191a1f;
+  --mi-surface-hover: #202127;
+  --mi-surface-active: #23242a;
+  --mi-input-bg: #0c0d0f;
+  --mi-sidebar-bg: #101113;
+  --mi-sidebar-active: #202125;
+  --mi-sidebar-hover: rgba(255, 255, 255, 0.06);
+  --mi-sidebar-border: rgba(255, 255, 255, 0.10);
+
+  /* Text Hierarchy (default white on dark theme) */
+  --mi-text: #FFFFFF;
+  --mi-text-ivory: #FFFFFF;
+  --mi-text-soft: #FFFFFF;
+  --mi-text-secondary: #FFFFFF;
+  --mi-text-muted: #FFFFFF;
+  --mi-text-subtle: rgba(255, 255, 255, 0.56);
+
+  --mi-border: rgba(241, 236, 226, 0.14);
+  --mi-border-strong: rgba(241, 236, 226, 0.26);
+  --mi-border-subtle: rgba(241, 236, 226, 0.08);
+
+  --mi-accent: #C8A46A;
+  --mi-accent-hover: #D6B57E;
+  --mi-accent-text: #DCC49B;
+  --mi-accent-soft: rgba(200, 164, 106, 0.12);
+  --mi-accent-border: rgba(200, 164, 106, 0.45);
+  --mi-accent-on: #171410;
+
+  --mi-primary-btn-bg: #E9DFCD;
+  --mi-primary-btn-hover: #F2E9D9;
+  --mi-primary-btn-text: #171410;
+
+  --mi-positive: #A9C4AE;
+  --mi-positive-soft: rgba(76, 195, 138, 0.14);
+  --mi-positive-border: rgba(169, 196, 174, 0.36);
+  --mi-negative: #E8A094;
+  --mi-negative-soft: rgba(204, 76, 76, 0.16);
+  --mi-negative-border: rgba(232, 122, 122, 0.48);
+  --mi-warning: #CBB38F;
+  --mi-warning-soft: rgba(200, 164, 106, 0.10);
+
+  --mi-shadow-sm: none;
+  --mi-shadow-md: 0 16px 35px rgba(0, 0, 0, 0.45);
+  --mi-shadow-lg: 0 28px 64px rgba(0, 0, 0, 0.55);
+  --mi-backdrop: rgba(4, 5, 7, 0.72);
+  --mi-composer-fade: linear-gradient(180deg, rgba(12, 13, 15, 0.90) 0%, #0c0d0f 45%);
+
+  --mi-hero-shade: linear-gradient(90deg, rgba(12, 13, 15, 0.97) 0%, rgba(12, 13, 15, 0.88) 42%, rgba(12, 13, 15, 0.42) 68%, rgba(12, 13, 15, 0.12) 100%), linear-gradient(0deg, #0c0d0f 0%, transparent 24%), linear-gradient(180deg, rgba(12, 13, 15, 0.48) 0%, transparent 18%);
+  --mi-hero-shade-mobile: linear-gradient(0deg, #0c0d0f 0%, rgba(12, 13, 15, 0.55) 36%, rgba(12, 13, 15, 0.10) 100%);
+  --mi-rail-left: linear-gradient(90deg, rgba(12, 13, 15, 0.92), rgba(12, 13, 15, 0.58) 58%, transparent);
+  --mi-rail-right: linear-gradient(270deg, rgba(12, 13, 15, 0.92), rgba(12, 13, 15, 0.58) 58%, transparent);
+
+  --mi-scroll-thumb: #4b3f5d;
+  --mi-scroll-track: #121116;
+  --mi-selection-bg: rgba(200, 164, 106, 0.32);
+  --mi-selection-text: #FFFFFF;
+
+  --mi-bar-track: #242030;
+  --mi-bar-fill: #9e81c6;
+  --mi-heat-0: rgba(158, 129, 198, 0.02);
+  --mi-heat-1: rgba(158, 129, 198, 0.10);
+  --mi-heat-2: rgba(158, 129, 198, 0.20);
+  --mi-heat-3: rgba(158, 129, 198, 0.34);
+  --mi-heat-4: rgba(158, 129, 198, 0.50);
+  --mi-avatar-empty-bg: #28272d;
+  --mi-avatar-empty-fg: #FFFFFF;
+
+  --mi-badge-bg: rgba(175, 145, 231, 0.12);
+  --mi-badge-border: rgba(175, 145, 231, 0.35);
+  --mi-badge-text: #d9c7f3;
+  --mi-chip-hover: rgba(255, 255, 255, 0.05);
+  --mi-chip-active: rgba(255, 255, 255, 0.08);
+
+  --mi-hero-backdrop-opacity: .58;
+  --mi-detail-backdrop-opacity: .72;
+  --mi-hero-backdrop-filter: saturate(.7) contrast(1.05) brightness(.62);
+  --mi-stage-sky-display: block;
+  --mi-stage-sky-after: linear-gradient(0deg, rgba(12, 13, 15, 0.66), transparent 55%);
+}
+
+html, body {
+  color: var(--mi-text);
+}
+
+::placeholder {
+  color: var(--mi-text-subtle);
+}

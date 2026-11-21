@@ -1,6 +1,10 @@
 
-    :root{color-scheme:dark;--bg:#07090f;--ivory:#f5eee5;--amber:#d2b88e;--muted:#b3b2b9;--line:rgba(248,240,225,.21);--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;--serif:'Noto Serif SC','Songti SC','SimSun',serif}
-    *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:var(--bg)} body{color:var(--ivory);font-family:var(--sans);overflow-x:hidden} button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:2px solid #f9dbad;outline-offset:4px} a{color:inherit}
+    :root{--bg:var(--mi-bg);--ivory:var(--mi-text);--amber:var(--mi-accent);--muted:var(--mi-text-muted);--line:var(--mi-border);--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;--serif:'Noto Serif SC','Songti SC','SimSun',serif}
+    *{box-sizing:border-box} html,body{margin:0;min-height:100%;background:var(--bg)} body{color:var(--ivory);font-family:var(--sans);overflow-x:hidden} button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible{outline:2px solid var(--mi-accent);outline-offset:4px} a{color:inherit}
+    /* 登录/欢迎/注册界面永久锁定原版深色影院设计，不受站点浅色/深色主题切换影响 */
+    html:has(.wall),body:has(.wall),.wall,.screen,.poster-state{color-scheme:dark!important;--bg:#07090f;--ivory:#f5eee5;--amber:#d2b88e;--muted:#b3b2b9;--line:rgba(248,240,225,.21)}
+    body:has(.wall){background:#07090f;color:#f5eee5}
+    .screen button:focus-visible,.screen input:focus-visible{outline:2px solid #f9dbad;outline-offset:4px}
     .wall{position:fixed;inset:0;z-index:0;overflow:hidden;background:linear-gradient(125deg,#08111a,#100e17 46%,#1a1113)}
     .wall-grid{position:absolute;inset:-20% -11%;display:flex;gap:12px;transform:rotate(-7deg) scale(1.1);pointer-events:none;filter:saturate(.78) contrast(1.09);}
     .strip{flex:1;min-width:100px;overflow:hidden;position:relative;--duration:46s}

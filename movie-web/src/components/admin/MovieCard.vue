@@ -49,7 +49,7 @@ onBeforeUnmount(() => { unmounted = true; ++serial })
 </template>
 
 <style scoped>
-.poster-note{position:absolute;bottom:8px;left:8px;right:8px;font-size:10px;line-height:1.4;color:#a096a9;text-align:center}
-.poster-rank{position:absolute;top:6px;left:6px;font-size:10px;letter-spacing:.08em;color:#e2ccA8;background:#141519cc;border:1px solid #c8a46a55;border-radius:4px;padding:1px 5px}
-.card-note{color:#9e8fae!important;font-size:10px!important;line-height:1.5}
+.poster-note{position:absolute;bottom:8px;left:8px;right:8px;font-size:10px;line-height:1.4;color:var(--mi-text-muted);text-align:center}
+.poster-rank{position:absolute;top:6px;left:6px;font-size:10px;letter-spacing:.08em;color:#f4e6cc;background:rgba(16,17,21,.82);border:1px solid var(--mi-accent-border);border-radius:4px;padding:1px 5px}
+.card-note{color:var(--mi-text-muted)!important;font-size:10px!important;line-height:1.5}
 </style>

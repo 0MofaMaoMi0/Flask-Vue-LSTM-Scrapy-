@@ -11,10 +11,9 @@ Five GET endpoints, all of them read-only and bounded:
 * ``/api/admin/tmdb-supplement/batches``   read-only page over ``ingest_batches``
   plus item/error distributions.
 
-The analytics/quality documents are cached in-process: a cheap watermark
-(``tmdb_movie_metadata`` row count + max ``fetched_at``/``updated_at``) plus a
-15 second TTL decide when to reload.  A failed load never replaces the previous
-snapshot, and concurrent misses share one load.
+Analytics and quality share an engine-specific document cache. An expired
+snapshot remains available while a background connection checks the watermark.
+A matching disk snapshot can restore the cache after a restart.
 
 Authorisation mirrors ``admin_api.py`` exactly: the session row must exist and
 the user must be listed in ``ADMIN_USERS`` (``MI2_ADMIN_USERS``), otherwise
@@ -22,13 +21,24 @@ the user must be listed in ``ADMIN_USERS`` (``MI2_ADMIN_USERS``), otherwise
 nothing here can trigger an upstream refresh.
 """
 from collections import OrderedDict
+from contextlib import contextmanager, nullcontext
+import gzip
+from io import TextIOWrapper
+import json
+import logging
+import os
+from pathlib import Path
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
+from weakref import WeakKeyDictionary
+import zlib
 
-from flask import Blueprint, g, jsonify, request
+from flask import Blueprint, current_app, g, jsonify, request
 from sqlalchemy.exc import SQLAlchemyError
 
+from catalog.public_catalog_cache import namespace, persistent
 from catalog.tmdb_supplement import repository
 from catalog.tmdb_supplement.analytics import (
     AnalyticsInputError,
@@ -72,8 +82,12 @@ MIN_YEAR, MAX_YEAR = 1800, 2199
 MAX_TEXT_FILTER = 64
 MAX_LIST_ITEMS = 16
 MAX_INSTANT_LENGTH = 40
-DEFAULT_CACHE_TTL = 15.0
-DEFAULT_RESULT_LRU_MAXSIZE = 32
+DEFAULT_CACHE_TTL = 120.0
+DEFAULT_RESULT_LRU_MAXSIZE = 64
+DOCUMENT_PAGE_SIZE = 1000
+MAX_ANALYTICS_DOCUMENTS = 20000
+SNAPSHOT_VERSION = 1
+_LOG = logging.getLogger(__name__)
 
 
 def _iso(moment):
@@ -88,25 +102,108 @@ def _watermark_key(watermark):
             watermark.get('max_updated_at'))
 
 
+def _snapshot_dir(app):
+    configured = os.environ.get('MI2_ADMIN_CACHE_DIR')
+    media = app.config.get('MEDIA_CACHE_DIR') if not configured else None
+    if not (configured or media):
+        return None
+    directory = Path(configured) if configured else Path(media) / '.admin-cache'
+    # Reject implicit drive roots, relative paths and UNC shares on Windows.
+    if os.name == 'nt' and (not directory.is_absolute() or not directory.drive.endswith(':')
+                           or directory.drive.upper() == 'C:'):
+        return None
+    try:
+        directory = directory.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    # A junction on another drive can resolve back to the system drive.
+    if os.name == 'nt' and (not directory.drive.endswith(':') or directory.drive.upper() == 'C:'):
+        return None
+    return directory
+
+
+class _DiskSnapshot:
+    def __init__(self, directory, engine_namespace):
+        self.namespace = engine_namespace
+        self.path = directory / f'tmdb-supplement-{engine_namespace}.json.gz'
+
+    def read(self, watermark):
+        try:
+            with gzip.open(self.path, 'rt', encoding='utf-8') as stream:
+                snapshot = json.load(stream)
+            if (not isinstance(snapshot, dict)
+                    or snapshot.get('version') != SNAPSHOT_VERSION
+                    or snapshot.get('namespace') != self.namespace
+                    or snapshot.get('schema_version') != repository.SCHEMA_VERSION
+                    or snapshot.get('watermark') != watermark):
+                return None
+            documents = snapshot.get('documents')
+            if (not isinstance(documents, list)
+                    or len(documents) != min(watermark['document_count'], MAX_ANALYTICS_DOCUMENTS)
+                    or any(not isinstance(doc, dict)
+                           or doc.get('schema_version') != repository.SCHEMA_VERSION
+                           or type(doc.get('movie_id')) is not int
+                           or not isinstance(doc.get('facts'), dict)
+                           or not isinstance(doc.get('field_status'), dict)
+                           for doc in documents)
+                    or len({doc['movie_id'] for doc in documents}) != len(documents)):
+                return None
+            return documents
+        except (OSError, EOFError, ValueError, zlib.error, RecursionError):
+            return None
+
+    def write(self, watermark, documents):
+        temporary_path = None
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(dir=self.path.parent, prefix='.tmdb-supplement-',
+                                             suffix='.tmp', delete=False) as temporary:
+                temporary_path = Path(temporary.name)
+                with gzip.GzipFile(fileobj=temporary, mode='wb', compresslevel=3) as compressed:
+                    with TextIOWrapper(compressed, encoding='utf-8') as stream:
+                        json.dump({
+                            'version': SNAPSHOT_VERSION,
+                            'namespace': self.namespace,
+                            'schema_version': repository.SCHEMA_VERSION,
+                            'watermark': watermark,
+                            'documents': documents,
+                        }, stream, ensure_ascii=False, separators=(',', ':'))
+                temporary.flush()
+                os.fsync(temporary.fileno())
+            os.replace(temporary_path, self.path)
+        except (OSError, TypeError, ValueError) as exc:
+            _LOG.warning('tmdb_supplement snapshot write failed (%s)', type(exc).__name__)
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+
 class DocumentCache:
     """Process-local two-tier cache for supplement documents and aggregates.
 
     Tier 1 caches raw documents + lazy normalized :class:`PreparedDocuments`
     for the current watermark generation; Tier 2 maintains a bounded LRU
-    (``maxsize=32``) of aggregate payloads keyed by ``(generation, params)``.
+    of aggregate payloads keyed by (generation, params).
     """
 
     def __init__(self, ttl=DEFAULT_CACHE_TTL, clock=time.monotonic,
-                 lru_maxsize=DEFAULT_RESULT_LRU_MAXSIZE):
+                 lru_maxsize=DEFAULT_RESULT_LRU_MAXSIZE, disk=None):
         self.ttl = float(ttl)
         self._clock = clock
         self._lock = threading.Lock()
+        self._load_lock = threading.Lock()
         self._derived_lock = threading.Lock()
+        self._disk = disk
         self._documents = None
         self._watermark = None
         self._watermark_report = None
         self._loaded_at = None
         self._loaded_monotonic = None
+        self._checked_monotonic = None
+        self._warm_started = False
         self.load_count = 0
         self._prepared = None
         self._prepared_generation = None
@@ -118,28 +215,89 @@ class DocumentCache:
         with self._lock:
             return self._documents, self._report()
 
-    def fetch(self, watermark, loader):
-        key = _watermark_key(watermark)
-        now = self._clock()
+    def fetch(self, watermark, loader, *, swr=False, refresh=None):
+        """Fetch synchronously by default, retaining reload-on-expiry semantics."""
+        if swr:
+            with self._lock:
+                if self._documents is not None and self._expired():
+                    result = self._documents, self._report()
+                    if self._load_lock.acquire(blocking=False):
+                        source = refresh or (lambda: nullcontext((watermark, loader)))
+                        self._start_refresh(source)
+                    return result
+        with self._load_lock:
+            watermark = watermark() if callable(watermark) else watermark
+            with self._lock:
+                if (self._documents is not None and self._watermark == _watermark_key(watermark)
+                        and not self._expired()):
+                    return self._documents, self._report()
+            documents, restored = self._read_documents(watermark, loader)
+            return self._store(watermark, documents, restored)
+
+    def fetch_swr(self, watermark, loader, *, refresh=None):
+        return self.fetch(watermark, loader, swr=True, refresh=refresh)
+
+    def warm(self, source):
         with self._lock:
-            fresh = (self._documents is not None and self._watermark == key
-                     and now - self._loaded_monotonic <= self.ttl)
-            if fresh:
-                return self._documents, self._report()
-            documents = loader()
-            loaded_now = self._clock()
+            if self._warm_started or self._documents is not None:
+                return
+            if self._load_lock.acquire(blocking=False):
+                self._warm_started = True
+                self._start_refresh(source)
+
+    def _expired(self):
+        return (self._checked_monotonic is not None
+                and self._clock() - self._checked_monotonic > self.ttl)
+
+    def _start_refresh(self, source):
+        try:
+            threading.Thread(target=self._refresh, args=(source,), daemon=True,
+                             name='tmdb-supplement-refresh').start()
+        except RuntimeError as exc:
+            self._load_lock.release()
+            _LOG.warning('tmdb_supplement refresh could not start (%s)', type(exc).__name__)
+
+    def _refresh(self, source):
+        try:
+            with source() as (watermark, loader):
+                watermark = watermark() if callable(watermark) else watermark
+                with self._lock:
+                    if self._watermark == _watermark_key(watermark):
+                        self._checked_monotonic = self._clock()
+                        return
+                documents, restored = self._read_documents(watermark, loader)
+            self._store(watermark, documents, restored)
+        except Exception as exc:
+            _LOG.warning('tmdb_supplement background refresh failed (%s)', type(exc).__name__)
+        finally:
+            self._load_lock.release()
+
+    def _read_documents(self, watermark, loader):
+        if self._documents is None and self._disk is not None:
+            documents = self._disk.read(watermark)
+            if documents is not None:
+                return documents, True
+        return loader(), False
+
+    def _store(self, watermark, documents, restored):
+        result = self._publish(watermark, documents, restored=restored)
+        if not restored and self._disk is not None:
+            self._disk.write(watermark, documents)
+        return result
+
+    def _publish(self, watermark, documents, *, restored=False):
+        with self._derived_lock, self._lock:
             self._documents = documents
-            self._watermark = key
+            self._watermark = _watermark_key(watermark)
             self._watermark_report = dict(watermark)
             self._loaded_at = datetime.now(timezone.utc)
-            self._loaded_monotonic = loaded_now
+            self._loaded_monotonic = self._checked_monotonic = self._clock()
             self.load_count += 1
-            with self._derived_lock:
-                self._prepared = None
-                self._prepared_generation = None
-                self._lru.clear()
-                self._lru_generation = self.load_count
-            return documents, self._report(hit=False)
+            self._prepared = None
+            self._prepared_generation = None
+            self._lru.clear()
+            self._lru_generation = self.load_count
+            return documents, self._report(hit=restored, status='DISK_HIT' if restored else 'MISS')
 
     def prepared_for(self, generation, documents):
         with self._derived_lock:
@@ -154,8 +312,6 @@ class DocumentCache:
     def get_result(self, generation, key):
         with self._derived_lock:
             if self._lru_generation != generation:
-                self._lru.clear()
-                self._lru_generation = generation
                 return None
             if key not in self._lru:
                 return None
@@ -175,35 +331,95 @@ class DocumentCache:
             while len(self._lru) > self._lru_maxsize:
                 self._lru.popitem(last=False)
 
-    def _report(self, hit=None):
+    def _report(self, hit=None, status=None):
         if hit is None:
             hit = self._documents is not None
         now = self._clock()
         age = None
         if self._loaded_monotonic is not None:
             age = round(max(0.0, now - self._loaded_monotonic), 3)
+        stale = self._expired()
         return {
             'hit': bool(hit),
-            'status': 'HIT' if hit else 'MISS',
+            'status': status or ('STALE' if stale else 'HIT' if hit else 'MISS'),
+            'stale': stale,
             'loaded_at': _iso(self._loaded_at),
             'watermark': dict(self._watermark_report or {}),
             'ttl_seconds': self.ttl,
             'age_seconds': age,
             'load_count': self.load_count,
-            'note': '进程内文档缓存：水位（document_count/max_fetched_at/max_updated_at）'
-                    '变化或超过 TTL 才重载；加载失败不覆盖上次快照。',
+            'note': '文档缓存超过 TTL 后异步检查水位。水位变化时更新，刷新失败时保留上次快照。',
         }
 
 
-_DOCUMENT_CACHE = DocumentCache()
+_CACHE_LOCK = threading.Lock()
+_DOCUMENT_CACHES = WeakKeyDictionary()
 
 
-def _documents(connection):
-    """Load documents through the shared cache; returns ``(documents, report)``."""
-    watermark = repository.load_watermark(connection)
-    return _DOCUMENT_CACHE.fetch(
-        watermark,
-        lambda: repository.load_documents(connection, limit=repository.MAX_DOCUMENTS))
+def _catalog_engine(app):
+    return app.extensions.get('catalog_engine') or app.extensions.get('auth_engine')
+
+
+def _cache_for(app, engine):
+    with _CACHE_LOCK:
+        cache = _DOCUMENT_CACHES.get(engine)
+        if cache is None:
+            directory = _snapshot_dir(app) if persistent(engine) else None
+            disk = _DiskSnapshot(directory, namespace(engine)) if directory is not None else None
+            cache = _DOCUMENT_CACHES[engine] = DocumentCache(disk=disk)
+        return cache
+
+
+@contextmanager
+def _document_source(engine):
+    with engine.connect() as connection:
+        yield repository.load_watermark(connection), lambda: _load_all_documents(connection)
+
+
+def warm_async(app):
+    engine = _catalog_engine(app)
+    if engine is not None:
+        _cache_for(app, engine).warm(lambda: _document_source(engine))
+
+
+def _load_all_documents(connection):
+    """Load active mapped documents in bounded pages up to ``MAX_ANALYTICS_DOCUMENTS``."""
+    page_size = min(repository.MAX_DOCUMENTS, DOCUMENT_PAGE_SIZE)
+    documents = []
+    offset = 0
+    while len(documents) < MAX_ANALYTICS_DOCUMENTS:
+        remaining = MAX_ANALYTICS_DOCUMENTS - len(documents)
+        limit = min(page_size, remaining)
+        batch = repository.load_documents(connection, limit=limit, offset=offset)
+        if not batch:
+            break
+        documents.extend(batch)
+        if len(batch) < limit:
+            break
+        offset += len(batch)
+    return documents
+
+
+def _documents(cache, engine, connection):
+    return cache.fetch_swr(
+        lambda: repository.load_watermark(connection),
+        lambda: _load_all_documents(connection),
+        refresh=lambda: _document_source(engine),
+    )
+
+
+def _log_data_unavailable(exc):
+    """Record only exception class and numeric DB errno (never SQL/params)."""
+    orig = getattr(exc, 'orig', None)
+    args = getattr(orig, 'args', ()) if orig is not None else ()
+    errno = args[0] if args and isinstance(args[0], int) else None
+    try:
+        current_app.logger.warning(
+            'tmdb_supplement %s unavailable (%s errno=%s)',
+            request.endpoint or 'unknown', type(exc).__name__, errno,
+        )
+    except RuntimeError:
+        pass
 
 
 def _scoped_coverage(documents, limit, offset):
@@ -254,8 +470,7 @@ def install(app):
     def engine():
         # The catalog tables live on the M6 engine; admin_api reads them through
         # ``auth_engine`` on today's deployment, so accept either injection.
-        return (app.extensions.get('catalog_engine')
-                or app.extensions.get('auth_engine'))
+        return _catalog_engine(app)
 
     def integer(name, default=None, low=0, high=MAX_VOTES):
         raw = request.args.get(name)
@@ -386,7 +601,8 @@ def install(app):
                         repository.load_documents(conn, limit=limit, offset=offset),
                         limit, offset)
             return reply(data)
-        except (repository.RepositoryError, SQLAlchemyError):
+        except (repository.RepositoryError, SQLAlchemyError) as exc:
+            _log_data_unavailable(exc)
             return fail('DATA_UNAVAILABLE', 503)
 
     @bp.get('/analytics')
@@ -465,7 +681,9 @@ def install(app):
             connection = engine()
             if connection is None:
                 raise repository.RepositoryError('no catalog engine')
+            document_cache = _cache_for(app, connection)
             with connection.connect() as conn:
+                documents, cache = _documents(document_cache, connection, conn)
                 try:
                     catalog = repository.load_catalog_counts(conn)
                 except (repository.RepositoryError, SQLAlchemyError):
@@ -480,7 +698,6 @@ def install(app):
                         'status': 'UNAVAILABLE',
                         'note': '目录表计数读取失败；本响应不含在架/关联数量，不补 0。',
                     }
-                documents, cache = _documents(conn)
             generation = cache['load_count']
             cache_key = (
                 'analytics',
@@ -489,20 +706,20 @@ def install(app):
                 tuple(comparison),
                 min_votes,
             )
-            base_data = _DOCUMENT_CACHE.get_result(generation, cache_key)
+            base_data = document_cache.get_result(generation, cache_key)
             if base_data is None:
-                prepared = _DOCUMENT_CACHE.prepared_for(generation, documents)
+                prepared = document_cache.prepared_for(generation, documents)
                 base_data = aggregate_movies(
                     documents, filters=filters,
                     countries=comparison or None,
                     min_votes=min_votes, prepared=prepared)
                 base_data['scope']['repository'] = {
                     'documents_loaded': len(documents),
-                    'cap': repository.MAX_DOCUMENTS,
+                    'cap': MAX_ANALYTICS_DOCUMENTS,
                     # Hitting the cap means the aggregate may cover only that window.
-                    'truncated': len(documents) >= repository.MAX_DOCUMENTS,
+                    'truncated': len(documents) >= MAX_ANALYTICS_DOCUMENTS,
                 }
-                _DOCUMENT_CACHE.put_result(generation, cache_key, base_data)
+                document_cache.put_result(generation, cache_key, base_data)
             data = dict(base_data)
             scope = dict(base_data['scope'])
             scope['repository'] = dict(base_data['scope']['repository'])
@@ -516,7 +733,8 @@ def install(app):
                                  'conflicts': exc.conflicts}), 409
         except AnalyticsInputError:
             return fail('INVALID_INPUT', 400)
-        except (repository.RepositoryError, SQLAlchemyError):
+        except (repository.RepositoryError, SQLAlchemyError) as exc:
+            _log_data_unavailable(exc)
             return fail('DATA_UNAVAILABLE', 503)
 
     @bp.get('/missing')
@@ -541,7 +759,8 @@ def install(app):
                 'has_more': len(items) == limit,
                 'items': items,
             })
-        except (repository.RepositoryError, SQLAlchemyError):
+        except (repository.RepositoryError, SQLAlchemyError) as exc:
+            _log_data_unavailable(exc)
             return fail('DATA_UNAVAILABLE', 503)
 
     @bp.get('/quality')
@@ -569,11 +788,12 @@ def install(app):
             connection = engine()
             if connection is None:
                 raise repository.RepositoryError('no catalog engine')
+            document_cache = _cache_for(app, connection)
             with connection.connect() as conn:
+                documents, cache = _documents(document_cache, connection, conn)
                 catalog = repository.load_catalog_counts(conn)
                 unmapped = (repository.load_unmapped_movies(conn)
                             if denominator == 'active' else [])
-                documents, cache = _documents(conn)
             generation = cache['load_count']
             unmapped_sig = tuple(
                 (item.get('movie_id'), item.get('title'), item.get('release_year'))
@@ -584,9 +804,9 @@ def install(app):
                 catalog.get('active_movies'), catalog.get('tmdb_mapped'),
                 catalog.get('unmapped'), catalog.get('source'), unmapped_sig,
             )
-            base_data = _DOCUMENT_CACHE.get_result(generation, cache_key)
+            base_data = document_cache.get_result(generation, cache_key)
             if base_data is None:
-                prepared = _DOCUMENT_CACHE.prepared_for(generation, documents)
+                prepared = document_cache.prepared_for(generation, documents)
                 base_data = aggregate_quality(
                     documents, catalog=catalog, denominator=denominator, top=top,
                     problem_limit=limit, problem_offset=offset, topic=topic,
@@ -594,13 +814,13 @@ def install(app):
                 base_data['scope'] = {
                     'repository': {
                         'documents_loaded': len(documents),
-                        'cap': repository.MAX_DOCUMENTS,
-                        'truncated': len(documents) >= repository.MAX_DOCUMENTS,
+                        'cap': MAX_ANALYTICS_DOCUMENTS,
+                        'truncated': len(documents) >= MAX_ANALYTICS_DOCUMENTS,
                     },
                     'unmapped_loaded': len(unmapped),
                     'unmapped_cap': repository.MAX_UNMAPPED_ROWS,
                 }
-                _DOCUMENT_CACHE.put_result(generation, cache_key, base_data)
+                document_cache.put_result(generation, cache_key, base_data)
             data = dict(base_data)
             data['catalog'] = dict(base_data['catalog'])
             data['catalog']['as_of'] = catalog.get('as_of')
@@ -614,7 +834,8 @@ def install(app):
                                  'conflicts': exc.conflicts}), 409
         except AnalyticsInputError:
             return fail('INVALID_INPUT', 400)
-        except (repository.RepositoryError, SQLAlchemyError):
+        except (repository.RepositoryError, SQLAlchemyError) as exc:
+            _log_data_unavailable(exc)
             return fail('DATA_UNAVAILABLE', 503)
 
     @bp.get('/batches')
@@ -647,7 +868,8 @@ def install(app):
             data['returned'] = len(data['items'])
             data['has_more'] = offset + len(data['items']) < data['total']
             return reply(data)
-        except (repository.RepositoryError, SQLAlchemyError):
+        except (repository.RepositoryError, SQLAlchemyError) as exc:
+            _log_data_unavailable(exc)
             return fail('DATA_UNAVAILABLE', 503)
 
     app.register_blueprint(bp)

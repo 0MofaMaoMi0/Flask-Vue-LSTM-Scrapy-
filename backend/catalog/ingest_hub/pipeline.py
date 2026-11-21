@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import bindparam, text
+from sqlalchemy.engine import Engine
 
 from catalog import admin_importer as _admin_importer
 from catalog import data_pipeline as _data_pipeline
@@ -1214,6 +1215,26 @@ def verify_archive(
 # ------------------------------------------------------------------ commit
 
 
+def _invalidate_public_catalog(connection):
+    try:
+        engine = getattr(connection, "engine", None)
+        if isinstance(engine, Engine):
+            from catalog import public_catalog_cache
+
+            public_catalog_cache.invalidate(engine)
+    except Exception:
+        # Cache invalidation is best-effort after a successful database write.
+        pass
+    try:
+        engine = getattr(connection, "engine", None)
+        if isinstance(engine, Engine):
+            from catalog.recommendation_boards import invalidate_board_cache
+
+            invalidate_board_cache(engine)
+    except Exception:
+        pass
+
+
 def commit_archive(
     archive_dir,
     *,
@@ -1268,6 +1289,7 @@ def commit_archive(
             raise HubRejected(exc.code, str(exc)) from None
         except _ingest.IngestError as exc:
             raise HubInputError(exc.code, str(exc)) from None
+        _invalidate_public_catalog(connection)
         receipt = {
             'contract': HUB_CONTRACT,
             'rule_version': RULE_VERSION,
@@ -1334,6 +1356,7 @@ def commit_archive(
             )
         except _admin_importer.ImportRejected as exc:
             raise HubRejected(str(exc), str(exc)) from None
+        _invalidate_public_catalog(connection)
         receipt = {
             'contract': HUB_CONTRACT,
             'rule_version': RULE_VERSION,

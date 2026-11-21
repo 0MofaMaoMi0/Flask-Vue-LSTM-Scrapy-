@@ -1,13 +1,69 @@
 <script setup lang="ts">
 import {ref,shallowRef,computed,onMounted,onBeforeUnmount,watch} from 'vue'
 import {useRoute,useRouter} from 'vue-router'
+import {useAuthStore} from '../stores/auth'
 import AppSidebar from '../components/AppSidebar.vue'
 import {accountSettingsTarget} from '../services/accountSettings'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 import {movieArtwork} from '../services/movieArtwork'
-const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
-const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({})
+const REC_CACHE_MAX_ENTRIES=24
+const REC_CACHE_TTL_MS=120_000
+const REC_META_TTL_MS=300_000
+type SwrGlobalBus={behaviorEpoch:number;authEpoch:number;listening:boolean}
+type RecCacheEntry={userKey:string;authEpoch:number;epoch:number;updatedAt:number;data:any}
+type RecMetaCache={authEpoch:number;updatedAt:number;channels:any[];genres:any[];languages:{code:string;count:number}[]}
+const swrBus:SwrGlobalBus=((globalThis as any).__mi2SwrBus??={behaviorEpoch:1,authEpoch:1,listening:false})
+if(!swrBus.listening&&typeof window!=='undefined'){
+ swrBus.listening=true
+ const bumpBehavior=()=>{swrBus.behaviorEpoch++}
+ window.addEventListener('mi2-behavior-changed',bumpBehavior)
+ window.addEventListener('mi2-tmdb-status',bumpBehavior)
+}
+const recCache:Map<string,RecCacheEntry>=((globalThis as any).__mi2RecSwrCache??=new Map<string,RecCacheEntry>())
+let recMetaCache:RecMetaCache|null=((globalThis as any).__mi2RecMetaCache??=null)
+function clearRecCaches(bumpAuth=false){
+ recCache.clear()
+ recMetaCache=null
+ ;(globalThis as any).__mi2RecMetaCache=null
+ if(bumpAuth)swrBus.authEpoch++
+}
+const route=useRoute(),router=useRouter(),auth=useAuthStore(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
+function getUserCacheKey():string{
+ const u=auth.user as any
+ const id=u?.id??u?.user_id??u?.username
+ return id!==undefined&&id!==null&&String(id)!==''?String(id):'anon'
+}
+function invalidateUserRecCache(userKey=getUserCacheKey()){
+ swrBus.behaviorEpoch++
+ for(const [k,entry] of recCache.entries()){
+  if(entry.userKey===userKey)entry.epoch=0
+ }
+}
+function readRecCache(key:string):RecCacheEntry|undefined{
+ const entry=recCache.get(key)
+ if(!entry)return undefined
+ if(entry.authEpoch!==swrBus.authEpoch){
+  clearRecCaches(false)
+  return undefined
+ }
+ recCache.delete(key)
+ recCache.set(key,entry)
+ return entry
+}
+function writeRecCache(key:string,entry:RecCacheEntry){
+ if(recCache.has(key))recCache.delete(key)
+ recCache.set(key,entry)
+ while(recCache.size>REC_CACHE_MAX_ENTRIES){
+  const oldest=recCache.keys().next().value
+  if(oldest===undefined)break
+  recCache.delete(oldest)
+ }
+}
+watch(()=>auth.user?(auth.user as any).id??(auth.user as any).username??'auth':null,(next,prev)=>{
+ if(prev!==undefined&&next!==prev)clearRecCaches(true)
+})
+const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({}),boardRenderKey=ref(0)
 const languageNames:Record<string,string>={zh:'中文',cn:'中文',en:'英语',ja:'日语',ko:'韩语',fr:'法语',de:'德语',es:'西班牙语',it:'意大利语',ru:'俄语',hi:'印地语',th:'泰语',pt:'葡萄牙语',da:'丹麦语',sv:'瑞典语',nl:'荷兰语',pl:'波兰语',tr:'土耳其语',ar:'阿拉伯语',no:'挪威语',fi:'芬兰语',cs:'捷克语',hu:'匈牙利语',el:'希腊语',he:'希伯来语',fa:'波斯语',id:'印尼语',vi:'越南语',uk:'乌克兰语'}
 const languages=ref<{code:string,count:number}[]>([]),languageOptions=computed(()=>languages.value.length?languages.value.map(l=>({code:l.code,label:languageNames[l.code]||l.code.toUpperCase()})):[{code:'zh',label:'中文'},{code:'en',label:'英语'},{code:'ja',label:'日语'},{code:'ko',label:'韩语'},{code:'fr',label:'法语'},{code:'de',label:'德语'}])
 // 库内影片的海报资产多为 local_static 相对路径，后端 asset_url 不把它转成可访问地址，
@@ -23,13 +79,77 @@ const tmdbBusy=ref(false),tmdbNotice=ref('')
 const keyword=ref(''),genre=ref(''),language=ref(''),yearFrom=ref(''),yearTo=ref(''),runtime=ref(''),minVotes=ref(''),localOnly=ref(false),unwatched=ref(false)
 const channel=computed(()=>String(route.query.channel||'daily'))
 const selected=computed(()=>channels.value.find(c=>c.id===channel.value))
-let controller:AbortController|undefined,initController:AbortController|undefined,sequence=0
+let controller:AbortController|undefined,initController:AbortController|undefined,sequence=0,loadedChannel='',selfTmdbEvent=false
 const feedback=shallowRef<ReturnType<typeof createFeedbackBoard>>()
-async function get(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});let body:any=null;try{body=await r.json()}catch{body=null};if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':'推荐频道暂时无法读取，请重试。');if(!body||body.code!=='OK'||body.data==null)throw new Error('推荐频道响应异常，请重试。');return body.data}
+async function get(path:string,signal?:AbortSignal){
+ const timeout=AbortSignal.timeout(20000)
+ const combined=signal?AbortSignal.any([signal,timeout]):timeout
+ const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:combined});let body:any=null;try{body=await r.json()}catch{body=null}
+ if(!r.ok){
+  if(r.status===401)clearRecCaches(true)
+  const err=new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'推荐缓存正在预热或暂时不可用，请稍后重试。':'推荐频道暂时无法读取，请重试。')
+  ;(err as any).status=r.status
+  throw err
+ }
+ if(!body||body.code!=='OK'||body.data==null)throw new Error('推荐频道响应异常，请重试。')
+ return body.data
+}
 function sync(){const q=route.query;keyword.value=String(q.keyword||'');genre.value=String(q.genre||'');language.value=String(q.language||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');runtime.value=String(q.runtime_max||'');minVotes.value=String(q.min_votes||'');localOnly.value=q.scope==='local';unwatched.value=q.unwatched==='true'}
-async function load(){sync();controller?.abort();controller=new AbortController();const id=++sequence;loading.value=true;error.value='';data.value=null;feedback.value?.dispose()
- try{const params=new URLSearchParams({channel:channel.value,limit:'36'});for(const key of ['keyword','genre','language','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]));const result=await get('recommendations?'+params,controller.signal);if(id===sequence){data.value=result;feedback.value=createFeedbackBoard({channel:channel.value,period:result.period,context:'recommendations',items:result.items})}}
- catch(e){if(id===sequence&&!controller.signal.aborted)error.value=(e as Error).message}finally{if(id===sequence)loading.value=false}}
+function buildQueryParams():URLSearchParams{
+ const params=new URLSearchParams({channel:channel.value,limit:'36'})
+ for(const key of ['keyword','genre','language','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]))
+ return params
+}
+async function load(options?:{force?:boolean;silent?:boolean}|Event){
+ const isEvent=typeof Event!=='undefined'&&options instanceof Event
+ const opts:{force?:boolean;silent?:boolean}=options&&!(options instanceof Event)?options:{}
+ const force=isEvent?true:opts.force===true
+ const userKey=getUserCacheKey()
+ if(force)invalidateUserRecCache(userKey)
+ sync()
+ const params=buildQueryParams()
+ const cacheKey=`${userKey}::${params.toString()}`
+ const cached=readRecCache(cacheKey)
+ if(cached&&cached.data){
+  const isSameData=data.value===cached.data&&loadedChannel===channel.value
+  if(!isSameData){
+   feedback.value?.dispose()
+   data.value=cached.data
+   loadedChannel=channel.value
+   boardRenderKey.value=++sequence
+   feedback.value=createFeedbackBoard({channel:channel.value,period:cached.data.period,context:'recommendations',items:cached.data.items})
+  }
+  loading.value=false
+  error.value=''
+  const isFresh=!force&&cached.epoch===swrBus.behaviorEpoch&&Date.now()-cached.updatedAt<REC_CACHE_TTL_MS&&cached.data?.status!=='UNAVAILABLE'
+  if(isFresh){
+   controller?.abort()
+   controller=undefined
+   return
+  }
+ }
+ controller?.abort();const current=new AbortController();controller=current;const id=++sequence
+ const startEpoch=swrBus.behaviorEpoch
+ const hasVisibleData=!!data.value&&(loadedChannel===channel.value||!!cached?.data||opts.silent===true)
+ loading.value=!hasVisibleData;error.value=''
+ if(!hasVisibleData){data.value=null;feedback.value?.dispose()}
+ try{
+  const result=await get('recommendations?'+params,current.signal)
+  if(id===sequence&&!current.signal.aborted){
+   feedback.value?.dispose()
+   data.value=result;loadedChannel=channel.value
+   boardRenderKey.value=id
+   writeRecCache(cacheKey,{userKey,authEpoch:swrBus.authEpoch,epoch:startEpoch,updatedAt:Date.now(),data:result})
+   feedback.value=createFeedbackBoard({channel:channel.value,period:result.period,context:'recommendations',items:result.items})
+  }
+ }catch(e){
+  if(id===sequence&&!current.signal.aborted&&(e as Error).name!=='AbortError'){
+   if((e as any)?.status===401){data.value=null;feedback.value?.dispose();error.value=(e as Error).message}
+   else if(!hasVisibleData||isEvent)error.value=(e as Error).message
+  }
+ }
+ finally{if(id===sequence)loading.value=false}
+}
 async function updateTMDB(){
  if(tmdbBusy.value||loading.value)return
  tmdbBusy.value=true;tmdbNotice.value=''
@@ -38,18 +158,37 @@ async function updateTMDB(){
   if(!publicBoard&&!ids.length){tmdbNotice.value='当前片单没有可匹配 TMDB 的影片。';return}
   const r=await tmdbRequest('refresh','POST',publicBoard?{channel:channel.value}:{movie_ids:ids});const ok=r.results.filter((x:any)=>x.status==='OK').length
   tmdbNotice.value=r.all_updated?(publicBoard?'已取得可用官方榜单；短时间内复用最新缓存。':'已更新前 '+ok+' 部影片的公开资料；个人片单顺序保持稳定。'):'部分更新失败，保留已有缓存。'+r.results.filter((x:any)=>x.status!=='OK').map((x:any)=>tmdbErrors['TMDB_'+x.status]||'上游暂不可用').join(' ')
-  await load();tmdbChanged()
+  invalidateUserRecCache();await load({force:true,silent:!!data.value});selfTmdbEvent=true;try{tmdbChanged()}finally{selfTmdbEvent=false}
  }catch(e){tmdbNotice.value=(e as Error).message}finally{tmdbBusy.value=false}
 }
 function change(id:string){router.push({path:'/recommendations',query:{...route.query,channel:id}})}
-function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,language:language.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)load();else router.push(target)}
+function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,language:language.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)void load({force:true,silent:!!data.value});else router.push(target)}
 function detail(movie:any){feedback.value?.click((data.value?.items?.indexOf(movie)??-1)+1);router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
 function stamp(value?:string){if(!value)return '未提供';const d=new Date(value);return Number.isNaN(d.getTime())?'未提供':d.toLocaleString('zh-CN',{hour12:false})}
 function money(value:number){return new Intl.NumberFormat('zh-CN',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(value)}
-const onBehavior=()=>load()
-onMounted(async()=>{window.addEventListener('mi2-behavior-changed',onBehavior);window.addEventListener('mi2-tmdb-status',onBehavior);initController?.abort();initController=new AbortController();const signal=initController.signal;try{const [c,g,l]=await Promise.all([get('recommendation-channels',signal),get('genres',signal),get('languages',signal).catch(()=>({items:[]}))]);if(signal.aborted)return;channels.value=c.items;genres.value=g.items;languages.value=l.items||[];await load()}catch(e){if(!signal.aborted){error.value=(e as Error).message;loading.value=false}}})
-watch(()=>route.fullPath,()=>{if(channels.value.length)load()})
-onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
+const onBehavior=()=>{if(!selfTmdbEvent){invalidateUserRecCache();void load({force:true,silent:!!data.value})}}
+onMounted(async()=>{
+ window.addEventListener('mi2-behavior-changed',onBehavior);window.addEventListener('mi2-tmdb-status',onBehavior);initController?.abort();initController=new AbortController();const signal=initController.signal
+ if(recMetaCache&&recMetaCache.authEpoch===swrBus.authEpoch&&recMetaCache.channels.length>0){
+  channels.value=recMetaCache.channels;genres.value=recMetaCache.genres;languages.value=recMetaCache.languages
+ }
+ const loadTask=load()
+ const metaFresh=recMetaCache&&recMetaCache.authEpoch===swrBus.authEpoch&&Date.now()-recMetaCache.updatedAt<REC_META_TTL_MS&&recMetaCache.channels.length>0
+ if(!metaFresh){
+  try{
+   const [c,g,l]=await Promise.all([get('recommendation-channels',signal),get('genres',signal).catch(()=>({items:[]})),get('languages',signal).catch(()=>({items:[]}))])
+   if(signal.aborted)return
+   channels.value=c.items||[];genres.value=g.items||[];languages.value=l.items||[]
+   recMetaCache={authEpoch:swrBus.authEpoch,updatedAt:Date.now(),channels:channels.value,genres:genres.value,languages:languages.value}
+   ;(globalThis as any).__mi2RecMetaCache=recMetaCache
+  }catch(e){
+   if(!signal.aborted&&(e as Error).name!=='AbortError'&&!data.value){error.value=(e as Error).message;loading.value=false}
+  }
+ }
+ await loadTask
+})
+watch(()=>route.fullPath,()=>{void load()})
+onBeforeUnmount(()=>{++sequence;feedback.value?.dispose();initController?.abort();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
 </script>
 <template>
  <div class="recommend-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><AppSidebar @expanded-change="expanded=$event"/>
@@ -68,12 +207,12 @@ onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controlle
   <label class="check" v-if="selected?.public"><input type="checkbox" v-model="localOnly"/>只看已入库</label>
   <label class="check"><input type="checkbox" v-model="unwatched"/>排除已看</label><button class="apply" type="submit">应用筛选</button><router-link :to="{path:'/recommendations',query:{channel}}">重置</router-link>
  </form>
- <div v-if="loading" class="state" role="status">正在读取推荐与个人状态…</div>
- <div v-else-if="error" class="state" role="alert"><p>{{error}}</p><button @click="load">重试</button><router-link to="/login">重新登录</router-link></div>
- <template v-else-if="data"><div class="provenance"><span>{{selected?.public?'官方榜单采集':'库内资料更新'}}：{{stamp(data.source_as_of)}}</span><span v-if="data.period">片单周期：{{data.period}} · 北京时间</span><span>{{data.candidate_count||0}} 部符合条件 · 零模型调用</span><button @click="load">重新读取</button></div>
- <p v-if="data.status==='STALE'" class="notice" role="status">当前为缓存榜单，请以采集时间为准。</p><p v-for="note in data.limitations" :key="note" class="notice">{{note}}</p>
+ <div v-if="loading&&!data" class="state" role="status">正在读取推荐与个人状态…</div>
+ <div v-else-if="error&&!data" class="state" role="alert"><p>{{error}}</p><button @click="load">重试</button><router-link to="/login">重新登录</router-link></div>
+ <template v-else-if="data"><p v-if="error" class="notice" role="alert">{{error}}（已保留上一份可用榜单） · <button type="button" style="background:none;border:0;text-decoration:underline;padding:0" @click="load">重试</button></p><div class="provenance"><span>{{selected?.public?'官方榜单采集':'库内资料更新'}}：{{stamp(data.source_as_of)}}</span><span v-if="data.period">片单周期：{{data.period}} · 北京时间</span><span>{{data.candidate_count||0}} 部符合条件 · 零模型调用</span><button @click="load">重新读取</button></div>
+ <p v-if="data.status==='STALE'||data.status==='DEGRADED'||data.degraded" class="notice" role="status">当前为缓存榜单，请以采集时间为准。</p><p v-for="note in data.limitations" :key="note" class="notice">{{note}}</p>
  <div v-if="!data.items.length" class="state"><h3>{{data.status==='UNAVAILABLE'?'官方榜单尚未就绪':'暂无符合条件的电影'}}</h3><p>可以减少筛选条件；个人频道需要相应的收藏、评分或想看记录。</p><router-link to="/movies">浏览电影并完善偏好</router-link></div>
- <div v-else class="poster-grid"><article v-for="(movie,index) in data.items" :key="sequence+':'+movie.key" v-feedback="{board:feedback,position:Number(index)+1}" class="movie-card" :data-movie-id="movie.movie_id||''">
+ <div v-else class="poster-grid"><article v-for="(movie,index) in data.items" :key="boardRenderKey+':'+movie.key" v-feedback="{board:feedback,position:Number(index)+1}" class="movie-card" :data-movie-id="movie.movie_id||''">
   <button v-if="movie.in_catalog" class="board-poster" :aria-label="'查看《'+movie.title+'》详情'" @click="detail(movie)"><img v-if="posterOf(movie)" :src="posterOf(movie)" :alt="movie.title+'海报'" loading="lazy" @error="posterError(movie,$event)"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span></button>
   <a v-else class="board-poster" @click="feedback?.click(Number(index)+1)" :href="movie.tmdb_url" target="_blank" rel="noopener noreferrer" :aria-label="'在 TMDB 查看《'+movie.title+'》（新标签页）'"><img v-if="posterOf(movie)" :src="posterOf(movie)" :alt="movie.title+'海报'" loading="lazy" @error="posterError(movie,$event)"/><span v-else class="fallback">{{movie.title}}<small>暂无可用海报</small></span><span class="external">TMDB</span></a>
   <h3>{{movie.title}}</h3><p class="meta">{{movie.release_year||'年份未提供'}}<template v-if="movie.runtime_minutes"> · {{movie.runtime_minutes}} 分钟</template></p><p class="genre">{{movie.genres?.join(' / ')||'类型未提供'}}</p>
@@ -83,15 +222,15 @@ onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controlle
  </main></div>
 </template>
 <style scoped>
-:global(body:has(.recommend-shell)){margin:0;background:#0c0d0f;color:#fff}
-.recommend-shell{--ink:#0c0d0f;--ink-soft:#141519;--paper:#fff;--paper-dim:rgba(255,255,255,.82);--muted:rgba(255,255,255,.58);--line:rgba(241,236,226,.14);--line-strong:rgba(241,236,226,.26);--accent:#c8a46a;--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
+:global(body:has(.recommend-shell)){margin:0;background:var(--mi-bg);color:var(--mi-text)}
+.recommend-shell{--ink:var(--mi-bg);--ink-soft:var(--mi-surface);--paper:var(--mi-text);--paper-dim:var(--mi-text-soft);--muted:var(--mi-text-muted);--line:var(--mi-border);--line-strong:var(--mi-border-strong);--accent:var(--mi-accent);--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
 .recommend-main{margin-left:var(--nav-width,52.5px);width:calc(100% - var(--nav-width,52.5px));max-width:none;box-sizing:border-box;container:recommendations / inline-size;padding:40px clamp(22px,3.4vw,56px) 64px;transition:margin-left .25s;min-width:0}
 .recommend-main *{box-sizing:border-box}
 .recommend-main a{color:var(--paper-dim);text-underline-offset:4px;text-decoration-color:var(--line-strong)}
 .recommend-main button,.recommend-main input,.recommend-main select{font:inherit;color:inherit}
 .recommend-main button{cursor:pointer}
 .recommend-main :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.recommend-main ::selection{background:var(--accent);color:var(--ink)}
+.recommend-main ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 .board-heading p{color:var(--muted);font-size:13px;line-height:1.7;margin:0}
 .channel-nav{display:flex;flex-wrap:wrap;gap:4px;padding:0;border-bottom:1px solid var(--line)}
 .channel-nav button{background:transparent;border:0;border-bottom:2px solid transparent;border-radius:0;padding:11px 14px;margin-bottom:-1px;font-size:13px;color:var(--muted);transition:color .16s,border-color .16s}
@@ -108,23 +247,23 @@ onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controlle
 .filters{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:12px 14px;align-items:end;padding:0 0 22px;border-bottom:1px solid var(--line);margin-bottom:18px}
 .filters label{display:flex;flex-direction:column;gap:6px;color:var(--muted);font-size:11px;min-width:0}
 .filters input,.filters select{height:40px;width:100%;max-width:none;background:var(--ink-soft);border:1px solid var(--line);border-radius:7px;padding:6px 10px;color:var(--paper);font-size:12px}
-.filters input::placeholder{color:var(--muted)}
+.filters input::placeholder{color:var(--mi-text-subtle)}
 .filters input:focus,.filters select:focus{border-color:var(--line-strong);outline:none}
 .filters input[type=number]{width:100%}
 .filters .check{flex-direction:row;align-items:center;min-height:40px;gap:8px;color:var(--paper-dim);white-space:nowrap}
 .filters input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;margin:0;flex:none}
-.filters .apply,.state button{padding:10px 14px;background:transparent;color:var(--paper);border:1px solid var(--paper);border-radius:7px;font-size:12px;font-weight:500;height:40px;white-space:nowrap}
-.filters .apply:hover,.state button:hover{background:rgba(255,255,255,.08)}
+.filters .apply,.state button{padding:10px 14px;background:var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text);border:1px solid var(--mi-primary-btn-bg);border-radius:7px;font-size:12px;font-weight:500;height:40px;white-space:nowrap}
+.filters .apply:hover,.state button:hover{background:var(--mi-primary-btn-hover);border-color:var(--mi-primary-btn-hover)}
 .filters>a{font-size:12px;line-height:40px;color:var(--muted);text-decoration:none;white-space:nowrap}
 .filters>a:hover{color:var(--paper)}
 .provenance{display:flex;flex-wrap:wrap;gap:8px 20px;color:var(--muted);font-size:11px;line-height:1.7;align-items:center;margin:0 0 16px}
 .provenance button{background:none;border:0;color:var(--paper-dim);text-decoration:underline;text-underline-offset:3px;text-decoration-color:var(--line-strong);padding:0;font-size:11px}
 .poster-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(172px,1fr));gap:30px 18px;margin-top:22px}
 .movie-card{min-width:0}
-.board-poster{display:block;width:100%;aspect-ratio:2/3;position:relative;overflow:hidden;background:var(--ink-soft);border:1px solid rgba(255,255,255,.16);border-radius:14px;padding:0;color:var(--paper);text-decoration:none;transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease;box-shadow:0 5px 17px #0003}
-.board-poster:hover,.board-poster:focus-within{transform:translateY(-4px);border-color:rgba(241,236,226,.38);box-shadow:0 16px 35px #0009}
+.board-poster{display:block;width:100%;aspect-ratio:2/3;position:relative;overflow:hidden;background:var(--ink-soft);border:1px solid var(--line);border-radius:14px;padding:0;color:var(--paper);text-decoration:none;transition:transform .22s ease,border-color .22s ease,box-shadow .22s ease;box-shadow:var(--mi-shadow-sm)}
+.board-poster:hover,.board-poster:focus-within{transform:translateY(-4px);border-color:var(--mi-accent);box-shadow:var(--mi-shadow-md)}
 .board-poster img{width:100%;height:100%;object-fit:cover;display:block}
-.external{position:absolute;left:10px;right:auto;bottom:10px;background:rgba(12,13,15,.78);border:1px solid rgba(255,255,255,.28);color:var(--paper);padding:5px 8px;border-radius:999px;font-size:9px;line-height:1.2;letter-spacing:.03em;backdrop-filter:blur(3px)}
+.external{position:absolute;left:10px;right:auto;bottom:10px;background:rgba(12,13,15,.80);border:1px solid rgba(255,255,255,.28);color:#fff;padding:5px 8px;border-radius:999px;font-size:9px;line-height:1.2;letter-spacing:.03em;backdrop-filter:blur(3px)}
 .fallback{height:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px;text-align:center;gap:10px;line-height:1.6;font-family:var(--serif);font-size:18px;color:var(--paper)}
 .fallback small{color:var(--muted);font-family:var(--sans);font-size:10px}
 .movie-card h3{font-size:14px;line-height:1.45;font-weight:500;margin:11px 0 4px;color:var(--paper);overflow-wrap:anywhere}
@@ -138,7 +277,7 @@ onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controlle
 .state button{margin-right:16px}
 @media(min-width:2000px){.poster-grid{grid-template-columns:repeat(auto-fill,minmax(190px,1fr))}}
 @media(max-width:1100px){.poster-grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:24px 14px}}
-@media(max-width:700px){.recommend-main{padding:26px 16px 56px}.channel-nav{gap:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}.channel-nav::-webkit-scrollbar{display:none}.channel-nav button{padding:11px 12px;white-space:nowrap}.board-heading h2{font-size:24px}.filters{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:flex-end;gap:9px;padding-bottom:14px;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.22) transparent}.filters label{flex:0 0 148px}.filters .apply{flex:0 0 92px}.filters>a{grid-column:auto;flex:0 0 auto;line-height:40px;padding:0 4px}.poster-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 12px}.movie-card h3{font-size:13px}.provenance{gap:6px 14px}}
+@media(max-width:700px){.recommend-main{padding:26px 16px 56px}.channel-nav{gap:0;overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}.channel-nav::-webkit-scrollbar{display:none}.channel-nav button{padding:11px 12px;white-space:nowrap}.board-heading h2{font-size:24px}.filters{display:flex;flex-wrap:nowrap;overflow-x:auto;align-items:flex-end;gap:9px;padding-bottom:14px;scrollbar-width:thin;scrollbar-color:var(--mi-scroll-thumb) transparent}.filters label{flex:0 0 148px}.filters .apply{flex:0 0 92px}.filters>a{grid-column:auto;flex:0 0 auto;line-height:40px;padding:0 4px}.poster-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 12px}.movie-card h3{font-size:13px}.provenance{gap:6px 14px}}
 @media(prefers-reduced-motion:reduce){.recommend-main,.board-poster,.channel-nav button{transition:none}.board-poster:hover,.board-poster:focus-within{transform:none;box-shadow:0 5px 17px #0003}}
 
 @container recommendations (max-width:900px){.filters{display:flex;flex-wrap:wrap;gap:12px}.filters label{flex:1 1 140px;min-width:0}.filters .apply{flex:0 0 auto}}
@@ -195,5 +334,5 @@ onBeforeUnmount(()=>{feedback.value?.dispose();initController?.abort();controlle
 .poster-grid{grid-template-columns:repeat(auto-fill,minmax(min(100%,var(--poster-width)),var(--poster-width)));justify-content:start;gap:32px var(--poster-gap)}
 @media(max-width:1100px){.recommend-main{--poster-gap:20px}.poster-grid{row-gap:28px}}
 /* 海报上的标注与海报同宽 */
-.movie-card .external{left:0!important;right:0!important;bottom:0!important;width:100%!important;display:block!important;text-align:center!important;padding:5px 0!important;border:0!important;border-top:1px solid rgba(255,255,255,.18)!important;border-radius:0 0 14px 14px!important;background:rgba(12,13,15,.82)!important;letter-spacing:.08em!important}
+.movie-card .external{left:0!important;right:0!important;bottom:0!important;width:100%!important;display:block!important;text-align:center!important;padding:5px 0!important;border:0!important;border-top:1px solid rgba(255,255,255,.18)!important;border-radius:0 0 14px 14px!important;background:rgba(12,13,15,.82)!important;color:#fff!important;letter-spacing:.08em!important}
 .movie-card .board-poster{border-radius:14px!important;overflow:hidden!important}</style>

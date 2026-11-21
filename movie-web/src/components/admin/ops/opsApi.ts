@@ -55,8 +55,16 @@ function describe(status: number, code: string): string {
   if (status === 403) return '需要管理员权限，当前账号无权查看。'
   if (status === 400) return '筛选参数不合法（' + (code || 'INVALID_INPUT') + '），请调整后重试。'
   if (status === 404) return '该统计接口尚未部署（NOT_FOUND）。'
-  if (status === 503) return '统计来源暂时不可用（DATA_UNAVAILABLE），请稍后手动刷新。'
+  if (code === 'CACHE_WARMING') return '统计缓存正在后台预热（CACHE_WARMING），请稍后手动刷新。'
+  if (status === 503 || code === 'DATA_UNAVAILABLE') return '统计来源暂时不可用（DATA_UNAVAILABLE），请稍后手动刷新。'
   return '统计接口请求失败，请稍后手动刷新。'
+}
+
+function makeAbortError(): Error {
+  if (typeof DOMException !== 'undefined') return new DOMException('The operation was aborted.', 'AbortError')
+  const err = new Error('The operation was aborted.')
+  err.name = 'AbortError'
+  return err
 }
 
 /** 20 s ceiling so a stalled statistics query cannot freeze a panel. */
@@ -68,21 +76,92 @@ export function opsSignal(outer?: AbortSignal): AbortSignal | undefined {
   return outer
 }
 
+interface InFlightOpsEntry {
+  controller: AbortController
+  subscribers: Set<symbol>
+  promise: Promise<unknown>
+}
+
+const inFlightOpsGets = new Map<string, InFlightOpsEntry>()
+
 export async function opsGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch('/api/admin/' + path.replace(/^\/+/, ''), {
-    credentials: 'same-origin',
-    headers: { Accept: 'application/json' },
-    signal: opsSignal(signal),
+  if (signal?.aborted) throw makeAbortError()
+  const url = '/api/admin/' + path.replace(/^\/+/, '')
+  let entry = inFlightOpsGets.get(url)
+  if (!entry) {
+    const controller = new AbortController()
+    const subscribers = new Set<symbol>()
+    const promise = (async () => {
+      const response = await fetch(url, {
+        credentials: 'same-origin',
+        headers: { Accept: 'application/json' },
+        signal: opsSignal(controller.signal),
+      })
+      let body: any = null
+      try { body = await response.json() } catch { body = null }
+      if (!response.ok) {
+        throw new OpsRequestError(describe(response.status, body?.code || ''), response.status, body?.code || '')
+      }
+      if (!body || body.code !== 'OK' || body.data == null) {
+        throw new OpsRequestError(
+          body?.code === 'DATA_UNAVAILABLE' || body?.code === 'CACHE_WARMING'
+            ? describe(503, body.code)
+            : '管理数据响应格式异常（缺少 data）。',
+          response.status,
+          body?.code || 'BAD_ENVELOPE',
+        )
+      }
+      return body.data
+    })().finally(() => {
+      if (inFlightOpsGets.get(url)?.controller === controller) {
+        inFlightOpsGets.delete(url)
+      }
+    })
+    entry = { controller, subscribers, promise }
+    inFlightOpsGets.set(url, entry)
+  }
+
+  const activeEntry = entry
+  const token = Symbol('opsGet')
+  activeEntry.subscribers.add(token)
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      activeEntry.subscribers.delete(token)
+      if (activeEntry.subscribers.size === 0) {
+        inFlightOpsGets.delete(url)
+        activeEntry.controller.abort()
+      }
+      reject(makeAbortError())
+    }
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    activeEntry.promise.then(
+      value => {
+        signal?.removeEventListener('abort', onAbort)
+        activeEntry.subscribers.delete(token)
+        if (signal?.aborted) {
+          reject(makeAbortError())
+          return
+        }
+        resolve(value as T)
+      },
+      error => {
+        signal?.removeEventListener('abort', onAbort)
+        activeEntry.subscribers.delete(token)
+        if (signal?.aborted) {
+          reject(makeAbortError())
+          return
+        }
+        reject(error)
+      },
+    )
   })
-  let body: any = null
-  try { body = await response.json() } catch { body = null }
-  if (!response.ok) {
-    throw new OpsRequestError(describe(response.status, body?.code || ''), response.status, body?.code || '')
-  }
-  if (!body || body.code !== 'OK' || body.data == null) {
-    throw new OpsRequestError('管理数据响应格式异常（缺少 data）。', response.status, body?.code || 'BAD_ENVELOPE')
-  }
-  return body.data as T
 }
 
 /* ---------------------------------------------------------------- windows */
@@ -244,6 +323,10 @@ const STATUS_META: Record<string, StatusMeta> = {
   partial: { label: '部分缺失', tone: 'warn' },
   observing: { label: '观察中', tone: 'warn' },
   running: { label: '执行中', tone: 'warn' },
+  warming: { label: '预热中', tone: 'warn' },
+  refreshing: { label: '后台续刷', tone: 'warn' },
+  stale: { label: '旧快照（SWR）', tone: 'warn' },
+  degraded: { label: '降级可用', tone: 'warn' },
   insufficient_sample: { label: '样本不足', tone: 'warn' },
   suppressed: { label: '已隐藏（小样本）', tone: 'warn' },
   pending: { label: '等待中', tone: 'muted' },
@@ -689,11 +772,16 @@ export interface TrendPoint { date: string; value: number | null }
  * Shared ECharts option for the daily trend cards. `null` stays a gap, never a
  * zero, so a failed day cannot masquerade as “no activity”.
  */
+function isLightMode(): boolean {
+  return typeof document !== 'undefined' && document.documentElement?.dataset?.theme === 'light'
+}
+
 export function trendOption(
   name: string,
   points: TrendPoint[],
   kind: 'line' | 'bar' = 'line',
 ): Record<string, any> {
+  const light = isLightMode()
   const dates = points.map(point => point.date)
   const values = points.map(point => (typeof point.value === 'number' && Number.isFinite(point.value) ? point.value : null))
   const axis = {
@@ -701,14 +789,14 @@ export function trendOption(
     data: dates,
     boundaryGap: kind === 'bar',
     axisTick: { show: false },
-    axisLine: { lineStyle: { color: 'rgba(241,236,226,.16)' } },
-    axisLabel: { color: '#8f8a80', fontSize: 9, interval: 'auto', hideOverlap: true },
+    axisLine: { lineStyle: { color: light ? 'rgba(31,27,22,.16)' : 'rgba(241,236,226,.16)' } },
+    axisLabel: { color: light ? '#000000' : '#FFFFFF', fontSize: 9, interval: 'auto', hideOverlap: true },
   }
   const valueAxis = {
     type: 'value',
     minInterval: 1,
-    splitLine: { lineStyle: { color: 'rgba(241,236,226,.07)' } },
-    axisLabel: { color: '#8f8a80', fontSize: 9 },
+    splitLine: { lineStyle: { color: light ? 'rgba(31,27,22,.07)' : 'rgba(241,236,226,.07)' } },
+    axisLabel: { color: light ? '#000000' : '#FFFFFF', fontSize: 9 },
   }
   return {
     grid: { left: 34, right: 8, top: 10, bottom: 20, containLabel: false },
@@ -718,12 +806,12 @@ export function trendOption(
     series: [kind === 'bar'
       ? {
         name, type: 'bar', data: values, barMaxWidth: 14,
-        itemStyle: { color: '#9e81c6', borderRadius: [2, 2, 0, 0] },
+        itemStyle: { color: light ? '#8C6226' : '#9e81c6', borderRadius: [2, 2, 0, 0] },
       }
       : {
         name, type: 'line', data: values, smooth: false, symbol: 'none',
-        lineStyle: { width: 2, color: '#b9a0f4' },
-        areaStyle: { color: 'rgba(158,129,198,.10)' },
+        lineStyle: { width: 2, color: light ? '#8C6226' : '#b9a0f4' },
+        areaStyle: { color: light ? 'rgba(140,98,38,.12)' : 'rgba(158,129,198,.10)' },
       }],
   }
 }

@@ -80,6 +80,9 @@ def create_app(overrides=None):
         install_imports(app)
         from catalog.tmdb_supplement_api import install as install_tmdb_supplement
         install_tmdb_supplement(app)
+        if not app.config.get('TESTING') and os.environ.get('MI2_SKIP_CACHE_WARMUP') != '1':
+            from catalog.tmdb_supplement_api import warm_async
+            warm_async(app)
     @app.get('/api/v1/health')
     def health(): return jsonify(code=0, message='ok', data={'status':'ok'})
     if app.config.get('M6_ISOLATED') is True:

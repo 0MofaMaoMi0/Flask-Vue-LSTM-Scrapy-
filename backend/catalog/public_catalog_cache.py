@@ -11,11 +11,13 @@ Design notes
   engine's dialect/host/port/database (never the password).  Two engines cannot
   read each other's public data even when their watermarks happen to match.
 * **Invalidation.** A narrow per-movie watermark covers every cached dependency:
-  movie row update, real external mapping, genre names/links, credits
-  count/last update, asset count/last update/primary flag/removal, the current
+  movie row update, external mapping, genre names/links, exact credit
+  and asset rows, the current
   metadata row (topics + ``updated_at``) and the payload hash of the referenced
   source record.  Historical source rows that are not referenced are not pulled
   into Python, so appending history does not grow the check.
+* **Stale reads.** A usable memory snapshot can serve while one daemon per
+  engine checks its watermark. Cold and forced loads still validate synchronously.
 * **Incremental refresh.** A small change rebuilds only the affected movies and
   merges them into a deep copy of the snapshot; a large change rebuilds all.
 * **Atomicity.** Snapshots are written to a temp file, fsynced and moved with
@@ -45,12 +47,13 @@ from sqlalchemy import bindparam, inspect, text
 from weakref import WeakKeyDictionary
 
 SCHEMA = "public-catalog-v2"
-ALGORITHM = "watermark-v3-row-records"
-TTL_SECONDS = 15
+ALGORITHM = "watermark-v4-exact-credits"
+TTL_SECONDS = 120
 MAX_AGE_SECONDS = 3600
 INCREMENTAL_LIMIT = 25
 INCREMENTAL_RATIO = 0.15
 BUILD_ATTEMPTS = 3
+CHUNK_SIZE = 300
 HISTORY_DEPTH = 8  # matches the bounded revenue candidate window
 _PRIVATE_KEYS = {
     "favorite", "favourite", "want", "watched", "not_interested", "rating",
@@ -59,7 +62,8 @@ _PRIVATE_KEYS = {
 _LOG = logging.getLogger(__name__)
 _LOCK = threading.Lock()
 _MEMORY = WeakKeyDictionary()
-_ENGINE_LOCKS = WeakKeyDictionary()
+_ENGINE_STATES = WeakKeyDictionary()
+_GLOBAL_REVISION = 0
 _FORCE_ALL = False
 _FORCE_ENGINES = WeakKeyDictionary()
 _FILE_LOCK = threading.Lock()
@@ -149,6 +153,12 @@ def _has_metadata(engine):
         return False
 
 
+def _chunks(ids):
+    ids = sorted(ids)
+    for offset in range(0, len(ids), CHUNK_SIZE):
+        yield ids[offset:offset + CHUNK_SIZE]
+
+
 def _watermarks(engine, *, has_metadata=None):
     """Per-movie narrow watermark of every cached dependency."""
     has_metadata = _has_metadata(engine) if has_metadata is None else has_metadata
@@ -175,29 +185,6 @@ def _watermarks(engine, *, has_metadata=None):
                 "SELECT l.movie_id, g.genre_id, g.name_zh FROM movie_genres l"
                 " JOIN genres g ON g.genre_id=l.genre_id")).all():
             bucket(movie_id).extend(("genre", genre_id, name))
-        # Field-weighted checksum: a person/role/order swap keeps COUNT/SUM/
-        # MAX but changes this value; credit_id makes each row's weight unique.
-        for (movie_id, count, last_id, people, order_sum, directors,
-             people_distinct, order_max, weighted) in connection.execute(text(
-                "SELECT movie_id, COUNT(*), MAX(credit_id), SUM(person_id),"
-                " SUM(sort_order),"
-                " SUM(CASE WHEN role_type='crew' AND job='Director'"
-                " THEN person_id ELSE 0 END),"
-                " COUNT(DISTINCT person_id), MAX(sort_order),"
-                " SUM(COALESCE(person_id,0) * 1000003 + COALESCE(sort_order,0) * 1009"
-                " + COALESCE(credit_id,0) * 7"
-                " + CASE WHEN role_type='crew' THEN 131 ELSE 0 END"
-                " + CASE WHEN job='Director' THEN 17 ELSE 0 END"
-                " + COALESCE(person_id,0) * COALESCE(credit_id,0))"
-                " FROM movie_credits GROUP BY movie_id")).all():
-            bucket(movie_id).extend(("credits", count, last_id, people, order_sum,
-                                     directors, people_distinct, order_max, weighted))
-        # Assets are few and every used field (path/primary/type/license) must
-        # count: hash the rows themselves instead of lossy SUM/MAX aggregates.
-        for row in connection.execute(text(
-                "SELECT movie_id, asset_id, asset_type, source, source_path,"
-                " is_primary, license_status, updated_at FROM movie_assets")).all():
-            bucket(row[0]).extend(("asset",) + tuple(row[1:]))
         if has_metadata:
             referenced = {}
             for (movie_id, tmdb_id, pk, updated_at,
@@ -211,29 +198,48 @@ def _watermarks(engine, *, has_metadata=None):
                                          metrics_pk, updated_at))
                 for value in (pk, base_pk, countries_pk, metrics_pk):
                     if value is not None:
-                        referenced[int(value)] = int(movie_id)
-            if referenced:
-                statement = text(
-                    "SELECT id, payload_hash FROM movie_source_records"
-                    " WHERE id IN :ids").bindparams(bindparam("ids", expanding=True))
-                for pk, payload_hash in connection.execute(
-                        statement, {"ids": sorted(referenced)}).all():
-                    bucket(referenced[int(pk)]).extend(("src", pk, payload_hash))
-        # Movies without a current capture (or with a missing revenue) read the
-        # newest historical sources.  A bounded newest-8 digest sees an appended
-        # or corrected fallback source without transferring history JSON or all
-        # ids/hashes; the row count is one bounded window, cached per watermark.
-        ranked = text(
+                        referenced.setdefault(int(value), set()).add(int(movie_id))
+            statement = text(
+                "SELECT id, payload_hash FROM movie_source_records"
+                " WHERE id IN :ids").bindparams(bindparam("ids", expanding=True))
+            for ids in _chunks(referenced):
+                for pk, payload_hash in connection.execute(statement, {"ids": ids}):
+                    for movie_id in referenced[int(pk)]:
+                        bucket(movie_id).extend(("src", pk, payload_hash))
+
+        credits = text(
+            "SELECT movie_id, credit_id, person_id, role_type, job, sort_order"
+            " FROM movie_credits WHERE movie_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        assets = text(
+            "SELECT movie_id, asset_id, asset_type, source, source_path,"
+            " is_primary, license_status, updated_at FROM movie_assets WHERE movie_id IN :ids"
+        ).bindparams(bindparam("ids", expanding=True))
+        # Keep the ranking window local to indexed movie IDs. The window transfers
+        # only recent hashes, even if some movies have long capture histories.
+        history = text(
             "SELECT movie_id, id, source, fetched_at, payload_hash FROM ("
             " SELECT movie_id, id, source, fetched_at, payload_hash,"
             " ROW_NUMBER() OVER (PARTITION BY movie_id"
             " ORDER BY fetched_at DESC, id DESC) AS rn"
-            " FROM movie_source_records WHERE source IN ('tmdb','legacy_movies2')) ranked"
-            " WHERE rn <= :depth")
-        for movie_id, source_pk, source, fetched_at, payload_hash in connection.execute(
-                ranked, {"depth": HISTORY_DEPTH}).all():
-            bucket(movie_id).extend(("hist", source_pk, source, fetched_at, payload_hash))
-    return {movie_id: _hash(values) for movie_id, values in marks.items()}
+            " FROM movie_source_records WHERE movie_id IN :ids"
+            " AND source IN ('tmdb','legacy_movies2')) ranked"
+            " WHERE rn <= :depth"
+        ).bindparams(bindparam("ids", expanding=True))
+
+        digests = {}
+        # Digest each shard before loading more credit and asset rows. Row tokens
+        # retain field associations, including compensating changes across credits.
+        for ids in _chunks(marks):
+            for kind, query in (("credit", credits), ("asset", assets), ("hist", history)):
+                params = {"ids": ids}
+                if kind == "hist":
+                    params["depth"] = HISTORY_DEPTH
+                for row in connection.execute(query, params):
+                    bucket(row[0]).extend((kind,) + tuple(row[1:]))
+            for movie_id in ids:
+                digests[movie_id] = _hash(marks.pop(movie_id))
+    return digests
 
 
 def _version(namespace_value, marks):
@@ -251,17 +257,16 @@ _SCALAR_TYPES = (str, int, float, bool, type(None))
 
 
 def _clone_value(value):
+    """Thaw a snapshot into mutable catalog containers owned by the caller."""
     t = type(value)
-    if t is dict:
+    if t in (dict, MappingProxyType):
         return {k: _clone_value(v) for k, v in value.items()}
-    if t is list:
+    if t in (list, tuple):
         return [_clone_value(item) for item in value]
     if t in _SCALAR_TYPES:
         return value
-    if t is set:
-        return {_clone_value(item) for item in value}
-    if t is tuple:
-        return tuple(_clone_value(item) for item in value)
+    if t is frozenset:
+        return copy.deepcopy(set(value))
     return copy.deepcopy(value)
 
 
@@ -278,15 +283,6 @@ def _readonly_value(value):
     if t is tuple:
         return tuple(_readonly_value(item) for item in value)
     return copy.deepcopy(value)
-
-
-def _copy_rows(rows, copy_mode="clone"):
-    """Callers and old snapshots own every nested container they receive."""
-    if copy_mode == "shallow":
-        return [dict(row) for row in rows]
-    if copy_mode == "readonly":
-        return tuple(_readonly_value(row) for row in rows)
-    return [_clone_value(row) for row in rows]
 
 
 def _valid_row(row):
@@ -390,14 +386,27 @@ class _null_guard:
 # ------------------------------------------------------------------ lifecycle
 
 
+class _EngineState:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.revision = 0
+        self.refreshing = False
+
+
 def invalidate(engine=None):
     """Drop the snapshot and force this engine's next load to rebuild."""
-    global _FORCE_ALL
+    global _FORCE_ALL, _GLOBAL_REVISION
     with _LOCK:
         if engine is None:
+            _GLOBAL_REVISION += 1
             _FORCE_ALL = True
+            for known_engine in _ENGINE_STATES:
+                _FORCE_ENGINES[known_engine] = True
             _MEMORY.clear()
         else:
+            state = _ENGINE_STATES.get(engine)
+            if state is not None:
+                state.revision += 1
             _MEMORY.pop(engine, None)
             _FORCE_ENGINES[engine] = True
 
@@ -406,13 +415,13 @@ def stats_enabled():
     return os.environ.get("MI2_CATALOG_STATS", "").strip().lower() in ("1", "true", "yes", "on")
 
 
-def _engine_lock(engine):
+def _engine_state(engine):
     with _LOCK:
-        lock = _ENGINE_LOCKS.get(engine)
-        if lock is None:
-            lock = threading.Lock()
-            _ENGINE_LOCKS[engine] = lock
-        return lock
+        state = _ENGINE_STATES.get(engine)
+        if state is None:
+            state = _EngineState()
+            _ENGINE_STATES[engine] = state
+        return state
 
 
 def _memory_entry(engine):
@@ -425,13 +434,50 @@ def _memory_entry(engine):
 def peek(engine=None):
     entry = _memory_entry(engine)
     return None if entry is None else {"version": entry["version"],
-                                       "movies": len(entry["movies"]),
+                                       "movies": len(entry["readonly"]),
                                        "namespace": entry["namespace"]}
 
 
+def _start_refresh(engine, build_all, build_subset, finalize, *, ttl=None,
+                   max_age=MAX_AGE_SECONDS, stale_entry=None):
+    state = _engine_state(engine)
+    with _LOCK:
+        if state.refreshing:
+            return False
+        if stale_entry is not None and _MEMORY.get(engine) is not stale_entry:
+            return False
+        state.refreshing = True
+
+    def refresh():
+        try:
+            result = load(engine, build_all, build_subset, finalize, ttl=ttl,
+                          max_age=max_age, copy_mode="readonly", swr=False)
+            if result["source"] == "rebuilt_racing":
+                _LOG.warning("public catalog background refresh did not stabilize")
+        except Exception as error:
+            _LOG.warning("public catalog background refresh failed: %s", type(error).__name__)
+        finally:
+            with _LOCK:
+                state.refreshing = False
+
+    try:
+        threading.Thread(target=refresh, name="public-catalog-refresh", daemon=True).start()
+    except Exception as error:
+        with _LOCK:
+            state.refreshing = False
+        _LOG.warning("public catalog background refresh could not start: %s", type(error).__name__)
+        return False
+    return True
+
+
+def warm_async(engine, build_all, build_subset=None, finalize=None):
+    """Schedule a cold load or due revalidation. Return whether a worker started."""
+    return _start_refresh(engine, build_all, build_subset, finalize)
+
+
 def load(engine, build_all, build_subset=None, finalize=None, *, ttl=None,
-         max_age=MAX_AGE_SECONDS, stats=None, copy_mode="clone"):
-    """Return ``{"movies", "version", "source", "stats"}`` for this engine."""
+         max_age=MAX_AGE_SECONDS, stats=None, copy_mode="clone", swr=True, force=False):
+    """Return movies, version, source and stats. TTL zero validates every load."""
     counters = stats if isinstance(stats, dict) else {}
     counters.setdefault("json_reads", 0)
     started = time.monotonic()
@@ -439,120 +485,110 @@ def load(engine, build_all, build_subset=None, finalize=None, *, ttl=None,
     ns = namespace(engine)
 
     entry = _memory_entry(engine)
-    if entry and entry["version"] and time.monotonic() - entry["checked"] < ttl:
-        counters.update(source="memory_hit", movies=len(entry["movies"]))
-        return _result(entry, counters, started, copy_mode=copy_mode)
+    if not force and ttl > 0 and entry and entry["namespace"] == ns:
+        age = time.monotonic() - entry["checked"]
+        if age <= max_age:
+            if age < ttl:
+                return _result(entry, "memory_hit", counters, started, copy_mode)
+            if swr:
+                _start_refresh(engine, build_all, build_subset, finalize,
+                               ttl=ttl, max_age=max_age, stale_entry=entry)
+                return _result(entry, "memory_stale", counters, started, copy_mode)
 
-    with _engine_lock(engine):
-        force = _force_requested(engine)
-        if not force:
-            entry = _memory_entry(engine)
-            if entry and entry["version"] and time.monotonic() - entry["checked"] < ttl:
-                counters.update(source="memory_hit", movies=len(entry["movies"]))
-                return _result(entry, counters, started, copy_mode=copy_mode)
-        try:
-            marks = _watermarks(engine)
-            version = _version(ns, marks)
-            counters.update(version=version, namespace=ns,
-                            watermark_ms=round((time.monotonic() - started) * 1000, 1))
-
-            entry = _memory_entry(engine)
-            if not force and entry and entry["version"] == version and entry["namespace"] == ns:
-                entry = _remember(engine, ns, version, entry["movies"], marks)
-                counters.update(source="memory_hit", movies=len(entry["movies"]))
-                return _result(entry, counters, started, copy_mode=copy_mode)
-
-            path = cache_path(engine)
-            doc = None
-            if path is not None and path.exists() and not force:
-                doc = _read(path, version, namespace_value=ns, max_age=max_age)
-            if doc is not None:
-                entry = _remember(engine, ns, version, doc["movies"], marks)
-                counters.update(source="disk_hit", movies=len(doc["movies"]))
-                return _result(entry, counters, started, copy_mode=copy_mode)
-
-            result = _rebuild_until_stable(engine, ns, build_all, build_subset, finalize,
-                                           marks, version, path, force, max_age, counters,
-                                           copy_mode=copy_mode)
-        except BaseException:
-            # A failed watermark/build must not swallow a pending force request.
-            if force:
-                with _LOCK:
-                    _FORCE_ENGINES[engine] = True
-            raise
-        _clear_force(engine)
-    counters.update(source=result["source"], movies=len(result["movies"]),
-                    version=result["version"])
-    return {**result, "stats": counters}
+    state = _engine_state(engine)
+    with state.lock:
+        entry, source = _refresh(engine, state, ns, build_all, build_subset, finalize,
+                                 ttl, max_age, force, counters, started)
+    return _result(entry, source, counters, started, copy_mode)
 
 
-def _force_requested(engine):
-    """Remember a pending force request until a later load succeeds."""
+def _refresh(engine, state, ns, build_all, build_subset, finalize, ttl, max_age,
+             force, counters, started):
     global _FORCE_ALL
     with _LOCK:
         if _FORCE_ALL:
             _FORCE_ALL = False
             _FORCE_ENGINES[engine] = True
-        return bool(_FORCE_ENGINES.get(engine, False))
+        force = force or _FORCE_ENGINES.get(engine, False)
+        revision = (_GLOBAL_REVISION, state.revision)
+        entry = _MEMORY.get(engine)
+    if not force and entry and entry["namespace"] == ns:
+        age = time.monotonic() - entry["checked"]
+        if age < ttl and age <= max_age:
+            return entry, "memory_hit"
+
+    marks = _watermarks(engine)
+    version = _version(ns, marks)
+    counters["watermark_ms"] = round((time.monotonic() - started) * 1000, 1)
+    if not force and entry and entry["version"] == version and entry["namespace"] == ns:
+        entry = dict(entry, checked=time.monotonic())
+        source = "memory_hit"
+    else:
+        path = cache_path(engine)
+        doc = _read(path, version, namespace_value=ns, max_age=max_age) if path and not force else None
+        source = "disk_hit"
+        if doc is None:
+            doc, source = _rebuild_until_stable(
+                engine, ns, build_all, build_subset, finalize, marks, version,
+                path, force, max_age, counters, entry,
+            )
+        entry = {
+            "version": doc["version"], "namespace": ns,
+            "readonly": tuple(_readonly_value(row) for row in doc["movies"]),
+            "marks": doc["watermarks"], "checked": time.monotonic(),
+        }
+
+    if source != "rebuilt_racing":
+        with _LOCK:
+            # A write may invalidate while a refresh is between its final query and
+            # publication. Leave its force request pending for the next load.
+            if revision == (_GLOBAL_REVISION, state.revision):
+                _MEMORY[engine] = entry
+                _FORCE_ENGINES.pop(engine, None)
+    return entry, source
 
 
-def _clear_force(engine):
-    with _LOCK:
-        _FORCE_ENGINES.pop(engine, None)
-
-
-def _result(entry, counters, started, *, copy_mode="clone"):
-    counters.update(load_ms=round((time.monotonic() - started) * 1000, 1))
+def _result(entry, source, counters, started, copy_mode):
+    if copy_mode == "readonly":
+        movies = entry["readonly"]
+    elif copy_mode == "shallow":
+        movies = [dict(row) for row in entry["readonly"]]
+    else:
+        movies = [_clone_value(row) for row in entry["readonly"]]
+    counters.update(source=source, movies=len(movies), version=entry["version"],
+                    namespace=entry["namespace"],
+                    load_ms=round((time.monotonic() - started) * 1000, 1))
     _maybe_log(counters)
-    return {"movies": _copy_rows(entry["movies"], copy_mode=copy_mode),
-            "version": entry["version"],
-            "source": counters.get("source", "memory_hit"), "stats": counters}
+    return {"movies": movies, "version": entry["version"], "source": source, "stats": counters}
 
 
 def _rebuild_until_stable(engine, ns, build_all, build_subset, finalize, marks, version,
-                          path, force, max_age, counters, *, copy_mode="clone"):
+                          path, force, max_age, counters, previous):
     build_started = time.time()  # built_at is wall-clock; compare in that domain
     with _FILE_LOCK:
         guard = _file_guard(path) if path is not None else _null_guard()
         with guard:
-            if not force:
-                existing = _memory_entry(engine)
-                if existing and existing["version"] == version and existing["namespace"] == ns:
-                    _remember(engine, ns, version, existing["movies"], marks)
-                    return {"movies": _copy_rows(existing["movies"], copy_mode=copy_mode),
-                            "version": version, "source": "memory_hit"}
-                if path is not None and path.exists():
-                    existing_doc = _read(path, version, namespace_value=ns, max_age=max_age)
-                    if existing_doc is not None:
-                        _remember(engine, ns, version, existing_doc["movies"], marks)
-                        return {"movies": _copy_rows(existing_doc["movies"], copy_mode=copy_mode),
-                                "version": version, "source": "disk_hit"}
-            stable = False
-            doc = None
+            if path is not None and not force:
+                existing_doc = _read(path, version, namespace_value=ns, max_age=max_age)
+                if existing_doc is not None:
+                    return existing_doc, "disk_hit"
             for attempt in range(BUILD_ATTEMPTS):
-                doc = _build(engine, build_all, build_subset, finalize, marks, version,
-                             ns, counters)
+                doc = _build(build_all, build_subset, finalize, marks, version,
+                             ns, counters, None if force else previous)
                 refreshed = _watermarks(engine)
-                stable = _version(ns, refreshed) == version
-                if stable:
-                    break
-                marks, version = refreshed, _version(ns, refreshed)
+                refreshed_version = _version(ns, refreshed)
+                if refreshed_version == version:
+                    if path is not None:
+                        try:
+                            if not _newer_on_disk(path, ns, version, max_age, build_started):
+                                counters["cache_bytes"] = _write(path, doc)
+                        except OSError as error:
+                            _LOG.warning("public catalog cache not written: %s", type(error).__name__)
+                    return doc, "rebuilt"
+                marks, version = refreshed, refreshed_version
                 counters["raced"] = attempt + 1
-            if stable and path is not None:
-                try:
-                    if not _newer_on_disk(path, ns, version, max_age, build_started):
-                        counters["cache_bytes"] = _write(path, doc)
-                except OSError as error:
-                    _LOG.warning("public catalog cache not written: %s", type(error).__name__)
-            if stable:
-                _remember(engine, ns, version, doc["movies"], marks)
-                return {"movies": _copy_rows(doc["movies"], copy_mode=copy_mode),
-                        "version": version, "source": "rebuilt"}
             counters["unstable"] = True
-            # Return the version the returned document was actually built for;
-            # ``version`` now points at the unused refreshed watermark instead.
-            return {"movies": _copy_rows(doc["movies"], copy_mode=copy_mode),
-                    "version": doc["version"], "source": "rebuilt_racing"}
+            return doc, "rebuilt_racing"
 
 
 def _read_any(path, ns, max_age):
@@ -580,16 +616,7 @@ def _newer_on_disk(path, ns, version, max_age, started_at):
     return built.timestamp() > started_at
 
 
-def _remember(engine, ns, version, movies, marks):
-    entry = {"version": version, "namespace": ns, "movies": movies,
-             "marks": dict(marks or {}), "checked": time.monotonic()}
-    with _LOCK:
-        _MEMORY[engine] = entry
-    return entry
-
-
-def _build(engine, build_all, build_subset, finalize, marks, version, ns, counters):
-    previous = _memory_entry(engine)
+def _build(build_all, build_subset, finalize, marks, version, ns, counters, previous):
     changed = []
     if previous and previous["namespace"] == ns:
         old = previous.get("marks") or {}
@@ -599,13 +626,13 @@ def _build(engine, build_all, build_subset, finalize, marks, version, ns, counte
     if (previous and previous["namespace"] == ns and build_subset and finalize and changed
             and len(changed) <= limit and previous["version"] != version):
         counters.update(incremental=True, changed_movies=len(changed))
-        movies = {row["movie_id"]: row for row in _copy_rows(previous["movies"])}
+        movies = {row["movie_id"]: row for row in map(_clone_value, previous["readonly"])}
         for movie_id in changed:
             movies.pop(movie_id, None)
         present = [movie_id for movie_id in changed if movie_id in marks]
         if present:
             for row in build_subset(present,counters):
-                movies[row["movie_id"]] = _copy_rows([row])[0]
+                movies[row["movie_id"]] = _clone_value(row)
         merged = [movies[movie_id] for movie_id in sorted(movies)]
         finalize(merged)
         return {"schema": SCHEMA, "namespace": ns, "version": version,
@@ -628,4 +655,5 @@ def _maybe_log(counters):
 
 
 __all__ = ["SCHEMA", "TTL_SECONDS", "MAX_AGE_SECONDS", "cache_dirs", "cache_path",
-           "invalidate", "load", "namespace", "peek", "persistent", "stats_enabled"]
+           "invalidate", "load", "namespace", "peek", "persistent", "stats_enabled",
+           "warm_async"]

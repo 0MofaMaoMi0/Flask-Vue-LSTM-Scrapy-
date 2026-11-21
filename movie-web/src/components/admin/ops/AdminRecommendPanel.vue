@@ -35,6 +35,7 @@ const effect = ref<RecommendationAnalytics | null>(null)
 const legacy = ref<RecommendationFeedbackLegacy | null>(null)
 const effectError = ref('')
 const effectBusy = ref(false)
+const loadedEffectDays = ref<Days | null>(null)
 let effectController: AbortController | undefined
 let effectTicket = 0
 
@@ -42,13 +43,18 @@ const interest = ref<InterestMatch | null>(null)
 const interestError = ref('')
 const interestBusy = ref(false)
 const dimension = ref<InterestDimension>('genre')
+const loadedInterestKey = ref('')
+const INTEREST_PAGE = 25
+const showAllCategories = ref(false)
 let interestController: AbortController | undefined
 let interestTicket = 0
 
 const effectStatus = computed(() => statusMeta(effect.value?.status))
 const interestStatus = computed(() => statusMeta(interest.value?.status))
 const windowLabel = computed(() => {
-  const block = effect.value?.window || interest.value?.window
+  const block = view.value === 'effect'
+    ? (effect.value?.window || interest.value?.window)
+    : (interest.value?.window || effect.value?.window)
   return block ? (block.timezone || 'UTC') + ' · ' + windowRange(block.from, block.to) : 'UTC 自然日窗口'
 })
 
@@ -57,13 +63,17 @@ async function loadEffect() {
   effectController?.abort()
   effectController = current
   const mine = ++effectTicket
+  const targetDays = activeDays.value
   effectBusy.value = true
   effectError.value = ''
   try {
-    effect.value = await loadRecommendationAnalytics(activeDays.value, current.signal)
-    legacy.value = null
-  } catch (e) {
+    const next = await loadRecommendationAnalytics(targetDays, current.signal)
     if (current.signal.aborted || mine !== effectTicket) return
+    effect.value = next
+    legacy.value = null
+    loadedEffectDays.value = targetDays
+  } catch (e) {
+    if (current.signal.aborted || mine !== effectTicket || (e as Error).name === 'AbortError') return
     const failure = e as Error & {status?: number}
     if (failure.status === 401 || failure.status === 403) {
       effectError.value = failure.message
@@ -71,9 +81,13 @@ async function loadEffect() {
     }
     // Compatibility path: the old feedback endpoint still knows exposures/clicks.
     try {
-      legacy.value = await loadRecommendationFeedbackLegacy(activeDays.value, current.signal)
+      const fallback = await loadRecommendationFeedbackLegacy(targetDays, current.signal)
+      if (current.signal.aborted || mine !== effectTicket) return
+      legacy.value = fallback
       effect.value = null
-    } catch {
+      loadedEffectDays.value = targetDays
+    } catch (inner) {
+      if (current.signal.aborted || mine !== effectTicket || (inner as Error).name === 'AbortError') return
       effectError.value = failure.message
     }
   } finally {
@@ -86,12 +100,17 @@ async function loadInterest() {
   interestController?.abort()
   interestController = current
   const mine = ++interestTicket
+  const targetDays = activeDays.value
+  const targetDim = dimension.value
   interestBusy.value = true
   interestError.value = ''
   try {
-    interest.value = await loadInterestMatch(activeDays.value, dimension.value, current.signal)
-  } catch (e) {
+    const next = await loadInterestMatch(targetDays, targetDim, current.signal)
     if (current.signal.aborted || mine !== interestTicket) return
+    interest.value = next
+    loadedInterestKey.value = `${targetDays}:${targetDim}`
+  } catch (e) {
+    if (current.signal.aborted || mine !== interestTicket || (e as Error).name === 'AbortError') return
     interestError.value = (e as Error).message
   } finally {
     if (mine === interestTicket) interestBusy.value = false
@@ -110,7 +129,11 @@ function reloadActive() {
 }
 function switchView(next: ViewId) {
   view.value = next
-  if (next === 'interest' && !interest.value) loadInterest()
+  if (next === 'interest') {
+    if (!interest.value || loadedInterestKey.value !== `${activeDays.value}:${dimension.value}`) loadInterest()
+  } else if ((!effect.value && !legacy.value) || loadedEffectDays.value !== activeDays.value) {
+    loadEffect()
+  }
 }
 function refresh() {
   if (view.value === 'effect') loadEffect()
@@ -119,6 +142,7 @@ function refresh() {
 function setDimension(next: InterestDimension) {
   if (next === dimension.value) return
   dimension.value = next
+  showAllCategories.value = false
   loadInterest()
 }
 
@@ -130,6 +154,8 @@ watch(() => props.days, value => {
 })
 onMounted(loadEffect)
 onBeforeUnmount(() => {
+  ++effectTicket
+  ++interestTicket
   effectController?.abort()
   interestController?.abort()
 })
@@ -173,6 +199,7 @@ function categoryBars() {
   }))
 }
 const interestRows = computed(() => categoryBars())
+const visibleInterestRows = computed(() => showAllCategories.value ? interestRows.value : interestRows.value.slice(0, INTEREST_PAGE))
 const interestSuppressed = computed(() => interest.value?.status === 'not_instrumented')
 const exposureDown = computed(() => interest.value?.exposure?.status === 'unavailable')
 </script>
@@ -210,10 +237,10 @@ const exposureDown = computed(() => interest.value?.exposure?.status === 'unavai
 
     <!-- 页 08：推荐效果 -->
     <template v-if="view === 'effect'">
-      <p v-if="effectError" class="adm-errobox" role="alert">{{ effectError }}
+      <p v-if="effectError" class="adm-errobox" role="alert">{{ effectError }}<span v-if="effect || legacy">（已保留上一份可用快照）</span>
         <button type="button" class="adm-btn ops-inline-btn" @click="refresh">重新读取</button>
       </p>
-      <p v-else-if="effectBusy && !effect && !legacy" class="adm-state" role="status">正在读取推荐曝光与点击…</p>
+      <p v-if="effectBusy && !effect && !legacy" class="adm-state" role="status">正在读取推荐曝光与点击…</p>
 
       <template v-else-if="effect">
         <p v-if="effect.status === 'unavailable'" class="adm-warnbox" role="status">
@@ -330,10 +357,10 @@ const exposureDown = computed(() => interest.value?.exposure?.status === 'unavai
 
     <!-- 页 07：资源与兴趣匹配 -->
     <template v-else>
-      <p v-if="interestError" class="adm-errobox" role="alert">{{ interestError }}
+      <p v-if="interestError" class="adm-errobox" role="alert">{{ interestError }}<span v-if="interest">（已保留上一份可用快照）</span>
         <button type="button" class="adm-btn ops-inline-btn" @click="refresh">重新读取</button>
       </p>
-      <p v-else-if="interestBusy && !interest" class="adm-state" role="status">正在读取供给与兴趣匹配…</p>
+      <p v-if="interestBusy && !interest" class="adm-state" role="status">正在读取供给与兴趣匹配…</p>
 
       <template v-else-if="interest">
         <div class="adm-toolbar">
@@ -390,7 +417,7 @@ const exposureDown = computed(() => interest.value?.exposure?.status === 'unavai
                 </tr>
               </thead>
               <tbody>
-                <tr v-for="row in interestRows" :key="row.key">
+                <tr v-for="row in visibleInterestRows" :key="row.key">
                   <th scope="row">{{ row.name }}</th>
                   <td>
                     <span class="ops-cell-value">{{ fmtInt(row.supply.movies) }} · {{ fmtRatio(row.supply.share) }}</span>
@@ -410,6 +437,10 @@ const exposureDown = computed(() => interest.value?.exposure?.status === 'unavai
                 </tr>
               </tbody>
             </table>
+          </div>
+          <div v-if="interestRows.length > INTEREST_PAGE" class="adm-pager">
+            <span>当前展示前 {{ visibleInterestRows.length }} / 共 {{ fmtInt(interestRows.length) }} 个类别</span>
+            <button type="button" class="adm-btn" @click="showAllCategories = !showAllCategories">{{ showAllCategories ? '收起至前 ' + INTEREST_PAGE + ' 项' : '展开全部 ' + interestRows.length + ' 项' }}</button>
           </div>
           <p v-else class="adm-empty">该维度没有可对比的类别。</p>
 
@@ -437,41 +468,41 @@ const exposureDown = computed(() => interest.value?.exposure?.status === 'unavai
 </template>
 
 <style scoped>
-.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:#8f8a80;font-size:11px}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:var(--mi-text-muted);font-size:11px}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
 .ops-trends{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin:0 0 4px}
-.ops-trend{margin:0;border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:10px 12px 6px;min-width:0}
-.ops-trend figcaption{margin:0 0 6px;font-size:11px;color:#a9a294}
+.ops-trend{margin:0;border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:10px 12px 6px;min-width:0}
+.ops-trend figcaption{margin:0 0 6px;font-size:11px;color:var(--mi-text-secondary)}
 .ops-chart{height:150px;min-width:0}
 .ops-grid2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;margin-top:6px}
-.ops-block{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:4px 14px 12px;min-width:0}
+.ops-block{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:4px 14px 12px;min-width:0}
 .ops-block h3{margin-top:14px}
-.ops-body{margin:4px 0 0;color:#c9c2b8;font-size:11.5px;line-height:1.7}
-.ops-signals{display:flex;flex-wrap:wrap;gap:6px 18px;margin:0 0 4px;color:#a9a294;font-size:11px}
-.ops-signals b{color:#e9e3d7;font-weight:500;margin-left:4px;font-variant-numeric:tabular-nums}
-.ops-cell-value{font-variant-numeric:tabular-nums;color:#ded8cc}
-.ops-sharebar{display:block;height:3px;margin-top:5px;background:#242030;border-radius:2px;overflow:hidden;max-width:180px}
-.ops-sharebar b{display:block;height:100%;background:#9e81c6;border-radius:2px}
-.ops-match-table td small{display:block;margin-top:4px;color:#8f8a80;font-size:10px;line-height:1.5}
-.ops-match-table th[scope="row"]{font-weight:500;color:#efe9de;white-space:nowrap}
-.ops-disclosure{margin-top:18px;border-top:1px solid rgba(241,236,226,.08);padding-top:12px}
-.ops-disclosure summary{cursor:pointer;font-size:12px;color:#c9c2b8}
+.ops-body{margin:4px 0 0;color:var(--mi-text-soft);font-size:11.5px;line-height:1.7}
+.ops-signals{display:flex;flex-wrap:wrap;gap:6px 18px;margin:0 0 4px;color:var(--mi-text-secondary);font-size:11px}
+.ops-signals b{color:var(--mi-text);font-weight:500;margin-left:4px;font-variant-numeric:tabular-nums}
+.ops-cell-value{font-variant-numeric:tabular-nums;color:var(--mi-text)}
+.ops-sharebar{display:block;height:3px;margin-top:5px;background:var(--mi-bar-track);border-radius:2px;overflow:hidden;max-width:180px}
+.ops-sharebar b{display:block;height:100%;background:var(--mi-bar-fill);border-radius:2px}
+.ops-match-table td small{display:block;margin-top:4px;color:var(--mi-text-muted);font-size:10px;line-height:1.5}
+.ops-match-table th[scope="row"]{font-weight:500;color:var(--mi-text);white-space:nowrap}
+.ops-disclosure{margin-top:18px;border-top:1px solid var(--mi-border-subtle);padding-top:12px}
+.ops-disclosure summary{cursor:pointer;font-size:12px;color:var(--mi-text-soft)}
 .ops-defs{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:12px 0 0;font-size:11.5px;line-height:1.7}
-.ops-defs dt{color:#a9a294}
-.ops-defs dd{margin:0;color:#c9c2b8}
+.ops-defs dt{color:var(--mi-text-secondary)}
+.ops-defs dd{margin:0;color:var(--mi-text-soft)}
 .ops-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-recommend :is(.ops-status, .ops-meta, .ops-signals, .ops-match-table td small, .ops-inline-btn){font-size:11px}
 .ops-recommend .ops-body {font-size: 12px}
 .ops-recommend .ops-signals {font-size: 11.5px}
 .ops-recommend .ops-meta {font-size: 11.5px}
-.ops-recommend :is(button,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-recommend :is(button,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 @media (max-width: 1100px){
   .ops-trends,.ops-grid2{grid-template-columns:minmax(0,1fr)}
 }

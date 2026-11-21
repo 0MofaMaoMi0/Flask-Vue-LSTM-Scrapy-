@@ -59,10 +59,13 @@ async function loadOverlap() {
       minVotes: props.filters.minVotes,
       limit: OVERLAP_PAGE, offset: overlapOffset.value, top: 1, countryLimit: 1,
     }, current.signal)
-    overlapItems.value = data.details?.items || []
+    if (overlapController !== current || current.signal.aborted) return
+    overlapItems.value = (data.details?.items || []).slice(0, OVERLAP_PAGE)
     overlapTotal.value = data.details?.total || 0
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') overlapError.value = (e as Error).message
+    if (overlapController === current && !current.signal.aborted && (e as Error).name !== 'AbortError') {
+      overlapError.value = (e as Error).message
+    }
   } finally {
     if (overlapController === current) overlapBusy.value = false
   }
@@ -104,7 +107,7 @@ async function load() {
   controller.value = current
   busy.value = true; error.value = ''
   try {
-    payload.value = await loadAnalytics({
+    const next = await loadAnalytics({
       countries: props.compare,
       genre: props.filters.genre || undefined,
       decade: props.filters.decade || undefined,
@@ -113,9 +116,13 @@ async function load() {
       minVotes: props.filters.minVotes,
       top: 10, limit: 20,
     }, current.signal)
+    if (controller.value !== current || current.signal.aborted) return
+    payload.value = next
     overlapOpen.value = false
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') error.value = (e as Error).message
+    if (controller.value === current && !current.signal.aborted && (e as Error).name !== 'AbortError') {
+      error.value = (e as Error).message
+    }
   } finally {
     if (controller.value === current) busy.value = false
   }
@@ -141,6 +148,7 @@ function sampleWarning(row: DeepCountry): boolean {
 watch(() => [props.compare.join(','), props.filters.genre, props.filters.decade, props.filters.yearFrom, props.filters.yearTo, props.filters.minVotes], load)
 onMounted(load)
 onBeforeUnmount(() => { controller.value?.abort(); overlapController?.abort() })
+defineExpose({refresh: load})
 </script>
 
 <template>
@@ -180,7 +188,7 @@ onBeforeUnmount(() => { controller.value?.abort(); overlapController?.abort() })
       <p class="adm-note">比较最多 3 国；合拍片可同时存在于多个国家集合，因此跨国重合数单独计算，绝不把各国数量直接相加当合集规模。</p>
     </section>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }} <button type="button" class="link-btn" @click="load">重试</button></p>
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="rows.length">（已保留上一份可用快照）</span> <button type="button" class="link-btn" @click="load">重试</button></p>
     <p v-else-if="compare.length < 2" class="adm-empty">至少选择 2 个国家后才能比较。</p>
     <p v-else-if="busy && !rows.length" class="adm-state">正在读取国家比较数据…</p>
 
@@ -293,25 +301,25 @@ onBeforeUnmount(() => { controller.value?.abort(); overlapController?.abort() })
 <style scoped>
 .compare-view{min-width:0}
 .compare-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:2px 0 16px}
-.compare-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:26px;font-weight:500;color:#f3eee4}
-.compare-meta{margin:0;font-size:10.5px;color:#8f8a80;line-height:1.7}
+.compare-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:26px;font-weight:500;color:var(--mi-text-ivory)}
+.compare-meta{margin:0;font-size:10.5px;color:var(--mi-text-muted);line-height:1.7}
 .compare-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:14px}
-.country-card{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:14px 15px;min-width:0}
+.country-card{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface);padding:14px 15px;min-width:0}
 .country-card header{display:flex;justify-content:space-between;align-items:flex-start;gap:10px}
-.country-card h3{font-size:15px;margin:0;color:#efe9de;font-weight:500}
-.country-card h3 small{font-size:10px;color:#a9a294;margin-left:5px;letter-spacing:.05em}
-.country-card header p{margin:3px 0 0;font-size:10px;color:#8f8a80}
+.country-card h3{font-size:15px;margin:0;color:var(--mi-text);font-weight:500}
+.country-card h3 small{font-size:10px;color:var(--mi-text-secondary);margin-left:5px;letter-spacing:.05em}
+.country-card header p{margin:3px 0 0;font-size:10px;color:var(--mi-text-muted)}
 .country-card .adm-kpis{grid-template-columns:repeat(2,minmax(0,1fr))}
 .country-card .adm-kpis>div{border:0;background:transparent;padding:0}
 .adm-kpis.small strong{font-size:18px}
 .adm-poster-row.compact{grid-template-columns:repeat(3,minmax(0,1fr))}
 .adm-inline.vertical{flex-direction:column;gap:6px;align-items:flex-start}
-.pair-detail{margin-top:12px;border-top:1px solid rgba(241,236,226,.08);padding-top:10px}
-.link-btn{border:0;background:transparent;color:#dcc49b;font:inherit;font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
-.link-btn:hover:not(:disabled){color:#fff}
+.pair-detail{margin-top:12px;border-top:1px solid var(--mi-border-subtle);padding-top:10px}
+.link-btn{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:11.5px;cursor:pointer;padding:0;text-decoration:underline;text-underline-offset:2px}
+.link-btn:hover:not(:disabled){color:var(--mi-text)}
 .link-btn:disabled{opacity:.45;cursor:default}
 .overlap-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px}
 .overlap-head .adm-note{margin:2px 0 8px}
-.overlap-pager{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:10.5px;color:#9e8fae}
+.overlap-pager{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:10px;font-size:10.5px;color:var(--mi-text-muted)}
 .overlap-pager .adm-btn{padding:5px 10px;font-size:11px}
 </style>

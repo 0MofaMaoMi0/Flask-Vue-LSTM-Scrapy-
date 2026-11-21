@@ -47,9 +47,11 @@ async function load() {
   busy.value = true
   error.value = ''
   try {
-    data.value = await loadHealth(current.signal)
+    const next = await loadHealth(current.signal)
+    if (controller !== current || current.signal.aborted) return
+    data.value = next
   } catch (e) {
-    if (current.signal.aborted) return
+    if (controller !== current || current.signal.aborted || (e as Error).name === 'AbortError') return
     error.value = (e as Error).message
   } finally {
     if (controller === current) busy.value = false
@@ -89,10 +91,10 @@ const LEGEND = [
   <section class="adm-panel ops-health" aria-labelledby="admin-health-title">
     <h2 id="admin-health-title">系统运行 <small>只读健康快照<span v-if="generatedAt"> · 生成于 {{ generatedAt }}</span></small></h2>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }}
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="data">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="refresh">重新读取</button>
     </p>
-    <p v-else-if="busy && !data" class="adm-state" role="status">正在读取系统健康信息…</p>
+    <p v-if="busy && !data" class="adm-state" role="status">正在读取系统健康信息…</p>
 
     <template v-else-if="data">
       <h3>基础健康</h3>
@@ -194,34 +196,34 @@ const LEGEND = [
 <style scoped>
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
 .ops-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(290px,100%),1fr));gap:8px 16px}
-.ops-facts div{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0;padding:9px 12px;border:1px solid rgba(241,236,226,.10);border-radius:9px;background:#191a1f;font-size:11.5px}
-.ops-facts span{color:#a9a294;flex-shrink:0}
-.ops-facts b{color:#f0eadf;font-weight:500;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
+.ops-facts div{display:flex;align-items:baseline;justify-content:space-between;gap:12px;min-width:0;padding:9px 12px;border:1px solid var(--mi-border);border-radius:9px;background:var(--mi-surface-warm);font-size:11.5px}
+.ops-facts span{color:var(--mi-text-secondary);flex-shrink:0}
+.ops-facts b{color:var(--mi-text);font-weight:500;font-variant-numeric:tabular-nums;text-align:right;overflow-wrap:anywhere}
 .ops-cards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
-.ops-card{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:14px 16px;min-width:0}
+.ops-card{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:14px 16px;min-width:0}
 .ops-card header{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-.ops-card h4{margin:0;font-size:13px;font-weight:500;color:#efe9de}
-.ops-card-source{margin:3px 0 0;color:#8f8a80;font-size:10.5px}
-.ops-card-reason{margin:10px 0 0;color:#dcc49b;font-size:11.5px;line-height:1.7}
+.ops-card h4{margin:0;font-size:13px;font-weight:500;color:var(--mi-text)}
+.ops-card-source{margin:3px 0 0;color:var(--mi-text-muted);font-size:10.5px}
+.ops-card-reason{margin:10px 0 0;color:var(--mi-warning);font-size:11.5px;line-height:1.7}
 .ops-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px 14px;margin:12px 0 0}
 .ops-metrics div{display:flex;flex-direction:column;gap:3px}
-.ops-metrics dt{color:#a9a294;font-size:10.5px}
-.ops-metrics dd{margin:0;color:#f0eadf;font-size:14px;font-variant-numeric:tabular-nums}
-.ops-rule{margin:12px 0 0;color:#8f8a80;font-size:10.5px;line-height:1.7}
+.ops-metrics dt{color:var(--mi-text-secondary);font-size:10.5px}
+.ops-metrics dd{margin:0;color:var(--mi-text);font-size:14px;font-variant-numeric:tabular-nums}
+.ops-rule{margin:12px 0 0;color:var(--mi-text-muted);font-size:10.5px;line-height:1.7}
 .ops-card .adm-actions{margin-top:10px}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
 .ops-legend{display:grid;grid-template-columns:max-content minmax(0,1fr);align-items:center;gap:6px 12px;margin:16px 0 0;max-width:620px}
-.ops-legend-text{color:#8f8a80;font-size:10.5px;line-height:1.6}
-.ops-stats-meta{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:11px;color:#8f8a80;margin:0 0 8px}
-.ops-stats-meta b{color:#c9c2b8;font-weight:500;margin-left:4px}
+.ops-legend-text{color:var(--mi-text-muted);font-size:10.5px;line-height:1.6}
+.ops-stats-meta{display:flex;flex-wrap:wrap;gap:6px 18px;font-size:11px;color:var(--mi-text-muted);margin:0 0 8px}
+.ops-stats-meta b{color:var(--mi-text-soft);font-weight:500;margin-left:4px}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-health :is(.ops-status, .ops-card-source, .ops-metrics dt, .ops-rule, .ops-legend-text, .ops-stats-meta){font-size:11px}
-.ops-health :is(button,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-health :is(button,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 @media (max-width: 1100px){
   .ops-cards{grid-template-columns:minmax(0,1fr)}
 }
