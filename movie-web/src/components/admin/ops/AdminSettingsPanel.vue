@@ -70,12 +70,14 @@ async function load() {
   busy.value = true
   error.value = ''
   try {
-    data.value = await loadMetricsDefinitions(current.signal)
+    const next = await loadMetricsDefinitions(current.signal)
+    if (controller !== current || current.signal.aborted) return
+    data.value = next
   } catch (e) {
-    if (current.signal.aborted) return
+    if (controller !== current || current.signal.aborted || (e as Error).name === 'AbortError') return
     error.value = (e as Error).message
   } finally {
-    if (!current.signal.aborted) busy.value = false
+    if (controller === current) busy.value = false
   }
 }
 
@@ -138,10 +140,10 @@ function restoreDefaults() {
       <small v-if="data">指标版本 {{ data.version }} · {{ data.timezone }}<template v-if="data.as_of"> · 生成于 {{ fmtUtc(data.as_of) }}</template></small>
     </h2>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }}
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="data">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="load">重新读取</button>
     </p>
-    <p v-else-if="busy && !data" class="adm-state" role="status">正在读取指标口径…</p>
+    <p v-if="busy && !data" class="adm-state" role="status">正在读取指标口径…</p>
 
     <template v-if="data">
       <div class="ops-facts">
@@ -241,28 +243,28 @@ function restoreDefaults() {
 <style scoped>
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
 .ops-facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:8px 16px}
-.ops-facts div{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid rgba(241,236,226,.10);border-radius:9px;background:#191a1f;font-size:11.5px}
-.ops-facts span{color:#a9a294}
-.ops-facts b{color:#f0eadf;font-weight:500;text-align:right;font-variant-numeric:tabular-nums}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-facts div{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 12px;border:1px solid var(--mi-border);border-radius:9px;background:var(--mi-surface-warm);font-size:11.5px}
+.ops-facts span{color:var(--mi-text-secondary)}
+.ops-facts b{color:var(--mi-text);font-weight:500;text-align:right;font-variant-numeric:tabular-nums}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
-.ops-key{display:block;margin-top:3px;color:#7e796f;font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:400}
-.ops-value{font-variant-numeric:tabular-nums;color:#efe9de}
-.ops-source{color:#a9a294;font-size:11px;max-width:220px}
-.ops-def-table th[scope="row"]{color:#efe9de;font-weight:500;white-space:nowrap}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
+.ops-key{display:block;margin-top:3px;color:var(--mi-text-muted);font-size:10px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-weight:400}
+.ops-value{font-variant-numeric:tabular-nums;color:var(--mi-text)}
+.ops-source{color:var(--mi-text-secondary);font-size:11px;max-width:220px}
+.ops-def-table th[scope="row"]{color:var(--mi-text);font-weight:500;white-space:nowrap}
 .ops-pref-warning{margin-bottom:12px}
 .ops-toolbar-actions{margin:0}
-.ops-pref-state{display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 0;color:#a9a294;font-size:11px}
-.ops-saved{color:#cbb38f}
+.ops-pref-state{display:flex;flex-wrap:wrap;gap:6px 16px;margin:10px 0 0;color:var(--mi-text-secondary);font-size:11px}
+.ops-saved{color:var(--mi-accent-text)}
 .ops-protected{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-.ops-protected li{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px;align-items:start;border:1px solid rgba(241,236,226,.10);border-radius:9px;background:#191a1f;padding:11px 13px}
-.ops-lock{border:1px solid rgba(241,236,226,.18);border-radius:4px;color:#8f8a80;font-size:9.5px;letter-spacing:.06em;padding:1px 5px;margin-top:2px}
-.ops-protected b{font-size:11.5px;font-weight:500;color:#e9e3d7}
-.ops-protected p{margin:4px 0 0;color:#8f8a80;font-size:10.5px;line-height:1.65}
+.ops-protected li{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:10px;align-items:start;border:1px solid var(--mi-border);border-radius:9px;background:var(--mi-surface-warm);padding:11px 13px}
+.ops-lock{border:1px solid var(--mi-border-strong);border-radius:4px;color:var(--mi-text-muted);font-size:9.5px;letter-spacing:.06em;padding:1px 5px;margin-top:2px}
+.ops-protected b{font-size:11.5px;font-weight:500;color:var(--mi-text)}
+.ops-protected p{margin:4px 0 0;color:var(--mi-text-muted);font-size:10.5px;line-height:1.65}
 .ops-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-settings :is(.ops-status, .ops-lock, .ops-key, .ops-source, .ops-pref-state, .ops-protected p){font-size:11px}
@@ -270,8 +272,8 @@ function restoreDefaults() {
 .ops-settings .ops-protected b{font-size:12px}
 .ops-settings .ops-protected p{font-size:11.5px}
 .ops-settings .ops-source{font-size:11.5px}
-.ops-settings .ops-key{color:#8f8a80}
-.ops-settings :is(button,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-settings .ops-key{color:var(--mi-text-muted)}
+.ops-settings :is(button,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 @media (max-width: 1100px){
   .ops-protected{grid-template-columns:minmax(0,1fr)}
 }

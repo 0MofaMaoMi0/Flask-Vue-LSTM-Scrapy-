@@ -4,7 +4,7 @@
 import {ref,onMounted,onBeforeUnmount,onDeactivated,nextTick,computed,watch} from 'vue'
 import {useAuthStore} from '../stores/auth'
 import {useRoute,useRouter} from 'vue-router'
-import {aiWorkspace} from '../services/aiWorkspace'
+import {aiWorkspace} from '../services/aiWorkspace';import {isMotionReduced,registerOrbMotion} from '../services/orbMotion'
 import {isAccountSettingsTab,accountSettingsTarget} from '../services/accountSettings'
 import {CLEAR_ASSISTANT_DISPLAY} from '../services/assistantDisplay'
 import {assistantRequest as request,assistantJson as jsonRequest,assistantConflictMessage} from '../services/assistantApi'
@@ -24,20 +24,20 @@ function autoGrow(){const el=composerInput.value;if(!el)return;el.style.setPrope
 watch(message,()=>nextTick(autoGrow))
 const history=ref<{question:string,answer:string,result?:any,feedback?:string|null}[]>([])
 let controller:AbortController|null=null,feedbackController:AbortController|null=null,pending:any=null
-async function refreshStatus(){try{const data=await jsonRequest('status');if(live())status.value=data}catch(e){if(live())error.value=(e as Error).message}}
+async function refreshStatus(){try{const data=await jsonRequest('status');if(live())status.value=data}catch(e){if(live())error.value=(e as Error).message}};function scrollThreadToBottom(smooth=true){nextTick(()=>{const el=thread.value;if(!el)return;const useSmooth=smooth&&!isMotionReduced();if(typeof el.scrollTo==='function')el.scrollTo({top:el.scrollHeight,behavior:useSmooth?'smooth':'auto'});else el.scrollTop=el.scrollHeight})}
 function consume(event:string,data:any){
- nextTick(()=>{if(thread.value)thread.value.scrollTop=thread.value.scrollHeight})
- if(event==='draft')draft.value=data.text||''
+
+ if(event==='draft'){draft.value=data.text||'';scrollThreadToBottom(false);return}
  if(event==='result'){
   if(data.state==='DONE'){data.request_id=data.request_id||pending?.request_id;result.value=data;conversation.value=data.conversation_id||conversation.value;history.value.push({question:pending?.message||'AI 深度解释',answer:data.answer,result:data});history.value=history.value.slice(-12);message.value='';pending=null}
   else{result.value={...data,source:'INTERRUPTED',answer:data.state==='CANCELLED'?'已取消显示。已发送的模型请求仍可能计费。':'请求未完成，未自动重试可能计费的调用。'};error.value=assistantConflictMessage(data.error_code||'REQUEST_UNAVAILABLE',data.state)}
-  draft.value=''
+  draft.value='';scrollThreadToBottom(true)
  }
 }
 class ReplyError extends Error{constructor(message:string){super(message);this.name='ReplyError'}}
 async function send(path:string,body:any){
  if(busy.value)return
- busy.value=true;error.value='';notice.value='';draft.value='';const sendingController=new AbortController();controller=sendingController;pending={...body,path}
+ busy.value=true;error.value='';notice.value='';draft.value='';scrollThreadToBottom(true);const sendingController=new AbortController();controller=sendingController;pending={...body,path}
  const current=()=>live()&&controller===sendingController
  try{
   const r=await request(path,'POST',{...body,stream:true},sendingController.signal)
@@ -63,19 +63,19 @@ async function cancel(){
 }
 function reset(){newSession()}
 function clearSensitive(){profileOpen.value=false}
-defineExpose({clearSensitive})
+defineExpose({clearSensitive,busy});let stopHeadOrb:(()=>void)|undefined,stopEmptyOrb:(()=>void)|undefined
 onDeactivated(clearSensitive)
 function sharedStatus(){refreshStatus()}
 function closeTransient(e:Event){const el=e.target as HTMLElement;if(!el?.closest?.('.side-list'))sessionMenu.value='';if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value=''}}
-onMounted(()=>{refreshStatus();syncBehavior();window.addEventListener('mi2-behavior-changed',sharedBehavior);window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient)})
-onBeforeUnmount(()=>{saveSession();disposed=true;controller?.abort();feedbackController?.abort();feedbackController=null;window.removeEventListener('mi2-behavior-changed',sharedBehavior);window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
+onMounted(()=>{refreshStatus();syncBehavior();window.addEventListener('mi2-behavior-changed',sharedBehavior);window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient);stopHeadOrb=registerOrbMotion(()=>headOrbEl.value,{range:1.4,blink:true,busy});stopEmptyOrb=registerOrbMotion(()=>emptyOrbEl.value,{range:2.8,blink:true,busy})})
+onBeforeUnmount(()=>{stopHeadOrb?.();stopEmptyOrb?.();saveSession();disposed=true;controller?.abort();feedbackController?.abort();feedbackController=null;window.removeEventListener('mi2-behavior-changed',sharedBehavior);window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
 
 function movieUrl(id:number){return assistantMovieTarget(id,props.surface,settingsRoute.fullPath)}
 async function copyAnswer(text:string){try{await navigator.clipboard.writeText(text);notice.value='已复制回答'}catch{error.value='无法访问剪贴板，请手动复制。'}}
 
 
 const emit=defineEmits<{(e:'close'):void,(e:'toggle-full'):void}>()
-const auth=useAuthStore(),rootElement=ref<HTMLElement>(),sidebarOpen=ref(true),dialogMode=computed(()=>aiWorkspace.dialogMode),profileOpen=ref(false),shortcutsOpen=ref(false),sessionSearch=ref(''),sessionMenu=ref(''),sharedOpen=ref(false),editingId=ref(''),editTitle=ref('')
+const auth=useAuthStore(),rootElement=ref<HTMLElement>(),headOrbEl=ref<HTMLElement>(),emptyOrbEl=ref<HTMLElement>(),sidebarOpen=ref(true),dialogMode=computed(()=>aiWorkspace.dialogMode),profileOpen=ref(false),shortcutsOpen=ref(false),sessionSearch=ref(''),sessionMenu=ref(''),sharedOpen=ref(false),editingId=ref(''),editTitle=ref('')
 const uid=(id:string)=>props.surface+'-'+id
 type SavedSession={id:string,title:string,history:any[],conversation:string|null,message:string,result:any,pending:any}
 const sessions=ref<SavedSession[]>([]),activeSession=ref('')
@@ -130,7 +130,7 @@ onMounted(()=>{
 </script>
 <template><div ref="rootElement" class="prototype-ai mi2-docked-ai" :class="['surface-'+surface,{'pref-large-text':aiWorkspace.large,'pref-reduced-motion':aiWorkspace.reduced}]"><svg style="display:none" xmlns="http://www.w3.org/2000/svg"><symbol :id="uid('i-menu')" data-source-id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"></path></symbol><symbol :id="uid('i-plus')" data-source-id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"></path></symbol><symbol :id="uid('i-max')" data-source-id="i-max" viewBox="0 0 24 24"><path d="M8 3H4a1 1 0 0 0-1 1v4m13-5h4a1 1 0 0 1 1 1v4M3 16v4a1 1 0 0 0 1 1h4m13-5v4a1 1 0 0 1-1 1h-4"></path></symbol><symbol :id="uid('i-chevron-down')" data-source-id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"></path></symbol><symbol :id="uid('i-min')" data-source-id="i-min" viewBox="0 0 24 24"><path d="M4 9h5V4m11 11h-5v5M9 9 4 4m11 11 5 5"></path></symbol><symbol :id="uid('i-close')" data-source-id="i-close" viewBox="0 0 24 24"><path d="M5 5l14 14M19 5 5 19"></path></symbol><symbol :id="uid('i-send')" data-source-id="i-send" viewBox="0 0 24 24"><path d="m5 12 14-7-5 14-2-7-7 0z"></path></symbol><symbol :id="uid('i-settings')" data-source-id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3m0 14v3M2 12h3m14 0h3M5 5l2 2m10 10 2 2M19 5l-2 2M7 17l-2 2"></path></symbol><symbol :id="uid('i-copy')" data-source-id="i-copy" viewBox="0 0 24 24"><rect height="12" rx="2" width="12" x="8" y="8"></rect><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"></path></symbol><symbol :id="uid('i-refresh')" data-source-id="i-refresh" viewBox="0 0 24 24"><path d="M20 7v5h-5M4 17v-5h5"></path><path d="M5.9 9a7 7 0 0 1 11.9-2l2.2 2M4 15l2.2 2a7 7 0 0 0 11.9-2"></path></symbol><symbol :id="uid('i-thumb-up')" data-source-id="i-thumb-up" viewBox="0 0 24 24"><path d="M7 10v11H4a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2h3Zm0 0 4.5-8a3 3 0 0 1 3 3v4h5a2.5 2.5 0 0 1 2.4 3.2l-2 7a2.5 2.5 0 0 1-2.4 1.8H7"></path></symbol><symbol :id="uid('i-thumb-down')" data-source-id="i-thumb-down" viewBox="0 0 24 24"><path d="M7 14V3H4a2 2 0 0 0-2 2v7a2 2 0 0 0 2 2h3Zm0 0 4.5 8a3 3 0 0 0 3-3v-4h5a2.5 2.5 0 0 0 2.4-3.2l-2-7A2.5 2.5 0 0 0 17.5 3H7"></path></symbol><symbol :id="uid('i-arrow-up')" data-source-id="i-arrow-up" viewBox="0 0 24 24"><path d="M12 19V5"></path><path d="m6 11 6-6 6 6"></path></symbol><symbol :id="uid('i-moon')" data-source-id="i-moon" viewBox="0 0 24 24"><path d="M21 13A9 9 0 0 1 11 3a9 9 0 1 0 10 10"></path></symbol><symbol :id="uid('i-search')" data-source-id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"></circle><path d="m16 16 4 4"></path></symbol><symbol :id="uid('i-side')" data-source-id="i-side" viewBox="0 0 24 24"><path d="m14 6-6 6 6 6"></path></symbol><symbol :id="uid('i-import')" data-source-id="i-import" viewBox="0 0 24 24"><path d="M12 4v10m0 0 4-4m-4 4-4-4"></path><path d="M5 19h14"></path></symbol></svg>
 <section :data-dialog-mode="dialogMode" aria-label="MovieInsight AI 电影探索" class="window show full" :class="{'sidebar-open':sidebarOpen}" :id="uid('chatWindow')" data-source-id="chatWindow" role="dialog">
-<header class="window-head"><button v-if="surface==='floating'||surface==='explore'||!sidebarOpen" @click="sidebarOpen=!sidebarOpen" aria-label="切换会话侧栏" class="icon-btn" :id="uid('sidebarToggle')" data-source-id="sidebarToggle" title="展开会话侧栏"><svg class="ico"><use :href="'#'+uid('i-menu')"></use></svg></button><div class="head-id"><span class="orb-skin mini mark" data-orb=""><img alt="" draggable="false" src="/m9/assistant-orb.png"/><i class="eye left"></i><i class="eye right"></i></span><div><div class="head-title">MovieInsight AI</div></div></div><div class="head-fill"></div><button @click="openSettings('ai')" aria-label="查看 BYOK 连接状态" class="head-status" :id="uid('connectionStatus')" data-source-id="connectionStatus" title="个人模型连接状态"><span class="dot"></span>{{status.cloud_available?status.model+" 已连接":"BYOK 未连接 · 本地兜底"}}</button><div class="head-ops"><button v-if="!sidebarOpen" @click="reset" aria-label="新建对话" class="icon-btn" :id="uid('newTop')" data-source-id="newTop" title="新建对话"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg></button><span class="divider-v"></span><button @click="emit('toggle-full')" aria-label="切换全屏" class="icon-btn" :id="uid('fullToggle')" data-source-id="fullToggle" title="切换全屏" v-if="surface==='floating'"><svg class="ico" :id="uid('fullSvg')" data-source-id="fullSvg"><use :href="'#'+uid('i-max')"></use></svg></button><button @click="emit('close')" aria-label="收起窗口" class="icon-btn" :id="uid('closeChat')" data-source-id="closeChat" title="收起窗口" v-if="surface==='floating'"><svg class="ico"><use :href="'#'+uid('i-close')"></use></svg></button></div></header>
+<header class="window-head"><button v-if="surface==='floating'||surface==='explore'||!sidebarOpen" @click="sidebarOpen=!sidebarOpen" aria-label="切换会话侧栏" class="icon-btn" :id="uid('sidebarToggle')" data-source-id="sidebarToggle" title="展开会话侧栏"><svg class="ico"><use :href="'#'+uid('i-menu')"></use></svg></button><div class="head-id"><span ref="headOrbEl" class="orb-skin mini mark" :class="{'is-thinking':busy}" data-orb=""><img alt="" draggable="false" src="/m9/assistant-orb.png"/><i class="eye left"></i><i class="eye right"></i></span><div><div class="head-title">MovieInsight AI</div></div></div><div class="head-fill"></div><button @click="openSettings('ai')" aria-label="查看 BYOK 连接状态" class="head-status" :id="uid('connectionStatus')" data-source-id="connectionStatus" title="个人模型连接状态"><span class="dot"></span>{{status.cloud_available?status.model+" 已连接":"BYOK 未连接 · 本地兜底"}}</button><div class="head-ops"><button v-if="!sidebarOpen" @click="reset" aria-label="新建对话" class="icon-btn" :id="uid('newTop')" data-source-id="newTop" title="新建对话"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg></button><span class="divider-v"></span><button @click="emit('toggle-full')" aria-label="切换全屏" class="icon-btn" :id="uid('fullToggle')" data-source-id="fullToggle" title="切换全屏" v-if="surface==='floating'"><svg class="ico" :id="uid('fullSvg')" data-source-id="fullSvg"><use :href="'#'+uid('i-max')"></use></svg></button><button @click="emit('close')" aria-label="收起窗口" class="icon-btn" :id="uid('closeChat')" data-source-id="closeChat" title="收起窗口" v-if="surface==='floating'"><svg class="ico"><use :href="'#'+uid('i-close')"></use></svg></button></div></header>
 <div class="window-body"><aside :class="{'closed':!sidebarOpen}" aria-label="会话历史" class="sidebar" :id="uid('sidebar')" data-source-id="sidebar"><div class="side-panel"><div class="side-top"><span class="side-label">对话</span><button @click="sidebarOpen=false" aria-label="收起会话侧栏" class="side-collapse" type="button"><svg class="ico"><use :href="'#'+uid('i-side')"></use></svg></button></div><button @click="reset" class="side-action" :id="uid('newSide')" data-source-id="newSide" type="button"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg><span>新对话</span></button><label class="side-search"><svg class="ico"><use :href="'#'+uid('i-search')"></use></svg><input v-model="sessionSearch" aria-label="搜索对话" placeholder="搜索对话" type="search"/></label><div class="side-list" :id="uid('sessionList')" data-source-id="sessionList" @scroll="sessionMenu=''"><div :class="{active:s.id===activeSession}" :key="s.id" class="side-row" v-for="(s,index) in filteredSessions"><input v-if="editingId===s.id" :data-edit="s.id" v-model="editTitle" aria-label="重命名对话" class="side-rename" @blur="commitRename(s)" @keydown.enter.prevent="commitRename(s)" @keydown.esc.prevent="cancelRename"/><button v-else :disabled="busy" :title="s.title" @click="chooseSession(s.id)" class="side-title" type="button">{{s.title}}</button><button :aria-expanded="sessionMenu===s.id" :aria-label="'管理对话：'+s.title" @click="toggleMenu(s.id,$event)" class="side-more" type="button">⋯</button><div class="side-pop" v-if="sessionMenu===s.id" :style="{top:menuPos.top+'px',left:menuPos.left+'px'}"><button @click="startRename(s)" type="button">重命名</button><button class="danger" @click="deleteSession(s.id)" type="button">删除对话</button></div></div><p v-if="!filteredSessions.length" class="side-empty">没有匹配的对话</p></div><div class="side-import" v-if="otherSessions.length"><button @click="sharedOpen=!sharedOpen" class="side-import-btn" type="button"><svg class="ico"><use :href="'#'+uid('i-import')"></use></svg><span>导入另一窗口的对话</span></button><div class="side-import-tray" v-if="sharedOpen"><p class="side-import-hint">导入为独立记录，不改动原窗口</p><button :disabled="busy" :key="s.id" @click="importSession(s)" class="side-import-row" v-for="s in otherSessions" type="button"><strong>{{s.title}}</strong><span>{{s.history.length}} 条回答</span></button></div></div><section :hidden="!profileOpen" aria-label="个人信息预览" class="profile-panel" :id="uid('profilePanel')" data-source-id="profilePanel">
 <div class="profile-top">
 <span aria-hidden="true" class="profile-avatar-lg avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" v-if="aiWorkspace.avatar"/></span>
@@ -139,7 +139,7 @@ onMounted(()=>{
 </div>
 <div class="profile-detail">评分、收藏与想看由当前登录账户独立保存。</div>
 <button @click="openSettings('account')" class="profile-edit-link" :id="uid('openAccountSettings')" data-source-id="openAccountSettings" type="button">编辑头像与个人资料</button><div class="profile-note">头像按账户保存；账户名称由身份系统管理。</div>
-</section><div class="side-account"><button @click="profileOpen=!profileOpen" aria-label="打开个人信息" class="account-identity" :id="uid('profileEntry')" data-source-id="profileEntry" title="个人信息" type="button"><span aria-hidden="true" class="account-avatar avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" v-if="aiWorkspace.avatar"/></span><span class="account-name">{{auth.user?.username}}</span></button><button @click="openSettings('account')" aria-label="打开全局设置" class="account-settings" :id="uid('accountSettingsEntry')" data-source-id="accountSettingsEntry" title="全局设置" type="button"><svg aria-hidden="true" fill="none" height="20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" viewBox="0 0 24 24" width="20"><circle cx="12" cy="12" r="3.2"></circle><path d="M19.4 13.3a7.5 7.5 0 0 0 0-2.6l2-1.5-2-3.4-2.4.9a7.6 7.6 0 0 0-2.2-1.3L14.4 3H9.6l-.4 2.4A7.6 7.6 0 0 0 7 6.7l-2.4-.9-2 3.4 2 1.5a7.5 7.5 0 0 0 0 2.6l-2 1.5 2 3.4 2.4-.9a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4.8l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4.9 2-3.4-2-1.5Z"></path></svg></button></div></div></aside><main class="chat-main"><div aria-live="polite" aria-relevant="additions" class="thread" :id="uid('thread')" data-source-id="thread" ref="thread"><div class="thread-inner" :id="uid('threadInner')" data-source-id="threadInner"><div v-if="!history.length&&!busy" class="empty-state"><div class="empty-orb"><span class="orb-skin"><img src="/m9/assistant-orb.png" alt="" draggable="false"/><i class="eye left"></i><i class="eye right"></i></span></div><h2>今晚，我们聊什么电影？</h2><p>说出你的心情、偏好或最近喜欢的电影。也可以直接向我提问。</p><div class="empty-suggestions"><button class="followup" @click="message='今晚看什么电影？'">帮我选今晚的电影</button><button class="followup" @click="message='想看烧脑一点的科幻电影'">想看烧脑科幻</button><button class="followup" @click="message='推荐一部温暖、有希望的电影'">想看温暖的故事</button></div></div>
+</section><div class="side-account"><button @click="profileOpen=!profileOpen" aria-label="打开个人信息" class="account-identity" :id="uid('profileEntry')" data-source-id="profileEntry" title="个人信息" type="button"><span aria-hidden="true" class="account-avatar avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" v-if="aiWorkspace.avatar"/></span><span class="account-name">{{auth.user?.username}}</span></button><button @click="openSettings('account')" aria-label="打开全局设置" class="account-settings" :id="uid('accountSettingsEntry')" data-source-id="accountSettingsEntry" title="全局设置" type="button"><svg aria-hidden="true" fill="none" height="20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" viewBox="0 0 24 24" width="20"><circle cx="12" cy="12" r="3.2"></circle><path d="M19.4 13.3a7.5 7.5 0 0 0 0-2.6l2-1.5-2-3.4-2.4.9a7.6 7.6 0 0 0-2.2-1.3L14.4 3H9.6l-.4 2.4A7.6 7.6 0 0 0 7 6.7l-2.4-.9-2 3.4 2 1.5a7.5 7.5 0 0 0 0 2.6l-2 1.5 2 3.4 2.4-.9a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4.8l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4.9 2-3.4-2-1.5Z"></path></svg></button></div></div></aside><main class="chat-main"><div aria-live="polite" aria-relevant="additions" class="thread" :id="uid('thread')" data-source-id="thread" ref="thread"><div class="thread-inner" :id="uid('threadInner')" data-source-id="threadInner"><div v-if="!history.length&&!busy" class="empty-state"><div class="empty-orb"><span ref="emptyOrbEl" class="orb-skin" data-orb=""><img src="/m9/assistant-orb.png" alt="" draggable="false"/><i class="eye left"></i><i class="eye right"></i></span></div><h2>今晚，我们聊什么电影？</h2><p>说出你的心情、偏好或最近喜欢的电影。也可以直接向我提问。</p><div class="empty-suggestions"><button class="followup" @click="message='今晚看什么电影？'">帮我选今晚的电影</button><button class="followup" @click="message='想看烧脑一点的科幻电影'">想看烧脑科幻</button><button class="followup" @click="message='推荐一部温暖、有希望的电影'">想看温暖的故事</button></div></div>
 <div v-if="history.length" class="date-line">当前会话</div>
 <template v-for="(turn,i) in history" :key="i"><div class="msg user"><div class="bubble">{{turn.question}}</div><div class="mi17-user-actions"><button class="response-action" @click="copyAnswer(turn.question)">复制</button><button class="response-action" aria-label="重新提问" :disabled="busy" @click="message=turn.question">编辑</button></div></div><div class="msg assistant"><div class="avatar"><span class="orb-skin mini"><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name"><span>MovieInsight AI</span><small>{{sourceLabel(turn.result)}}</small></div><div class="reply"><p class="reply-body">{{turn.answer}}</p></div>
 <template v-if="turn.result?.items?.length"><div class="trust-note">库内电影 · 真实目录 ID</div><div class="cards-head"><strong>电影选择 · {{turn.result.items.length}} 部</strong><span v-if="behaviorReady()">横向浏览 · 可追问</span><span v-else class="behavior-warn" role="status">行为状态不可用，收藏与想看已暂停</span></div><div class="cards-rail"><article v-for="m in turn.result.items" :key="m.movie_id" class="movie-card"><router-link :to="movieUrl(m.movie_id)" class="poster" :aria-label="'查看'+m.title+'详情'"><img v-if="m.poster||movieArtwork[String(m.movie_id)]?.poster" class="poster-uploaded" :src="m.poster||movieArtwork[String(m.movie_id)]?.poster" :alt="m.title+'海报'" loading="lazy"/><div v-else class="poster-title">{{m.title}}</div></router-link><div class="movie-info"><div class="movie-title">{{m.title}}</div><div class="movie-meta">{{m.release_year||'年份未知'}} · {{m.genres?.join(' / ')}}</div><span class="verified">库内影片</span><p class="why">{{m.reasons?.join('；')}}</p><div class="movie-actions"><router-link class="mini-btn" :to="movieUrl(m.movie_id)">详情</router-link><button class="mini-btn" :class="{'is-active':movieState(m).want}" :aria-pressed="movieState(m).want" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'want')" @click="toggleMovieBehavior(m.movie_id,'want')">{{movieState(m).want?'撤销想看':'想看'}}</button><button class="mini-btn" :class="{'is-active':movieState(m).favorite}" :aria-pressed="movieState(m).favorite" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'favorite')" @click="toggleMovieBehavior(m.movie_id,'favorite')">{{movieState(m).favorite?'取消收藏':'收藏'}}</button><button class="mini-btn" @click="followup(m.title)">追问</button></div></div></article></div></template>
@@ -147,7 +147,7 @@ onMounted(()=>{
 <div class="followups"><button class="followup" @click="message='那更偏烧脑一点呢？'">更偏烧脑一点</button><button class="followup" @click="message='有没有更温暖、更有希望的？'">想要温暖一点</button><button class="followup" @click="message='当前库里还有哪些电影？'">库里还有什么</button></div>
 <div class="response-actions"><div class="response-actions-buttons"><button class="response-action" aria-label="复制这条回复" @click="copyAnswer(turn.answer)"><svg class="ico"><use :href="'#'+uid('i-copy')"/></svg><span>复制</span></button><button class="response-action" aria-label="重新提问" :disabled="busy" @click="message=turn.question;notice='已填入原问题；确认发送可能产生新的模型费用。'"><svg class="ico"><use :href="'#'+uid('i-refresh')"/></svg><span>重新提问</span></button><button class="response-action" aria-label="有帮助" :aria-pressed="turn.feedback==='up'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'up')"><svg class="ico"><use :href="'#'+uid('i-thumb-up')"/></svg><span>有帮助</span></button><button class="response-action" aria-label="需改进" :aria-pressed="turn.feedback==='down'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'down')"><svg class="ico"><use :href="'#'+uid('i-thumb-down')"/></svg><span>需改进</span></button></div></div>
 <p v-if="turn.result?.cost" class="reply-status">模型调用 {{turn.result.cost.provider_calls??'未知'}} 次 · 输入 {{turn.result.cost.input_tokens??'未知'}} / 输出 {{turn.result.cost.output_tokens??'未知'}} Token · 金额 {{turn.result.cost.amount===0?'0':'未知'}}</p><p v-for="limit in turn.result?.limitations" :key="limit" class="reply-status">{{limit}}</p></div></div></template>
-<div v-if="busy" class="msg assistant"><div class="avatar"><span class="orb-skin mini"><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name">MovieInsight AI <small>正在理解与查询</small></div><p class="reply-body">{{draft}}</p><div class="typing-dots"><i></i><i></i><i></i></div><small class="reply-status">生成草稿尚未完成事实核验。</small></div></div>
+<div v-if="busy" class="msg assistant"><div class="avatar"><span class="orb-skin mini is-thinking" data-orb=""><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name is-thinking">MovieInsight AI <small>{{draft?'正在生成回答':'正在理解与查询'}}</small></div><div class="thinking-cue" aria-live="polite"><i class="thinking-dot" aria-hidden="true"></i><span>{{draft?'正在生成回答':'正在理解与查询'}}</span></div><p v-if="draft" class="reply-body is-writing">{{draft}}</p><div class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></div><small class="reply-status">生成草稿尚未完成事实核验。</small></div></div>
 <p v-if="result?.source==='INTERRUPTED'" class="reply-status" role="status">{{result.answer}}</p><p v-if="error" class="reply-status" role="alert">{{error}}</p><p v-if="notice" class="reply-status" role="status">{{notice}}</p>
 </div></div><div class="composer-zone"><div class="composer-wrap"><div :hidden="!shortcutsOpen" class="composer-shortcuts" :id="uid('composerShortcuts')" data-source-id="composerShortcuts"><div class="shortcut-label">快捷提问</div><button @click="message='今晚看什么电影？'" data-shortcut="今晚看什么电影？" type="button">今晚看什么</button><button @click="message='想看烧脑一点的科幻电影'" data-shortcut="想看烧脑一点的科幻电影" type="button">烧脑科幻</button><button @click="message='推荐一部温暖、有希望的电影'" data-shortcut="推荐一部温暖、有希望的电影" type="button">温暖剧情</button></div><form @submit.prevent="submit" :class="{'mi14-expanded':expanded}" class="compose compose-r5 mi14-compose" :id="uid('composerForm')" data-source-id="composerForm">
 <label class="sr-only" :for="uid('messageInput')">输入关于电影的问题</label>
@@ -850,7 +850,7 @@ form[data-source-id="composerForm"].mi14-compose .mi14-controls button[data-sour
 }
 .prototype-ai.mi2-docked-ai .backdrop,.prototype-ai.mi2-docked-ai #orbLauncher{display:none!important}
 .prototype-ai.mi2-docked-ai *,.prototype-ai.mi2-docked-ai *:before,.prototype-ai.mi2-docked-ai *:after{
- animation-duration:0s!important;transition-duration:0s!important;scroll-behavior:auto!important
+ /* animations enabled for orb, thinking & sidebar */
 }
 
 
@@ -1029,4 +1029,163 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
   .window.sidebar-open .sidebar{background:#0c0d0f;border-right:1px solid rgba(255,255,255,.12);box-shadow:18px 0 42px rgba(0,0,0,.6);width:min(300px,86vw);max-width:none}
   .window.sidebar-open .sidebar .side-panel{background:#0c0d0f}
 }</style>
+<style>
+/* 浅色主题（unslop Warm Paper）：保持布局零改动，统一日间纸感与暖铜金强调色 */
+:root[data-theme="light"] .prototype-ai{background:var(--mi-bg);color:var(--mi-text)}
+:root[data-theme="light"] .prototype-ai .window{background:var(--mi-bg)!important;color:var(--mi-text)!important;border-color:var(--mi-border)!important;box-shadow:var(--mi-shadow-md)!important}
+:root[data-theme="light"] .prototype-ai .window-head{background:var(--mi-bg)!important;border-bottom-color:var(--mi-border)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai.surface-floating .window-head{background:var(--mi-surface)!important}
+:root[data-theme="light"] .prototype-ai .head-title,:root[data-theme="light"] .prototype-ai .head-id{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .head-status,:root[data-theme="light"] .prototype-ai .date-line,:root[data-theme="light"] .prototype-ai .trust-note,:root[data-theme="light"] .prototype-ai .cards-head,:root[data-theme="light"] .prototype-ai .movie-meta,:root[data-theme="light"] .prototype-ai .why,:root[data-theme="light"] .prototype-ai .shortcut-label,:root[data-theme="light"] .prototype-ai .reply-status{color:var(--mi-text-secondary)!important}
+:root[data-theme="light"] .prototype-ai .icon-btn,:root[data-theme="light"] .prototype-ai .mini-btn,:root[data-theme="light"] .prototype-ai .response-action{color:var(--mi-text-secondary)!important;border-color:var(--mi-border)!important;background:transparent!important}
+:root[data-theme="light"] .prototype-ai .icon-btn:hover,:root[data-theme="light"] .prototype-ai .mini-btn:hover,:root[data-theme="light"] .prototype-ai .response-action:hover{color:var(--mi-text)!important;background:var(--mi-surface-hover)!important;border-color:var(--mi-border-strong)!important}
+:root[data-theme="light"] .prototype-ai .sidebar,:root[data-theme="light"] .prototype-ai.surface-floating .sidebar{background:var(--mi-sidebar-bg)!important;border-right:1px solid var(--mi-sidebar-border)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-panel,:root[data-theme="light"] .prototype-ai .window.sidebar-open .sidebar .side-panel{background:var(--mi-sidebar-bg)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-label,:root[data-theme="light"] .prototype-ai .side-action,:root[data-theme="light"] .prototype-ai .side-row.active,:root[data-theme="light"] .prototype-ai .side-row.active .side-title,:root[data-theme="light"] .prototype-ai .account-name{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-collapse,:root[data-theme="light"] .prototype-ai .side-more,:root[data-theme="light"] .prototype-ai .side-import-btn,:root[data-theme="light"] .prototype-ai .side-empty,:root[data-theme="light"] .prototype-ai .side-import-hint{color:var(--mi-text-muted)!important}
+:root[data-theme="light"] .prototype-ai .side-action{border-color:var(--mi-border-strong)!important;background:var(--mi-surface)!important}
+:root[data-theme="light"] .prototype-ai .side-action:hover,:root[data-theme="light"] .prototype-ai .side-row:hover,:root[data-theme="light"] .prototype-ai .side-more:hover,:root[data-theme="light"] .prototype-ai .side-collapse:hover{background:var(--mi-surface-hover)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-search{background:var(--mi-input-bg)!important;border-color:var(--mi-border)!important}
+:root[data-theme="light"] .prototype-ai .side-search input,:root[data-theme="light"] .prototype-ai .side-rename{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-search input::placeholder{color:var(--mi-text-subtle)!important}
+:root[data-theme="light"] .prototype-ai .side-row{color:var(--mi-text-secondary)!important}
+:root[data-theme="light"] .prototype-ai .side-row.active{background:var(--mi-sidebar-active)!important}
+:root[data-theme="light"] .prototype-ai .side-pop,:root[data-theme="light"] .prototype-ai .profile-panel,:root[data-theme="light"] .prototype-ai .side-import-tray{background:var(--mi-surface)!important;border:1px solid var(--mi-border-strong)!important;color:var(--mi-text)!important;box-shadow:var(--mi-shadow-md)!important}
+:root[data-theme="light"] .prototype-ai .side-pop button{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .side-pop button:hover{background:var(--mi-surface-hover)!important}
+:root[data-theme="light"] .prototype-ai .side-pop button.danger{color:var(--mi-negative)!important}
+:root[data-theme="light"] .prototype-ai .thread,:root[data-theme="light"] .prototype-ai .chat-main{background:transparent!important;color:var(--mi-text)!important;scrollbar-color:var(--mi-scroll-thumb) transparent!important}
+:root[data-theme="light"] .prototype-ai .empty-state h2,:root[data-theme="light"] .prototype-ai .assistant-name,:root[data-theme="light"] .prototype-ai .reply-body,:root[data-theme="light"] .prototype-ai .reply-body strong,:root[data-theme="light"] .prototype-ai .reply-body b,:root[data-theme="light"] .prototype-ai .movie-title,:root[data-theme="light"] .prototype-ai .poster-title{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .empty-state p{color:var(--mi-text-secondary)!important}
+:root[data-theme="light"] .prototype-ai .msg.user .bubble{background:var(--mi-surface-raised)!important;border:1px solid var(--mi-border)!important;color:var(--mi-text)!important;box-shadow:none!important}
+:root[data-theme="light"] .prototype-ai .msg.assistant .bubble,:root[data-theme="light"] .prototype-ai .reply{background:transparent!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .movie-card{background:var(--mi-surface)!important;border:1px solid var(--mi-border)!important;box-shadow:var(--mi-shadow-sm)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .movie-card:hover{border-color:var(--mi-accent)!important;box-shadow:var(--mi-shadow-md)!important}
+:root[data-theme="light"] .prototype-ai .movie-card .poster{background:var(--mi-surface-raised)!important;border-color:var(--mi-border)!important}
+:root[data-theme="light"] .prototype-ai .movie-actions button,:root[data-theme="light"] .prototype-ai .followup,:root[data-theme="light"] .prototype-ai .mode-chip{background:var(--mi-surface)!important;border:1px solid var(--mi-border-strong)!important;color:var(--mi-text-soft)!important}
+:root[data-theme="light"] .prototype-ai .movie-actions button:hover,:root[data-theme="light"] .prototype-ai .followup:hover,:root[data-theme="light"] .prototype-ai .mode-chip:hover{background:var(--mi-surface-hover)!important;border-color:var(--mi-accent)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .movie-actions button.is-active{background:var(--mi-accent-soft)!important;border-color:var(--mi-accent-border)!important;color:var(--mi-accent-text)!important}
+:root[data-theme="light"] .prototype-ai .verified{background:var(--mi-positive-soft)!important;color:var(--mi-positive)!important;border-color:var(--mi-positive-border)!important}
+:root[data-theme="light"] .prototype-ai .behavior-warn{background:var(--mi-warning-soft)!important;color:var(--mi-warning)!important;border-color:var(--mi-accent-border)!important}
+:root[data-theme="light"] .prototype-ai .composer-zone{background:var(--mi-composer-fade)!important;border-top-color:var(--mi-border)!important}
+:root[data-theme="light"] .prototype-ai .compose,:root[data-theme="light"] .prototype-ai .compose-r5,:root[data-theme="light"] .prototype-ai .mi14-compose{background:var(--mi-surface)!important;border:1px solid var(--mi-border-strong)!important;box-shadow:var(--mi-shadow-sm)!important;color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .compose:focus-within,:root[data-theme="light"] .prototype-ai .compose-r5:focus-within,:root[data-theme="light"] .prototype-ai .mi14-compose:focus-within{border-color:var(--mi-accent)!important}
+:root[data-theme="light"] .prototype-ai .compose textarea,:root[data-theme="light"] .prototype-ai .compose-r5 textarea,:root[data-theme="light"] .prototype-ai .mi14-compose textarea{color:var(--mi-text)!important;background:transparent!important}
+:root[data-theme="light"] .prototype-ai .compose textarea::placeholder,:root[data-theme="light"] .prototype-ai .compose-r5 textarea::placeholder,:root[data-theme="light"] .prototype-ai .mi14-compose textarea::placeholder{color:var(--mi-text-subtle)!important}
+:root[data-theme="light"] .prototype-ai .send,:root[data-theme="light"] .prototype-ai .send-r5,:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]{background:var(--mi-primary-btn-bg)!important;color:var(--mi-primary-btn-text)!important}
+:root[data-theme="light"] .prototype-ai .send:hover:not(:disabled),:root[data-theme="light"] .prototype-ai .send-r5:hover,:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]:hover{background:var(--mi-primary-btn-hover)!important}
+:root[data-theme="light"] .prototype-ai .send:disabled,:root[data-theme="light"] .prototype-ai .send-r5:disabled{background:var(--mi-surface-raised)!important;color:var(--mi-text-muted)!important}
+:root[data-theme="light"] .prototype-ai .send-r5.is-stopping{background:var(--mi-negative-soft)!important;color:var(--mi-negative)!important;border:1px solid var(--mi-negative-border)!important}
+:root[data-theme="light"] .prototype-ai .detail-panel,:root[data-theme="light"] .prototype-ai .settings-panel,:root[data-theme="light"] .prototype-ai .compare-pop{background:var(--mi-surface)!important;border-color:var(--mi-border-strong)!important;color:var(--mi-text)!important;box-shadow:var(--mi-shadow-lg)!important}
+:root[data-theme="light"] .prototype-ai .account-settings,:root[data-theme="light"] .prototype-ai .profile-edit-link{color:var(--mi-accent-text)!important}
+:root[data-theme="light"] .prototype-ai :where(button,input,select,textarea,[role="button"]):focus-visible{outline-color:var(--mi-accent)!important}
+
+/* 深色主题正文统一默认纯白（保留深底与语义状态色） */
+:root[data-theme="dark"] .prototype-ai,
+:root[data-theme="dark"] .prototype-ai .window,
+:root[data-theme="dark"] .prototype-ai .window-head,
+:root[data-theme="dark"] .prototype-ai .head-title,
+:root[data-theme="dark"] .prototype-ai .head-id,
+:root[data-theme="dark"] .prototype-ai .head-status,
+:root[data-theme="dark"] .prototype-ai .date-line,
+:root[data-theme="dark"] .prototype-ai .trust-note,
+:root[data-theme="dark"] .prototype-ai .cards-head,
+:root[data-theme="dark"] .prototype-ai .cards-head span:not(.behavior-warn),
+:root[data-theme="dark"] .prototype-ai .movie-meta,
+:root[data-theme="dark"] .prototype-ai .why,
+:root[data-theme="dark"] .prototype-ai .shortcut-label,
+:root[data-theme="dark"] .prototype-ai .reply-status,
+:root[data-theme="dark"] .prototype-ai .icon-btn,
+:root[data-theme="dark"] .prototype-ai .mini-btn,
+:root[data-theme="dark"] .prototype-ai .response-action,
+:root[data-theme="dark"] .prototype-ai .sidebar,
+:root[data-theme="dark"] .prototype-ai .side-panel,
+:root[data-theme="dark"] .prototype-ai .side-label,
+:root[data-theme="dark"] .prototype-ai .side-action,
+:root[data-theme="dark"] .prototype-ai .side-collapse,
+:root[data-theme="dark"] .prototype-ai .side-more,
+:root[data-theme="dark"] .prototype-ai .side-import-btn,
+:root[data-theme="dark"] .prototype-ai .side-empty,
+:root[data-theme="dark"] .prototype-ai .side-import-hint,
+:root[data-theme="dark"] .prototype-ai .side-row,
+:root[data-theme="dark"] .prototype-ai .side-title,
+:root[data-theme="dark"] .prototype-ai .side-search input,
+:root[data-theme="dark"] .prototype-ai .side-rename,
+:root[data-theme="dark"] .prototype-ai .side-pop button:not(.danger),
+:root[data-theme="dark"] .prototype-ai .profile-panel,
+:root[data-theme="dark"] .prototype-ai .profile-meta strong,
+:root[data-theme="dark"] .prototype-ai .profile-meta small,
+:root[data-theme="dark"] .prototype-ai .profile-detail,
+:root[data-theme="dark"] .prototype-ai .profile-note,
+:root[data-theme="dark"] .prototype-ai .account-name,
+:root[data-theme="dark"] .prototype-ai .account-settings,
+:root[data-theme="dark"] .prototype-ai .profile-edit-link,
+:root[data-theme="dark"] .prototype-ai .thread,
+:root[data-theme="dark"] .prototype-ai .chat-main,
+:root[data-theme="dark"] .prototype-ai .empty-state h2,
+:root[data-theme="dark"] .prototype-ai .empty-state p,
+:root[data-theme="dark"] .prototype-ai .assistant-name,
+:root[data-theme="dark"] .prototype-ai .assistant-name small,
+:root[data-theme="dark"] .prototype-ai .msg.user .bubble,
+:root[data-theme="dark"] .prototype-ai .reply,
+:root[data-theme="dark"] .prototype-ai .reply-lead,
+:root[data-theme="dark"] .prototype-ai .reply-body,
+:root[data-theme="dark"] .prototype-ai .reply-body strong,
+:root[data-theme="dark"] .prototype-ai .reply-body b,
+:root[data-theme="dark"] .prototype-ai .movie-title,
+:root[data-theme="dark"] .prototype-ai .poster-title,
+:root[data-theme="dark"] .prototype-ai .followup,
+:root[data-theme="dark"] .prototype-ai .mode-chip,
+:root[data-theme="dark"] .prototype-ai .compose textarea,
+:root[data-theme="dark"] .prototype-ai .compose-footer,
+:root[data-theme="dark"] .prototype-ai .compose-footer .key,
+:root[data-theme="dark"] .prototype-ai .detail-panel,
+:root[data-theme="dark"] .prototype-ai .settings-panel,
+:root[data-theme="dark"] .prototype-ai .compare-pop,
+:root[data-theme="dark"] .prototype-ai .detail-panel p,
+:root[data-theme="dark"] .prototype-ai .settings-panel p,
+:root[data-theme="dark"] .prototype-ai .compare-pop p,
+:root[data-theme="dark"] .prototype-ai .info-line{color:var(--mi-text)!important}
+:root[data-theme="dark"] .prototype-ai input::placeholder,
+:root[data-theme="dark"] .prototype-ai textarea::placeholder{color:var(--mi-text-subtle)!important}
+
+/* AI 助手灵动动效：精灵球呼吸与视线微追踪、侧栏滑入、思考三点律动与流式光标 */
+.prototype-ai .orb-skin{--ex:0px;--ey:0px;--blink:1}
+.prototype-ai .orb-skin .eye{transform:translate3d(var(--ex,0px),var(--ey,0px),0) scaleY(var(--blink,1));transition:transform .11s cubic-bezier(.22,1,.36,1)}
+.prototype-ai .empty-orb .orb-skin{animation:miOrbIdleFloat 5.2s ease-in-out infinite}
+.prototype-ai .orb-skin.mini.is-thinking{position:relative}
+.prototype-ai .orb-skin.mini.is-thinking::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1.5px solid var(--mi-accent);opacity:.65;pointer-events:none;animation:miOrbThinkRing 1.35s ease-in-out infinite}
+.prototype-ai .sidebar{transition:width .26s cubic-bezier(.22,1,.36,1),border-color .22s ease!important}
+.prototype-ai .side-panel{opacity:0;transform:translate3d(-8px,0,0);transition:opacity .2s ease,transform .26s cubic-bezier(.22,1,.36,1)}
+.prototype-ai .window.sidebar-open .side-panel{opacity:1;transform:translate3d(0,0,0)}
+.prototype-ai .assistant-name.is-thinking small{display:inline-flex;align-items:center;gap:6px}
+.prototype-ai .assistant-name.is-thinking small::before{content:"";width:6px;height:6px;border-radius:50%;background:var(--mi-accent);animation:miThinkPulse 1.3s ease-in-out infinite}
+.prototype-ai .typing-dots{display:flex;gap:5px;align-items:center;height:20px;margin:2px 0 6px}
+.prototype-ai .typing-dots i{display:block;width:6px;height:6px;border-radius:50%;background:var(--mi-accent);opacity:.38;animation:miTypingWave 1.15s ease-in-out infinite}
+:root[data-theme="dark"] .prototype-ai .typing-dots i{background:#b8a1fb}
+.prototype-ai .typing-dots i:nth-child(2){animation-delay:.16s}
+.prototype-ai .typing-dots i:nth-child(3){animation-delay:.32s}
+.prototype-ai .reply-body.is-writing::after{content:"";display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-.14em;background:var(--mi-accent);animation:miStreamCaret .85s steps(1) infinite}
+@keyframes miOrbIdleFloat{0%,100%{transform:translate3d(0,0,0)}50%{transform:translate3d(0,-3px,0)}}
+@keyframes miOrbThinkRing{0%,100%{opacity:.35;transform:scale(.96)}50%{opacity:.9;transform:scale(1.12)}}
+@keyframes miThinkPulse{0%,100%{opacity:.4;transform:scale(.82)}50%{opacity:1;transform:scale(1.1)}}
+@keyframes miTypingWave{0%,60%,100%{opacity:.35;transform:translate3d(0,0,0) scale(.88)}30%{opacity:1;transform:translate3d(0,-4px,0) scale(1.12)}}
+@keyframes miStreamCaret{50%{opacity:0}}
+:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::before,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){.prototype-ai *,.prototype-ai *::before,.prototype-ai *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+.thinking-cue{display:none;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;font-weight:500;letter-spacing:.01em;color:var(--mi-text,#ffffff)}
+.window[data-dialog-mode="gemini"] .thinking-cue{display:inline-flex}
+.thinking-cue .thinking-dot{width:8px;height:8px;border-radius:50%;flex:none;background:radial-gradient(circle at 35% 35%,#e7dcff,#9c7aff 70%);box-shadow:0 0 10px rgba(167,139,250,.55);animation:miThinkPulse 1.5s ease-in-out infinite}
+:root[data-theme="light"] .thinking-cue .thinking-dot{background:radial-gradient(circle at 35% 35%,#e2bc87,#8c6226 72%);box-shadow:0 0 8px rgba(140,98,38,.36)}
+:root[data-theme="light"] .orb-skin.mini.is-thinking::after{box-shadow:0 0 0 0 rgba(140,98,38,.32)}
+:root[data-theme="light"] .assistant-name.is-thinking small::before{background:#8c6226}
+@keyframes miMsgEnter{from{opacity:0;transform:translate3d(0,6px,0)}to{opacity:1;transform:translate3d(0,0,0)}}
+.prototype-ai .thread .msg{animation:miMsgEnter .18s cubic-bezier(.22,1,.36,1) both}
+.prototype-ai .empty-state{animation:miMsgEnter .24s cubic-bezier(.22,1,.36,1) both}
+.prototype-ai .mode-chip,.prototype-ai .prompt-pill,.prototype-ai .response-action,.prototype-ai .side-row,.prototype-ai .mi15-mode,.prototype-ai .followup,.prototype-ai .icon-btn{transition:background-color .16s ease,border-color .16s ease,color .16s ease,transform .14s ease}
+.prototype-ai .prompt-pill:hover,.prototype-ai .followup:hover{transform:translateY(-1px)}
+.prototype-ai .prompt-pill:active,.prototype-ai .followup:active{transform:translateY(0) scale(.985)}
+:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .prompt-pill:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .prompt-pill:active,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:active{transform:none!important}
+@media(prefers-reduced-motion:reduce){.prototype-ai .prompt-pill:hover,.prototype-ai .followup:hover,.prototype-ai .prompt-pill:active,.prototype-ai .followup:active{transform:none!important}}
+</style>
 <style scoped src="../styles/assistant-avatar.css"></style>

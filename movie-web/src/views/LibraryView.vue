@@ -9,32 +9,58 @@ import {movieArtwork} from '../services/movieArtwork'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 const items=ref<any[]>([]),genres=ref<any[]>([]),behavior=ref<Record<string,any>>({}),busy=ref(false),error=ref(''),notice=ref(''),failures=ref<Record<string,boolean>>({}),pending=ref<Record<string,boolean>>({})
 const keyword=ref(''),genre=ref(''),yearFrom=ref(''),yearTo=ref(''),sort=ref('updated'),mode=ref('grid'),state=ref(''),hasMore=ref(false),loadingMore=ref(false),moreError=ref(''),drawer=ref(false),closeButton=ref<HTMLButtonElement>(),filterButton=ref<HTMLButtonElement>(),sentinel=ref<HTMLElement>()
-const draftFrom=ref(''),draftTo=ref(''),draftGenre=ref(''),draftState=ref(''),pageSize=24
+const draftFrom=ref(''),draftTo=ref(''),draftGenre=ref(''),draftState=ref(''),pageSize=24,AUTO_SCROLL_CAP=120,MAX_DOM_ITEMS=240,hasLoaded=ref(false)
 const quickGenres=computed(()=>['科幻','剧情','犯罪','悬疑','冒险'].map(name=>genres.value.find(g=>g.name_zh===name)).filter(Boolean))
 const visible=computed(()=>items.value.filter(m=>!state.value||behavior.value[String(m.movie_id)]?.[state.value]))
 const {gridRef,gridStyle}=usePosterGrid(()=>visible.value.length)
 const count=computed(()=>[genre.value,yearFrom.value,yearTo.value,state.value].filter(Boolean).length)
-let controller:AbortController|undefined,moreController:AbortController|undefined,serial=0,loadedSig='',observer:IntersectionObserver|undefined
-async function api(path:string,signal?:AbortSignal){const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal});let body:any=null;try{body=await r.json()}catch{body=null};if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件无效，请检查年份。':'电影库暂时不可用，请重试。');if(!body||body.code!=='OK'||body.data==null)throw new Error('电影库响应异常，请重试。');return body.data}
+let controller:AbortController|undefined,moreController:AbortController|undefined,behaviorController:AbortController|undefined,serial=0,loadedSig='',selfBehaviorEvent=false,observer:IntersectionObserver|undefined
+async function api(path:string,signal?:AbortSignal){
+ const timeout=AbortSignal.timeout(20000)
+ const combined=signal?AbortSignal.any([signal,timeout]):timeout
+ const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:combined});let body:any=null;try{body=await r.json()}catch{body=null}
+ if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件无效，请检查年份。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'电影库统计或缓存正在预热，请稍后重试。':'电影库暂时不可用，请重试。')
+ if(!body||body.code!=='OK'||body.data==null)throw new Error('电影库响应异常，请重试。')
+ return body.data
+}
 function params(off:number){const p=new URLSearchParams({limit:String(pageSize),offset:String(off),sort:sort.value});for(const [k,v] of Object.entries({keyword:keyword.value.trim(),genre_id:genre.value,year_from:yearFrom.value,year_to:yearTo.value,state:state.value}))if(v)p.set(k,v);return p}
 function signature(){return JSON.stringify([keyword.value.trim(),genre.value,yearFrom.value,yearTo.value,sort.value,state.value])}
-async function load(){controller?.abort();moreController?.abort();controller=new AbortController();const signal=controller.signal,id=++serial;busy.value=true;error.value='';moreError.value='';loadingMore.value=false;try{
- const [data,g,b]=await Promise.all([api('movies?'+params(0),signal),api('genres',signal),api('behavior',signal)])
- const rows=data.items||[]
- if(id===serial){items.value=rows;genres.value=g.items;behavior.value=b.state;hasMore.value=rows.length===pageSize;loadedSig=signature()}
- }catch(e){if(!signal.aborted&&id===serial){error.value=(e as Error).message;items.value=[]}}finally{if(id===serial){busy.value=false;await nextTick();observeSentinel()}}}
-async function loadMore(){if(busy.value||loadingMore.value||!hasMore.value)return
- loadingMore.value=true;moreError.value='';moreController=new AbortController()
- try{const data=await api('movies?'+params(items.value.length),moreController.signal)
+async function load(){
+ controller?.abort();moreController?.abort();behaviorController?.abort();controller=new AbortController()
+ const signal=controller.signal,id=++serial;busy.value=true;error.value='';moreError.value='';loadingMore.value=false
+ try{
+  const genresTask=genres.value.length?Promise.resolve({items:genres.value}):api('genres',signal).catch(()=>({items:genres.value}))
+  const behaviorTask=api('behavior',signal).catch(err=>{
+   if(state.value||String((err as Error)?.message||'').includes('登录已失效'))throw err
+   notice.value='个人状态暂不可用，已为你展示电影目录。'
+   return {state:behavior.value}
+  })
+  const [data,g,b]=await Promise.all([api('movies?'+params(0),signal),genresTask,behaviorTask])
+  const rows=data.items||[]
+  if(id===serial&&!signal.aborted){items.value=rows;genres.value=g.items||[];behavior.value=b.state||{};hasMore.value=rows.length===pageSize;loadedSig=signature();hasLoaded.value=true}
+ }catch(e){if(!signal.aborted&&id===serial){error.value=(e as Error).message;if(!items.value.length)items.value=[]}}finally{if(id===serial){busy.value=false;await nextTick();observeSentinel()}}
+}
+async function loadMore(){
+ if(busy.value||loadingMore.value||!hasMore.value||items.value.length>=MAX_DOM_ITEMS)return
+ moreController?.abort()
+ const current=new AbortController();moreController=current;const id=serial
+ loadingMore.value=true;moreError.value=''
+ try{
+  const data=await api('movies?'+params(items.value.length),current.signal)
+  if(current.signal.aborted||moreController!==current||id!==serial)return
   const rows=data.items||[],seen=new Set(items.value.map((m:any)=>m.movie_id))
-  items.value=[...items.value,...rows.filter((m:any)=>!seen.has(m.movie_id))]
-  hasMore.value=rows.length===pageSize
- }catch(e){if(!moreController.signal.aborted)moreError.value='后续影片没有取回来，可以重试。'}
- finally{loadingMore.value=false;await nextTick();observeSentinel()}}
-function observeSentinel(){observer?.disconnect();if(!sentinel.value||!hasMore.value||busy.value||loadingMore.value)return
+  items.value=[...items.value,...rows.filter((m:any)=>!seen.has(m.movie_id))].slice(0,MAX_DOM_ITEMS)
+  hasMore.value=rows.length===pageSize&&items.value.length<MAX_DOM_ITEMS
+ }catch(e){if(!current.signal.aborted&&moreController===current&&id===serial)moreError.value='后续影片没有取回来，可以重试。'}
+ finally{if(moreController===current&&id===serial){loadingMore.value=false;await nextTick();observeSentinel()}}
+}
+function observeSentinel(){
+ observer?.disconnect()
+ if(!sentinel.value||!hasMore.value||busy.value||loadingMore.value||items.value.length>=AUTO_SCROLL_CAP)return
  observer=new IntersectionObserver(entries=>{if(entries.some(entry=>entry.isIntersecting))loadMore()},{rootMargin:'640px 0px'})
- observer.observe(sentinel.value)}
-function sync(){const q=route.query;keyword.value=String(q.q||'');genre.value=String(q.genre||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');sort.value=['updated','release','id'].includes(String(q.sort))?String(q.sort):'updated';mode.value=q.view==='list'?'list':'grid';state.value=['favorite','want','watched'].includes(String(q.state))?String(q.state):'';if(route.hash.startsWith('#movie/')||route.hash==='#behavior')return;if(items.value.length&&signature()===loadedSig){nextTick(restoreScroll);return}load()}
+ observer.observe(sentinel.value)
+}
+function sync(){const q=route.query;keyword.value=String(q.q||'');genre.value=String(q.genre||'');yearFrom.value=String(q.year_from||'');yearTo.value=String(q.year_to||'');sort.value=['updated','release','id'].includes(String(q.sort))?String(q.sort):'updated';mode.value=q.view==='list'?'list':'grid';state.value=['favorite','want','watched'].includes(String(q.state))?String(q.state):'';if(route.hash.startsWith('#movie/')||route.hash==='#behavior')return;if(hasLoaded.value&&!error.value&&signature()===loadedSig){nextTick(restoreScroll);return}load()}
 watch(()=>route.fullPath,sync,{immediate:true})
 function apply(){const query:Record<string,string>={};for(const [k,v] of Object.entries({q:keyword.value.trim(),genre:genre.value,year_from:yearFrom.value,year_to:yearTo.value,sort:sort.value,view:mode.value,state:state.value}))if(v)query[k]=v;router.push({path:'/movies',query})}
 function reset(){keyword.value='';genre.value='';yearFrom.value='';yearTo.value='';state.value='';sort.value='updated';apply()}
@@ -46,12 +72,18 @@ function focusTrap(e:KeyboardEvent){if(e.key==='Escape'){closeFilters();return}i
 function posterOf(m:any){return m.poster||movieArtwork[String(m.movie_id)]?.poster||''}
 function posterError(e:Event,m:any){const img=e.target as HTMLImageElement;if(m.poster_fallback&&img.getAttribute('src')!==m.poster_fallback){img.src=m.poster_fallback}else{img.style.visibility='hidden'}}
 function detail(id:number){sessionStorage.setItem('mi2_library_scroll',String(scrollY));router.push({path:'/movies',query:{...route.query,from:'library'},hash:'#movie/'+id})}
-async function act(id:number,kind:string){if(pending.value[id])return;pending.value[id]=true;notice.value='';try{const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});let cb:any=null;try{cb=await c.json()}catch{cb=null};const token=cb?.data?.csrf_token;if(!c.ok||!token||(cb?.code!==0&&cb?.code!=='OK'))throw new Error('登录已失效，请重新登录。');const undo=!!behavior.value[id]?.[kind];const r=await fetch('/api/catalog/behavior',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({event_id:crypto.randomUUID(),movie_id:id,kind,action:undo?'undo':'set',value:null,time:new Date().toISOString(),source:'USER_ACTION'})});let rb:any=null;try{rb=await r.json()}catch{rb=null};if(!r.ok||rb?.code!=='OK')throw new Error(r.status===409?'行为状态冲突，请到详情页调整。':'保存未确认，请刷新状态后重试。');behavior.value=(await api('behavior')).state;notice.value='已保存';window.dispatchEvent(new Event('mi2-behavior-changed'))}catch(e){notice.value=(e as Error).message}finally{pending.value[id]=false}}
+async function act(id:number,kind:string){if(pending.value[id])return;pending.value[id]=true;notice.value='';try{const c=await fetch('/api/v1/auth/csrf',{credentials:'same-origin'});let cb:any=null;try{cb=await c.json()}catch{cb=null};const token=cb?.data?.csrf_token;if(!c.ok||!token||(cb?.code!==0&&cb?.code!=='OK'))throw new Error('登录已失效，请重新登录。');const undo=!!behavior.value[id]?.[kind];const r=await fetch('/api/catalog/behavior',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-CSRF-Token':token},body:JSON.stringify({event_id:crypto.randomUUID(),movie_id:id,kind,action:undo?'undo':'set',value:null,time:new Date().toISOString(),source:'USER_ACTION'})});let rb:any=null;try{rb=await r.json()}catch{rb=null};if(!r.ok||rb?.code!=='OK')throw new Error(r.status===409?'行为状态冲突，请到详情页调整。':'保存未确认，请刷新状态后重试。');behavior.value=(await api('behavior')).state;notice.value='已保存';selfBehaviorEvent=true;try{window.dispatchEvent(new Event('mi2-behavior-changed'))}finally{selfBehaviorEvent=false}}catch(e){notice.value=(e as Error).message}finally{pending.value[id]=false}}
 function restoreScroll(){const saved=sessionStorage.getItem('mi2_library_scroll');if(!saved)return;window.scrollTo(0,Number(saved));sessionStorage.removeItem('mi2_library_scroll')}
 watch(busy,async value=>{if(!value&&!route.hash){await nextTick();restoreScroll()}})
-const onBehavior=()=>{if(state.value&&!route.hash)load();else api('behavior').then(b=>behavior.value=b.state).catch(()=>{notice.value='个人状态刷新失败，请重试。'})}
+const onBehavior=()=>{
+ if(state.value&&!route.hash){load();return}
+ if(selfBehaviorEvent)return
+ behaviorController?.abort()
+ const current=new AbortController();behaviorController=current
+ api('behavior',current.signal).then(b=>{if(behaviorController===current&&!current.signal.aborted)behavior.value=b.state}).catch(()=>{if(behaviorController===current&&!current.signal.aborted)notice.value='个人状态刷新失败，请重试。'})
+}
 window.addEventListener('mi2-behavior-changed',onBehavior)
-onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disconnect();window.removeEventListener('mi2-behavior-changed',onBehavior)})
+onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behaviorController?.abort();observer?.disconnect();window.removeEventListener('mi2-behavior-changed',onBehavior)})
 </script>
 <template>
 <MovieDetailView v-if="route.hash.startsWith('#movie/')"/><MyMoviesView v-else-if="route.hash==='#behavior'"/><div v-else class="library-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><AppSidebar @expanded-change="expanded=$event"/><main class="page">
@@ -73,37 +105,39 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 <template v-else><section v-if="visible.length" ref="gridRef" :style="gridStyle" class="grid" :class="{listmode:mode==='list'}" aria-label="电影海报"><article v-for="m in visible" :key="m.movie_id" class="film"><div class="film-poster"><img v-if="posterOf(m)&&!failures[m.movie_id]" class="poster-art" :src="posterOf(m)" @error="posterError($event,m)" :alt="m.title+'海报'" loading="lazy"/><span v-else class="poster-name">{{m.title}}</span><button class="poster-click" :aria-label="'查看'+m.title+'详情'" @click="detail(m.movie_id)"></button></div><div class="film-info"><h2 class="film-name"><button @click="detail(m.movie_id)">{{m.title}}</button></h2><div class="film-meta">{{m.release_year||'年份未知'}} · {{m.genres?.map((g:any)=>g.name_zh).join(' / ')||'类型待补充'}}</div><div class="film-source">{{m.ratings?.length?((m.ratings[0].source==='douban'?'豆瓣':m.ratings[0].source.toUpperCase())+' '+m.ratings[0].score_value+' / '+m.ratings[0].score_scale):'暂无来源评分'}}</div><div class="tags-line"><span v-for="kind in ['favorite','want','watched']" v-show="behavior[m.movie_id]?.[kind]" :key="kind" class="behavior">{{kind==='favorite'?'已收藏':kind==='want'?'想看':'已看'}}</span></div><p class="list-desc">{{m.overview||'暂无故事简介。'}}</p><div class="list-actions"><button @click="detail(m.movie_id)">查看详情</button><button :disabled="pending[m.movie_id]" @click="act(m.movie_id,'want')">{{behavior[m.movie_id]?.want?'取消想看':'想看'}}</button></div></div></article></section><div v-else class="empty" style="display:block"><strong>没有找到匹配的电影</strong><span>试试其他片名或调整筛选条件。</span><br/><button @click="reset">清除全部条件</button></div></template>
 <div v-if="visible.length" ref="sentinel" class="scroll-sentinel" aria-hidden="true"></div>
 <p v-if="visible.length&&loadingMore" class="loadmore" role="status">正在载入更多…</p>
-<p v-else-if="visible.length&&moreError" class="loadmore err" role="alert">{{moreError}}<button @click="loadMore">重试</button></p>
+<p v-else-if="visible.length&&moreError" class="loadmore err" role="alert">{{moreError}}<button type="button" @click="loadMore">重试</button></p>
+<p v-else-if="visible.length&&hasMore&&items.length>=AUTO_SCROLL_CAP" class="loadmore" role="status">已展示 {{items.length}} 部影片<button type="button" @click="loadMore">继续加载更多</button></p>
+<p v-else-if="visible.length&&!hasMore&&items.length>=MAX_DOM_ITEMS" class="loadmore end" role="status">当前单页已展示前 {{items.length}} 部影片，请结合搜索或筛选条件精确定位</p>
 <p v-else-if="visible.length&&!hasMore" class="loadmore end" role="status">已加载全部 {{items.length}} 部影片</p>
 <p class="notefoot">电影资料来自已授权静态 TMDB 副本。This product uses the TMDB API but is not endorsed or certified by TMDB. <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a></p><p role="status" aria-live="polite">{{notice}}</p>
 </main><div v-if="drawer" class="backdrop show" @click.self="closeFilters"><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="filterTitle" @keydown="focusTrap"><div class="drawer-head"><h2 id="filterTitle">筛选电影</h2><button ref="closeButton" class="close" aria-label="关闭筛选" @click="closeFilters">×</button></div><div class="group"><div class="group-title">上映年份</div><label>起始年份<input v-model="draftFrom" type="number" min="1800" max="2199"/></label><label>结束年份<input v-model="draftTo" type="number" min="1800" max="2199"/></label></div><div class="group"><label class="group-title">电影类型<select v-model="draftGenre"><option value="">全部类型</option><option v-for="g in genres" :key="g.genre_id" :value="String(g.genre_id)">{{g.name_zh}}</option></select></label></div><div class="group"><label class="group-title">我的状态（当前结果页）<select v-model="draftState"><option value="">全部</option><option value="favorite">收藏</option><option value="want">想看</option><option value="watched">已看</option></select></label></div><div class="drawer-actions"><button @click="draftFrom='';draftTo='';draftGenre='';draftState=''">重置</button><button class="apply" @click="filter">查看结果</button></div></aside></div></div>
 </template>
 <style scoped>
-:global(body:has(.library-shell)){margin:0;background:#0c0d0f;color:#fff}
-.library-shell{--ink:#0c0d0f;--ink-soft:#141519;--paper:#fff;--paper-dim:rgba(255,255,255,.82);--muted:rgba(255,255,255,.58);--border:rgba(241,236,226,.14);--border-strong:rgba(241,236,226,.26);--accent:#c8a46a;--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;position:relative;z-index:1;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
+:global(body:has(.library-shell)){margin:0;background:var(--mi-bg);color:var(--mi-text)}
+.library-shell{--ink:var(--mi-bg);--ink-soft:var(--mi-surface);--paper:var(--mi-text);--paper-dim:var(--mi-text-soft);--muted:var(--mi-text-muted);--border:var(--mi-border);--border-strong:var(--mi-border-strong);--accent:var(--mi-accent);--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;position:relative;z-index:1;min-height:100vh;background:var(--ink);color:var(--paper);font-family:var(--sans)}
 .library-shell *{box-sizing:border-box}
 .library-shell button,.library-shell input,.library-shell select{font:inherit}
 .library-shell button{cursor:pointer}
 .library-shell a{color:inherit}
 .library-shell :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.library-shell ::selection{background:var(--accent);color:var(--ink)}
+.library-shell ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 .page{margin-left:var(--nav-width,52.5px);width:calc(100% - var(--nav-width,52.5px));max-width:none;min-width:0;container:movie-library / inline-size;padding:40px clamp(22px,3.2vw,56px) 72px;margin-right:auto}
 .viewtoggle{display:flex;gap:6px;flex:none}
 .viewtoggle button{font-size:12px;padding:9px 14px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:transparent;transition:background-color .16s,border-color .16s,color .16s}
 .viewtoggle button:hover{color:var(--paper);border-color:var(--border-strong)}
-.viewtoggle button[aria-pressed="true"]{color:var(--paper);border-color:var(--border-strong);background:rgba(255,255,255,.07)}
+.viewtoggle button[aria-pressed="true"]{color:var(--paper);border-color:var(--border-strong);background:var(--mi-chip-active)}
 .searchbar{display:flex;gap:16px;align-items:center;margin-bottom:14px}
 .searchwrap{display:flex;align-items:center;gap:13px;width:min(650px,100%);height:48px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:5px 5px 5px 15px}
 .searchwrap:focus-within{border-color:var(--border-strong)}
 .searchwrap svg{flex:none;color:var(--muted)}
 .searchwrap input{border:0;outline:0;min-width:0;flex:1;background:transparent;color:var(--paper);font-size:13px}
-.searchwrap input::placeholder{color:var(--muted)}
+.searchwrap input::placeholder{color:var(--mi-text-subtle)}
 .searchwrap button{height:37px;border:1px solid var(--paper);border-radius:7px;background:transparent;color:var(--paper);font-weight:500;padding:0 20px;font-size:12px;transition:background-color .16s,border-color .16s}
-.searchwrap button:hover{background:rgba(255,255,255,.08)}
+.searchwrap button:hover{background:var(--mi-chip-hover)}
 .chips{display:flex;align-items:center;flex-wrap:wrap;gap:7px}
 .chip{border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--muted);padding:8px 12px;font-size:12px;transition:background-color .16s,border-color .16s,color .16s}
 .chip:hover{color:var(--paper);border-color:var(--border-strong)}
-.chip[aria-pressed="true"]{background:rgba(255,255,255,.07);border-color:var(--border-strong);color:var(--paper)}
+.chip[aria-pressed="true"]{background:var(--mi-chip-active);border-color:var(--border-strong);color:var(--paper)}
 .right-tools{display:flex;gap:9px;align-items:center;margin-left:auto}
 .filterbtn{background:transparent;border:1px solid var(--border-strong);color:var(--paper);border-radius:8px;font-size:12px;padding:9px 13px;white-space:nowrap}
 .filterbtn span{font-size:11px;color:var(--muted);margin-left:5px;font-variant-numeric:tabular-nums}
@@ -117,11 +151,11 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .tag button{border:0;background:none;color:var(--paper-dim);padding:0 0 0 8px}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(min(100%,172px),1fr));gap:28px 16px;align-items:start;margin-top:18px}
 .film{min-width:0}
-.film-poster{width:100%;aspect-ratio:2/3;border-radius:14px;overflow:hidden;border:1px solid rgba(255,255,255,.16);background:var(--ink-soft);position:relative;box-shadow:0 5px 17px #0003;transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease;isolation:isolate}
-.film-poster:hover,.film-poster:focus-within{border-color:rgba(241,236,226,.38);transform:translateY(-4px);box-shadow:0 16px 35px #0009}
+.film-poster{width:100%;aspect-ratio:2/3;border-radius:14px;overflow:hidden;border:1px solid var(--border);background:var(--ink-soft);position:relative;box-shadow:var(--mi-shadow-sm);transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease;isolation:isolate}
+.film-poster:hover,.film-poster:focus-within{border-color:var(--mi-accent);transform:translateY(-4px);box-shadow:var(--mi-shadow-md)}
 .poster-art{width:100%;height:100%;object-fit:cover}
-.film-poster:after{content:"";position:absolute;inset:52% 0 0;background:linear-gradient(0deg,rgba(12,13,15,.9) 0%,rgba(12,13,15,.42) 54%,transparent 100%);pointer-events:none;z-index:1}
-.poster-name{position:absolute;left:8%;right:8%;bottom:18%;z-index:2;font:500 clamp(18px,1.8vw,27px)/1.08 var(--serif);letter-spacing:-.01em;color:var(--paper);text-shadow:0 3px 15px #05060ac9;word-break:normal;overflow-wrap:normal}
+.film-poster:after{content:"";position:absolute;inset:52% 0 0;background:linear-gradient(0deg,rgba(12,13,15,.84) 0%,rgba(12,13,15,.36) 54%,transparent 100%);pointer-events:none;z-index:1}
+.poster-name{position:absolute;left:8%;right:8%;bottom:18%;z-index:2;font:500 clamp(18px,1.8vw,27px)/1.08 var(--serif);letter-spacing:-.01em;color:#fff;text-shadow:0 3px 15px rgba(5,6,10,.78);word-break:normal;overflow-wrap:normal}
 
 .poster-click{position:absolute;inset:0;border:0;background:transparent;z-index:3;width:100%;height:100%;cursor:pointer}
 .poster-click:focus-visible{outline:3px solid var(--accent);outline-offset:-5px}
@@ -136,7 +170,7 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .list-actions button{border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--paper);padding:9px 13px;font-size:12px}
 .list-actions button:first-child{border-color:var(--paper)}
 .tags-line{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
-.behavior{font-size:9px;color:var(--accent);border-radius:999px;border:1px solid rgba(200,164,106,.34);padding:3px 7px;line-height:1}
+.behavior{font-size:9px;color:var(--mi-accent-text);border-radius:999px;border:1px solid var(--mi-accent-border);background:var(--mi-accent-soft);padding:3px 7px;line-height:1}
 .grid.listmode{display:flex;flex-direction:column;gap:10px;margin-top:18px}
 .listmode .film{display:flex;align-items:stretch;width:100%;gap:18px;padding:12px;border:1px solid var(--border);border-radius:12px;background:var(--ink-soft)}
 .listmode .film-poster{width:104px;flex:none}
@@ -155,9 +189,9 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .notefoot a{color:var(--paper-dim)}
 .status{padding:70px 20px;text-align:center;color:var(--muted)}
 .status .filterbtn{margin-top:16px}
-.backdrop{display:none;position:fixed;inset:0;background:rgba(4,5,7,.72);z-index:60;backdrop-filter:blur(4px)}
+.backdrop{display:none;position:fixed;inset:0;background:var(--mi-backdrop);z-index:60;backdrop-filter:blur(4px)}
 .backdrop.show{display:block}
-.drawer{position:absolute;right:0;top:0;bottom:0;width:min(400px,95vw);overflow-y:auto;background:var(--ink-soft);border-left:1px solid var(--border);box-shadow:-16px 0 48px #0008;padding:26px}
+.drawer{position:absolute;right:0;top:0;bottom:0;width:min(400px,95vw);overflow-y:auto;background:var(--ink-soft);border-left:1px solid var(--border);box-shadow:var(--mi-shadow-lg);padding:26px}
 .drawer-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px}
 .drawer-head h2{margin:0;font-family:var(--serif);font-size:26px;font-weight:500}
 .close{width:37px;height:37px;border-radius:50%;background:transparent;color:var(--paper);border:1px solid var(--border-strong);font-size:21px}
@@ -167,14 +201,14 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .drawer input,.drawer select{width:100%;background:var(--ink);color:var(--paper);border:1px solid var(--border);border-radius:8px;padding:11px}
 .options{display:flex;flex-wrap:wrap;gap:8px}
 .options button{background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);padding:10px 12px;font-size:12px}
-.options button[aria-pressed="true"]{border-color:var(--border-strong);background:rgba(255,255,255,.07);color:var(--paper)}
+.options button[aria-pressed="true"]{border-color:var(--border-strong);background:var(--mi-chip-active);color:var(--paper)}
 .drawer-actions{display:flex;gap:10px;border-top:1px solid var(--border);padding-top:18px}
 .drawer-actions button{flex:1;border-radius:8px;padding:12px;border:1px solid var(--border);background:transparent;color:var(--paper)}
-.drawer-actions .apply{border-color:var(--paper);color:var(--paper)}
+.drawer-actions .apply{border-color:var(--mi-primary-btn-bg);background:var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text)}
 .scroll-sentinel{height:1px;margin-top:6px}
 .loadmore{display:flex;align-items:center;justify-content:center;gap:12px;margin:26px 0 4px;min-height:20px;color:var(--muted);font-size:12px;line-height:1.6;font-variant-numeric:tabular-nums}
 .loadmore button{border:1px solid var(--border);background:transparent;color:var(--paper);border-radius:8px;padding:7px 14px;font-size:12px}
-.loadmore button:hover{border-color:var(--border-strong);background:rgba(255,255,255,.06)}
+.loadmore button:hover{border-color:var(--border-strong);background:var(--mi-chip-hover)}
 .loadmore.err{color:var(--paper-dim)}
 .loadmore.end{letter-spacing:.01em}
 @media(max-width:1120px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:24px 14px}}
@@ -191,8 +225,8 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .chips{flex:1 1 auto;min-width:0;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding:2px 0;scrollbar-width:none}
 .chips::-webkit-scrollbar{display:none}
 .chip{border-color:transparent;border-radius:6px;padding:8px 12px;white-space:nowrap;font-size:12px}
-.chip:hover{background:rgba(255,255,255,.04);border-color:transparent}
-.chip[aria-pressed="true"]{background:rgba(255,255,255,.08);border-color:rgba(255,255,255,.16)}
+.chip:hover{background:var(--mi-chip-hover);border-color:transparent}
+.chip[aria-pressed="true"]{background:var(--mi-chip-active);border-color:var(--border-strong)}
 .right-tools{gap:8px;margin-left:auto;flex:none}
 .filterbtn,.sortby{height:36px;border-radius:8px;font-size:12px}
 .filterbtn{padding:0 12px}
@@ -201,7 +235,7 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .viewtoggle{gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-left:4px}
 .viewtoggle button{border:0;border-radius:0;padding:8px 12px;font-size:11.5px;background:transparent}
 .viewtoggle button+button{border-left:1px solid var(--border)}
-.viewtoggle button[aria-pressed="true"]{background:rgba(255,255,255,.08)}
+.viewtoggle button[aria-pressed="true"]{background:var(--mi-chip-active)}
 .active-tags{margin:14px 0 0}
 .grid{margin-top:22px;gap:32px 20px;grid-template-columns:repeat(auto-fill,minmax(min(100%,180px),1fr))}
 .film-info{padding:14px 2px 0}
@@ -273,8 +307,8 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .filters .viewtoggle{margin:0;height:34px}
 .filters .viewtoggle button{padding:0 10px}
 .filters .apply,.filters .resetlink{height:34px;border-radius:6px;font-size:11.5px}
-.filters .apply{background:transparent;border:1px solid var(--paper);color:var(--paper);padding:0 12px}
-.filters .apply:hover{background:rgba(255,255,255,.08)}
+.filters .apply{background:var(--mi-primary-btn-bg);border:1px solid var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text);padding:0 12px}
+.filters .apply:hover{background:var(--mi-primary-btn-hover)}
 .filters .resetlink{background:none;border:0;color:var(--muted);padding:0 4px;white-space:nowrap}
 .filters .resetlink:hover{color:var(--paper)}
 /* 浏览切换：图标分段控件，与表单控件同高 */
@@ -282,5 +316,5 @@ onBeforeUnmount(()=>{controller?.abort();moreController?.abort();observer?.disco
 .filters .viewtoggle button{width:38px;height:100%;padding:0;border:0;background:transparent;color:var(--muted);display:grid;place-items:center}
 .filters .viewtoggle button+button{border-left:1px solid var(--border)}
 .filters .viewtoggle button:hover{color:var(--paper)}
-.filters .viewtoggle button[aria-pressed="true"]{background:rgba(255,255,255,.08);color:var(--paper)}
+.filters .viewtoggle button[aria-pressed="true"]{background:var(--mi-chip-active);color:var(--paper)}
 .filters .viewtoggle button:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}</style>

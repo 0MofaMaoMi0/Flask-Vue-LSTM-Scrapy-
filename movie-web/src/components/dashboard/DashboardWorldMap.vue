@@ -6,6 +6,7 @@ import {AriaComponent,TooltipComponent,VisualMapComponent} from 'echarts/compone
 import {SVGRenderer} from 'echarts/renderers'
 import {ISO2_TO_ISO3} from '../../lib/globe/iso2to3.js'
 import {countryName} from '../../lib/globe/countryDisplay.js'
+import {isLightTheme,siteTheme} from '../../services/theme'
 
 use([MapChart,TooltipComponent,VisualMapComponent,AriaComponent,SVGRenderer])
 
@@ -78,23 +79,32 @@ function draw(){
   if(!chart)return
   const min=props.metric==='count'?0:(props.scaleMin??0)
   const max=props.metric==='count'?Math.max(1,maxValue.value):(props.scaleMax??Math.max(1,maxValue.value))
+  const light=isLightTheme.value
+  const rangeColors=light?['#E6DFD1','#CEB893','#AD8549','#8C6226']:['#292235','#4b3967','#77569e','#b9a0f4']
+  const areaBase=light?'#EDE6D8':'#292235'
+  const borderBase=light?'#C4BAA8':'#756587'
+  const hoverArea=light?'#A87D3C':'#c5abea'
+  const selectArea=light?'#1F1B16':'#d3bb91'
+  const tooltipOpt=light
+    ?{trigger:'item',renderMode:'richText',confine:true,formatter:tooltip,backgroundColor:'#FFFFFF',borderColor:'rgba(31,27,22,.16)',borderWidth:1,padding:[9,12],textStyle:{color:'#000000',fontSize:12,lineHeight:20}}
+    :{trigger:'item',renderMode:'richText',confine:true,formatter:tooltip,backgroundColor:'#1c192b',borderColor:'#6d5a8c',borderWidth:1,padding:[9,12],textStyle:{color:'#FFFFFF',fontSize:12,lineHeight:20}}
   if(drawn){
-    chart.setOption({aria:{label:{description:description.value}},visualMap:{min,max},series:[{id:SERIES_ID,data:values(),silent:dataPending.value||dataUnavailable.value}]})
+    chart.setOption({aria:{label:{description:description.value}},tooltip:tooltipOpt,visualMap:{min,max,inRange:{color:rangeColors}},series:[{id:SERIES_ID,itemStyle:{areaColor:areaBase,borderColor:borderBase,borderWidth:.55},emphasis:{label:{show:false},itemStyle:{areaColor:hoverArea,borderColor:light?'#754F1B':'#e5d6fa',borderWidth:1}},select:{label:{show:false},itemStyle:{areaColor:selectArea,borderColor:light?'#8C6226':'#eadac0',borderWidth:1}},data:values(),silent:dataPending.value||dataUnavailable.value}]})
     return
   }
   chart.setOption({
     animation:false,
     backgroundColor:'transparent',
     aria:{enabled:true,label:{description:description.value}},
-    tooltip:{trigger:'item',renderMode:'richText',confine:true,formatter:tooltip,backgroundColor:'#1c192b',borderColor:'#6d5a8c',borderWidth:1,padding:[9,12],textStyle:{color:'#f2edf9',fontSize:12,lineHeight:20}},
-    visualMap:{show:false,min,max,calculable:false,inRange:{color:['#292235','#4b3967','#77569e','#b9a0f4']}},
+    tooltip:tooltipOpt,
+    visualMap:{show:false,min,max,calculable:false,inRange:{color:rangeColors}},
     series:[{
       id:SERIES_ID,name:'制作国家'+metricLabel.value+'分布',type:'map',map:MAP_NAME,nameProperty:'iso3',
       roam:true,scaleLimit:{min:1,max:6},...mapLayout,
       selectedMode:'single',silent:dataPending.value||dataUnavailable.value,
-      label:{show:false},itemStyle:{areaColor:'#292235',borderColor:'#756587',borderWidth:.55},
-      emphasis:{label:{show:false},itemStyle:{areaColor:'#c5abea',borderColor:'#e5d6fa',borderWidth:1}},
-      select:{label:{show:false},itemStyle:{areaColor:'#d3bb91',borderColor:'#eadac0',borderWidth:1}},
+      label:{show:false},itemStyle:{areaColor:areaBase,borderColor:borderBase,borderWidth:.55},
+      emphasis:{label:{show:false},itemStyle:{areaColor:hoverArea,borderColor:light?'#754F1B':'#e5d6fa',borderWidth:1}},
+      select:{label:{show:false},itemStyle:{areaColor:selectArea,borderColor:light?'#8C6226':'#eadac0',borderWidth:1}},
       data:values()
     }]
   })
@@ -130,7 +140,7 @@ async function loadMap(){
     if(!disposed&&(reason as Error).name!=='AbortError')error.value=(reason as Error).message||'世界地图暂不可用。'
   }finally{if(!disposed)loading.value=false}
 }
-watch([rows,state,()=>props.metric],draw)
+watch([rows,state,()=>props.metric,siteTheme],draw)
 onMounted(loadMap)
 onBeforeUnmount(()=>{disposed=true;controller?.abort();observer?.disconnect();chart?.dispose()})
 defineExpose({reset})
@@ -157,21 +167,21 @@ defineExpose({reset})
 </template>
 
 <style scoped>
-.dashboard-world{display:flex;flex-direction:column;position:relative;min-width:0;min-height:250px;width:100%;height:100%;color:#d8cde8}
+.dashboard-world{display:flex;flex-direction:column;position:relative;min-width:0;min-height:250px;width:100%;height:100%;color:var(--mi-text-soft)}
 .world-stage{position:relative;flex:1;min-height:160px}
 .world-canvas{position:absolute;inset:0}
-.map-reset{position:absolute;right:0;top:0;display:flex;align-items:center;gap:5px;border:1px solid #66567b;border-radius:7px;padding:6px 8px;background:#171321;color:#ddd1f0;font:inherit;font-size:11px;cursor:pointer}
-.map-reset:hover{background:#2b203d;border-color:#a48ac3;color:#fff}
+.map-reset{position:absolute;right:0;top:0;display:flex;align-items:center;gap:5px;border:1px solid var(--mi-border-strong);border-radius:7px;padding:6px 8px;background:var(--mi-surface);color:var(--mi-text-soft);font:inherit;font-size:11px;cursor:pointer;box-shadow:var(--mi-shadow-sm)}
+.map-reset:hover{background:var(--mi-surface-hover);border-color:var(--mi-accent);color:var(--mi-text)}
 .map-reset svg{height:14px;width:14px}
-.map-reset:focus-visible,.map-message button:focus-visible{outline:2px solid #d0b7f6;outline-offset:3px}
-.map-message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:#0d0b15d9;color:#c5b5da;font-size:12px;text-align:center;padding:20px;line-height:1.7}
+.map-reset:focus-visible,.map-message button:focus-visible{outline:2px solid var(--mi-accent);outline-offset:3px}
+.map-message{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:var(--mi-bg);color:var(--mi-text-secondary);font-size:12px;text-align:center;padding:20px;line-height:1.7}
 .map-message p{margin:0}
-.map-error{color:#e4bbce}
-.map-message button{border:1px solid #8f74b7;border-radius:7px;padding:7px 12px;background:#2a2039;color:#eee2ff;font:inherit;cursor:pointer}
-.map-caption{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:7px;color:#b5a6c8;font-size:10px;line-height:1.5}
+.map-error{color:var(--mi-negative)}
+.map-message button{border:1px solid var(--mi-border-strong);border-radius:7px;padding:7px 12px;background:var(--mi-surface-raised);color:var(--mi-text);font:inherit;cursor:pointer}
+.map-caption{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding-top:7px;color:var(--mi-text-muted);font-size:10px;line-height:1.5}
 .map-legend{display:flex;align-items:center;gap:8px}
-.map-legend i{display:block;width:82px;height:5px;background:linear-gradient(90deg,#292235,#4b3967,#77569e,#b9a0f4);border-radius:2px}
-.map-unmapped{font-size:10px;line-height:1.6;color:#b5a6c8;margin:7px 0 0}
+.map-legend i{display:block;width:82px;height:5px;background:linear-gradient(90deg,var(--mi-surface-raised),var(--mi-accent));border-radius:2px}
+.map-unmapped{font-size:10px;line-height:1.6;color:var(--mi-text-muted);margin:7px 0 0}
 .map-data-table{position:absolute;top:0;left:0;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
 @media(prefers-reduced-motion:reduce){.dashboard-world *{transition:none!important}}
 </style>

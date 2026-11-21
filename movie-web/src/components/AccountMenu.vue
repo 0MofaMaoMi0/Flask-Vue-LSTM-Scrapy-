@@ -8,6 +8,7 @@ import {VList,VListItem} from 'vuetify/components/VList'
 import {useAuthStore} from '../stores/auth'
 import {aiWorkspace} from '../services/aiWorkspace'
 import {accountSettingsTarget,type AccountSettingsTab} from '../services/accountSettings'
+import {siteTheme} from '../services/theme'
 
 const props=defineProps<{collapsed:boolean}>()
 const auth=useAuthStore(),route=useRoute(),router=useRouter()
@@ -50,7 +51,7 @@ onDeactivated(()=>{open.value=false})
     <svg v-if="!collapsed" class="account-chevron" aria-hidden="true" viewBox="0 0 24 24"><path d="m8 9 4-4 4 4m-8 6 4 4 4-4"/></svg>
    </button>
   </template>
-  <VList class="account-panel" theme="dark" role="menu" aria-label="账户菜单" :elevation="0" tabindex="-1">
+  <VList class="account-panel" :theme="siteTheme" role="menu" aria-label="账户菜单" :elevation="0" tabindex="-1">
    <div class="account-summary">
     <span class="account-avatar" aria-hidden="true"><img v-if="aiWorkspace.avatar" :src="aiWorkspace.avatar" alt=""/><span v-else>{{initial}}</span></span>
     <div class="account-summary-text"><strong>{{auth.user?.username}}</strong><span>{{roleLabel}}</span></div>
@@ -73,36 +74,36 @@ onDeactivated(()=>{open.value=false})
 </template>
 
 <style scoped>
-.account-trigger{width:100%;min-height:52px;display:flex;align-items:center;gap:11px;padding:8px 10px;border:0;border-radius:12px;background:transparent;color:#e9e3d7;text-align:left;transition:background .16s ease}
-.account-trigger:hover,.account-trigger[aria-expanded=true]{background:#1e1f24}
-.account-trigger:focus-visible{outline:2px solid #c8a46a;outline-offset:-2px}
+.account-trigger{width:100%;min-height:52px;display:flex;align-items:center;gap:11px;padding:8px 10px;border:0;border-radius:12px;background:transparent;color:var(--mi-text-soft);text-align:left;transition:background .16s ease}
+.account-trigger:hover,.account-trigger[aria-expanded=true]{background:var(--mi-sidebar-active)}
+.account-trigger:focus-visible{outline:2px solid var(--mi-accent);outline-offset:-2px}
 .account-trigger:disabled{cursor:wait;opacity:.65}
-.account-avatar{flex:0 0 32px;width:32px;height:32px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:#22242b;color:#c8a46a;border:1px solid rgba(241,236,226,.14);font-size:15px;font-weight:500}
+.account-avatar{flex:0 0 32px;width:32px;height:32px;display:grid;place-items:center;overflow:hidden;border-radius:50%;background:var(--mi-surface-raised);color:var(--mi-accent);border:1px solid var(--mi-border);font-size:15px;font-weight:500}
 .account-avatar img{width:100%;height:100%;object-fit:cover}
 .account-trigger-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:550;flex:1}
-.account-chevron{width:16px;height:16px;color:#a9a294;flex:none}
+.account-chevron{width:16px;height:16px;color:var(--mi-text-muted);flex:none}
 .account-trigger svg,.account-panel svg{fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .account-trigger.is-collapsed{width:44px;min-height:44px;margin:auto;padding:6px;justify-content:center}
-.account-panel.v-list{padding:7px;max-height:calc(100dvh - 24px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:#44464f transparent;border:1px solid rgba(241,236,226,.14);border-radius:14px;background:#141519;color:#f0eadf;box-shadow:0 12px 36px rgba(0,0,0,.55);animation:account-menu-enter .16s cubic-bezier(.16,1,.3,1)}
+.account-panel.v-list{padding:7px;max-height:calc(100dvh - 24px);overflow-y:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--mi-scroll-thumb) transparent;border:1px solid var(--mi-border);border-radius:14px;background:var(--mi-surface);color:var(--mi-text-ivory);box-shadow:var(--mi-shadow-lg);animation:account-menu-enter .16s cubic-bezier(.16,1,.3,1)}
 .account-summary{display:flex;align-items:center;gap:11px;padding:10px 9px 12px}
 .account-summary .account-avatar{flex-basis:36px;width:36px;height:36px}
 .account-summary-text{min-width:0;display:flex;flex-direction:column;gap:3px}
 .account-summary-text strong{font-size:14px;line-height:1.4;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.account-summary-text>span{font-size:12px;color:#a9a294;line-height:1.4}
-.account-separator{height:1px;background:rgba(241,236,226,.10);margin:4px 5px}
-.account-menu-item.v-list-item{width:100%;min-height:38px;display:flex;gap:11px;padding:8px 10px;border:0;border-radius:7px;background:transparent;color:#e9e3d7;text-align:left;font-size:13px;line-height:1.5;letter-spacing:0;transition:background .12s ease,color .12s ease}
+.account-summary-text>span{font-size:12px;color:var(--mi-text-muted);line-height:1.4}
+.account-separator{height:1px;background:var(--mi-border-subtle);margin:4px 5px}
+.account-menu-item.v-list-item{width:100%;min-height:38px;display:flex;gap:11px;padding:8px 10px;border:0;border-radius:7px;background:transparent;color:var(--mi-text-soft);text-align:left;font-size:13px;line-height:1.5;letter-spacing:0;transition:background .12s ease,color .12s ease}
 .account-menu-item :deep(.v-list-item__prepend){display:flex;flex:none}
 .account-menu-item :deep(.v-list-item__content){white-space:normal;overflow-wrap:anywhere}
 .account-menu-item :deep(.v-list-item__spacer){display:none}
 .account-menu-item :deep(.v-list-item__overlay),.account-menu-item :deep(.v-list-item__underlay){display:none}
-.account-menu-item svg{height:17px;width:17px;color:#a9a294}
-.account-menu-item:hover,.account-menu-item:focus-visible{background:#23242a;color:#fff;outline:none}
-.account-menu-item:focus-visible{box-shadow:inset 0 0 0 2px #c8a46a}
-.account-signout.v-list-item{color:#e8a094}
+.account-menu-item svg{height:17px;width:17px;color:var(--mi-text-muted)}
+.account-menu-item:hover,.account-menu-item:focus-visible{background:var(--mi-surface-active);color:var(--mi-text);outline:none}
+.account-menu-item:focus-visible{box-shadow:inset 0 0 0 2px var(--mi-accent)}
+.account-signout.v-list-item{color:var(--mi-negative)}
 .account-signout svg{color:inherit}
-.account-signout:hover,.account-signout:focus-visible{background:rgba(204,76,76,.16);color:#ffd4d4}
+.account-signout:hover,.account-signout:focus-visible{background:var(--mi-negative-soft);color:var(--mi-negative)}
 .account-menu-item:disabled{opacity:.5;cursor:wait}
-.account-menu-error{margin:7px 9px 6px;color:#e8a094;font-size:12px;line-height:1.6}
+.account-menu-error{margin:7px 9px 6px;color:var(--mi-negative);font-size:12px;line-height:1.6}
 @keyframes account-menu-enter{from{opacity:.4;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){.account-panel.v-list{animation:none}.account-trigger,.account-menu-item{transition:none}}
 </style>

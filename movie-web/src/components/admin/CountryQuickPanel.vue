@@ -65,9 +65,10 @@ async function load() {
   controller.value?.abort()
   const current = new AbortController()
   controller.value = current
+  if (row.value && row.value.country_iso2 !== props.iso2) payload.value = null
   busy.value = true; error.value = ''
   try {
-    payload.value = await loadAnalytics({
+    const next = await loadAnalytics({
       countries: [props.iso2],
       genre: props.filters.genre || undefined,
       decade: props.filters.decade || undefined,
@@ -76,8 +77,12 @@ async function load() {
       minVotes: props.filters.minVotes,
       top: 10, limit: 10,
     }, current.signal)
+    if (controller.value !== current || current.signal.aborted) return
+    payload.value = next
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') error.value = (e as Error).message
+    if (controller.value === current && !current.signal.aborted && (e as Error).name !== 'AbortError') {
+      error.value = (e as Error).message
+    }
   } finally {
     if (controller.value === current) busy.value = false
   }
@@ -102,9 +107,9 @@ defineExpose({refresh: load})
         </header>
 
         <div class="quick-body">
-          <p v-if="error" class="adm-errobox" role="alert">{{ error }} <button type="button" class="link" @click="load">重试</button></p>
-          <p v-else-if="busy && !row" class="adm-state">正在读取 {{ iso2 }} 的国家统计…</p>
-          <template v-else>
+          <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="row">（已保留上一份可用快照）</span> <button type="button" class="link" @click="load">重试</button></p>
+          <p v-if="busy && !row" class="adm-state">正在读取 {{ iso2 }} 的国家统计…</p>
+          <template v-else-if="row || !error">
             <p class="state-strip" :class="{muted: availability !== 'HAS_DATA'}">
               <span class="adm-badge" :class="{muted: availability !== 'HAS_DATA'}">{{ availabilityLabel(availability) }}</span>
               <span v-if="availability === 'NO_MATCHES'">当前筛选范围内没有收录该国影片；这不是 0 分，而是没有样本。</span>
@@ -173,18 +178,18 @@ defineExpose({refresh: load})
 </template>
 
 <style scoped>
-.quick-backdrop{position:fixed;inset:0;z-index:80;background:rgba(6,6,9,.62);display:flex;justify-content:flex-end;backdrop-filter:blur(2px)}
-.quick-drawer{width:min(620px,100vw);height:100%;background:#101116;border-left:1px solid rgba(241,236,226,.14);box-shadow:-24px 0 60px rgba(0,0,0,.5);display:flex;flex-direction:column;color:#ded8cc}
-.quick-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:22px 24px 16px;border-bottom:1px solid rgba(241,236,226,.10);flex-shrink:0}
-.quick-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:#f3eee4}
-.quick-en{margin-left:10px;font-size:11px;letter-spacing:.06em;color:#a9a294;font-family:var(--sans)}
-.quick-meta{margin:0;font-size:10.5px;color:#8f8a80;line-height:1.6}
-.quick-close{border:1px solid rgba(241,236,226,.18);background:transparent;color:#c9c2b8;border-radius:8px;width:30px;height:30px;font-size:13px;cursor:pointer;flex:none}
-.quick-close:hover{background:#1e1f26;color:#fff}
+.quick-backdrop{position:fixed;inset:0;z-index:80;background:var(--mi-backdrop);display:flex;justify-content:flex-end;backdrop-filter:blur(2px)}
+.quick-drawer{width:min(620px,100vw);height:100%;background:var(--mi-surface);border-left:1px solid var(--mi-border-strong);box-shadow:var(--mi-shadow-lg);display:flex;flex-direction:column;color:var(--mi-text-soft)}
+.quick-head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px;padding:22px 24px 16px;border-bottom:1px solid var(--mi-border);flex-shrink:0}
+.quick-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:var(--mi-text-ivory)}
+.quick-en{margin-left:10px;font-size:11px;letter-spacing:.06em;color:var(--mi-text-secondary);font-family:var(--sans)}
+.quick-meta{margin:0;font-size:10.5px;color:var(--mi-text-muted);line-height:1.6}
+.quick-close{border:1px solid var(--mi-border-strong);background:transparent;color:var(--mi-text-secondary);border-radius:8px;width:30px;height:30px;font-size:13px;cursor:pointer;flex:none}
+.quick-close:hover{background:var(--mi-surface-hover);color:var(--mi-text)}
 .quick-body{padding:18px 24px 28px;overflow:auto;flex:1;min-height:0}
-.state-strip{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.7;color:#c9c2b8;margin:0 0 14px;flex-wrap:wrap}
-.state-strip.muted{color:#b7b1a5}
-.link{border:0;background:transparent;color:#d3b8f5;font:inherit;font-size:11.5px;cursor:pointer;text-decoration:underline;text-underline-offset:2px;padding:0}
-.quick-drawer :is(button,input,select,a,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
-.quick-drawer ::selection{background:rgba(200,164,106,.32);color:#fff}
+.state-strip{display:flex;gap:8px;align-items:flex-start;font-size:11.5px;line-height:1.7;color:var(--mi-text-soft);margin:0 0 14px;flex-wrap:wrap}
+.state-strip.muted{color:var(--mi-text-secondary)}
+.link{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:11.5px;cursor:pointer;text-decoration:underline;text-underline-offset:2px;padding:0}
+.quick-drawer :is(button,input,select,a,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
+.quick-drawer ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 </style>

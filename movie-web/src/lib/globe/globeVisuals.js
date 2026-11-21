@@ -7,8 +7,17 @@ export const GLOBE_THEMES = Object.freeze({
   noir: Object.freeze({id:'noir',label:'冷灰蓝',background:'#091220',atmosphere:'#6b8ab8',stroke:'#526b90',side:'rgba(30,46,71,.42)',empty:'#1f2c3f',low:['#324967','#446588','#5b82b7','#8ba7d9'],hover:'#b8d6ff',selected:'#e0eafa',label:'#b8c8e5',pulse:['#6c98c7','#8cb8de','#00000000']}),
   aurora: Object.freeze({id:'aurora',label:'星雾紫',background:'#100c28',atmosphere:'#a364e6',stroke:'#8162b7',side:'rgba(60,29,105,.55)',empty:'#272043',low:['#503674','#71469e','#9960ce','#d987ed'],hover:'#ffc1f8',selected:'#ffcaf5',label:'#dba9f1',pulse:['#a565da','#df89fc','#00000000']})
 });
+const LIGHT_GLOBE_THEMES = Object.freeze({
+  cinema: Object.freeze({id:'cinema',label:'影院紫',background:'#F7F4EE',atmosphere:'#8C6226',stroke:'#8C6226',side:'rgba(140,98,38,.28)',empty:'#DFD7C8',low:['#E6D5B8','#CFAF7C','#AF8242','#8C6226'],hover:'#754F1B',selected:'#1F1B16',label:'#1F1B16',pulse:['#8C6226','#B58742','#00000000']}),
+  noir: Object.freeze({id:'noir',label:'冷灰蓝',background:'#F7F4EE',atmosphere:'#5B728E',stroke:'#526B90',side:'rgba(82,107,144,.25)',empty:'#DCE3EC',low:['#CFDCEB','#9EB6D2','#6D8EB5','#446588'],hover:'#2F4C70',selected:'#1F1B16',label:'#1F1B16',pulse:['#5B82B7','#8BA7D9','#00000000']}),
+  aurora: Object.freeze({id:'aurora',label:'星雾紫',background:'#F7F4EE',atmosphere:'#8D62A6',stroke:'#7E5A9E',side:'rgba(126,90,158,.25)',empty:'#E4DCEB',low:['#DDD0E8','#BD9ED6','#9970BA','#724994'],hover:'#543270',selected:'#1F1B16',label:'#1F1B16',pulse:['#8D62A6','#B58AD1','#00000000']})
+});
 export const GLOBE_EFFECTS=Object.freeze({subtle:'克制',balanced:'平衡',vivid:'强调'});
-export function pickTheme(id){return GLOBE_THEMES[id]||GLOBE_THEMES.cinema;}
+export function pickTheme(id){
+  const isLight=typeof document!=='undefined'&&document.documentElement?.dataset?.theme==='light';
+  const map=isLight?LIGHT_GLOBE_THEMES:GLOBE_THEMES;
+  return map[id]||map.cinema;
+}
 export function intensity(stat,metric,maxValue=1){
   if(!stat)return null;
   const value=stat[metric];

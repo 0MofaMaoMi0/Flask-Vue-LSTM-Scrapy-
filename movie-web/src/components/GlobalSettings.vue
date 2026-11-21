@@ -5,6 +5,7 @@ import {useAuthStore} from '../stores/auth'
 import TMDBSettings from './TMDBSettings.vue'
 import AccountClosure from './AccountClosure.vue'
 import {aiWorkspace} from '../services/aiWorkspace'
+import {siteTheme,setSiteTheme,type SiteTheme} from '../services/theme'
 import {isAccountSettingsTab,settingsReturnTarget,type AccountSettingsTab} from '../services/accountSettings'
 import {clearAssistantDisplay,type AssistantSurface} from '../services/assistantDisplay'
 import {assistantJson as jsonRequest,diagnosticRequestAfterError} from '../services/assistantApi'
@@ -17,11 +18,11 @@ const dialogMode=computed({get:()=>aiWorkspace.dialogMode,set:(value:string)=>{a
 const error=ref(''),notice=ref(''),busy=ref(false),configBusy=ref(false),status=ref<any>({configured:false,enabled:false})
 const apiKey=ref(''),model=ref('deepseek-flash'),output=ref(2048),consent=ref(false),paidConsent=ref(false),cacheEnabled=ref(false)
 const testId=ref<string|null>(null),testResult=ref<any>(null)
-let testController:AbortController|null=null
-function broadcast(){window.dispatchEvent(new Event('mi2-model-status'))}
+let testController:AbortController|null=null,selfModelBroadcast=false
+function broadcast(){selfModelBroadcast=true;try{window.dispatchEvent(new Event('mi2-model-status'))}finally{selfModelBroadcast=false}}
 async function selectTab(tab:AccountSettingsTab){await router.replace({path:'/settings',query:{...route.query,tab}})}
 function clearDisplay(surface:AssistantSurface){notice.value=clearAssistantDisplay(surface)?'已清空所选窗口的显示记录，服务端数据保留。':'该窗口正在生成，请完成或取消生成后再清空。'}
-async function refreshStatus(){try{status.value=await jsonRequest('status');if(status.value.model){model.value=status.value.model;cacheEnabled.value=!!status.value.cache_enabled}}catch(e){error.value=(e as Error).message}}
+async function refreshStatus(){if(selfModelBroadcast)return;try{status.value=await jsonRequest('status');if(status.value.model){model.value=status.value.model;cacheEnabled.value=!!status.value.cache_enabled}}catch(e){error.value=(e as Error).message}}
 async function saveConfig(){
  if(configBusy.value)return
  configBusy.value=true;error.value='';notice.value=''
@@ -100,7 +101,7 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 </section>
 <section aria-label="全站外观与布局" class="gs-panel" :id="uid('gs-display')" data-source-id="gs-display" v-show="settingsTab==='display'">
 <div class="gs-card"><h2>外观与布局</h2><p>沿用全站深炭黑视觉基线，阅读与动效偏好同步到两个 AI 窗口。</p>
-<div class="gs-setting-row"><div><h3>站点色彩</h3><p>深炭黑与暖金点缀的全站统一基线。</p></div><span class="gs-pill">保持原配色</span></div>
+<div class="gs-setting-row"><div><h3>站点色彩</h3><p>支持深色影院与暖白纸感两套基线，切换后全站即时生效并记住偏好。</p></div><select :value="siteTheme" @change="setSiteTheme(($event.target as HTMLSelectElement).value as SiteTheme)" class="gs-select" :id="uid('gsSiteTheme')" data-source-id="gsSiteTheme"><option value="dark">深色影院（默认）</option><option value="light">暖白纸感</option></select></div>
 <div class="gs-setting-row"><div><h3>阅读字体</h3><p>影响 AI 消息文字与用户消息的阅读大小。</p></div><select :value="aiWorkspace.large?'large':'normal'" @change="aiWorkspace.large=($event.target as HTMLSelectElement).value==='large'" class="gs-select" :id="uid('gsTextSize')" data-source-id="gsTextSize"><option value="normal">标准</option><option value="large">较大</option></select></div>
 <div class="gs-setting-row"><div><h3>动效偏好</h3><p>降低动画时精灵球与窗口过渡会减少动态效果。</p></div><select :value="aiWorkspace.reduced?'reduce':'normal'" @change="aiWorkspace.reduced=($event.target as HTMLSelectElement).value==='reduce'" class="gs-select" :id="uid('gsMotion')" data-source-id="gsMotion"><option value="normal">标准动画</option><option value="reduce">减少动态效果</option></select></div>
 <div class="gs-setting-row"><div><h3>AI 默认打开方式</h3><p>默认悬浮大窗口；可在设置中改为全屏起始。</p></div><select :value="aiWorkspace.startFull?'fullscreen':'floating'" @change="aiWorkspace.startFull=($event.target as HTMLSelectElement).value==='fullscreen'" class="gs-select" :id="uid('gsStartMode')" data-source-id="gsStartMode"><option value="floating">悬浮窗口（当前默认）</option><option value="fullscreen">全屏工作区</option></select></div>
@@ -136,7 +137,7 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 </section>
 <div aria-label="选择头像显示范围" aria-modal="true" class="crop-overlay" :id="uid('avatarCropOverlay')" data-source-id="avatarCropOverlay" role="dialog" v-if="cropOpen">
 <div class="crop-dialog"><div class="crop-head"><div><h2>调整头像显示范围</h2><p>只有中心 40×40 像素的方框是头像选区。可拖动图片调整构图、缩放图片，框外部分不会被选中；PNG、WebP 透明区域不会填底。</p></div><button @click="cropOpen=false" aria-label="取消裁剪" class="crop-close" :id="uid('cropClose')" data-source-id="cropClose" type="button">×</button></div>
-<div class="crop-content"><div class="crop-work"><div @pointercancel="stopCrop" @pointerdown="startCrop" @pointermove="moveCrop" @pointerup="stopCrop" class="crop-viewport" :id="uid('cropViewport')" data-source-id="cropViewport" style="touch-action:none"><canvas height="480" :id="uid('cropCanvas')" data-source-id="cropCanvas" width="480"></canvas></div><span style="font-size:11px;color:#a9a294">中央 40×40 取景框 · 可拖动底图</span></div><div class="crop-preview-block"><span>实际头像尺寸预览</span><span aria-label="头像预览" class="crop-preview avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="cropPreview" alt="" class="user-avatar-img" :id="uid('cropPreview')" data-source-id="cropPreview" v-if="cropPreview"/></span><strong style="font-size:12px;color:#f0eadf">40 × 40 px · 与侧栏相同</strong><button @click="resetCrop" class="gs-cta gs-cta-muted" :id="uid('cropReset')" data-source-id="cropReset" type="button">恢复居中</button></div></div>
+<div class="crop-content"><div class="crop-work"><div @pointercancel="stopCrop" @pointerdown="startCrop" @pointermove="moveCrop" @pointerup="stopCrop" class="crop-viewport" :id="uid('cropViewport')" data-source-id="cropViewport" style="touch-action:none"><canvas height="480" :id="uid('cropCanvas')" data-source-id="cropCanvas" width="480"></canvas></div><span style="font-size:11px;color:var(--mi-text)">中央 40×40 取景框 · 可拖动底图</span></div><div class="crop-preview-block"><span>实际头像尺寸预览</span><span aria-label="头像预览" class="crop-preview avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="cropPreview" alt="" class="user-avatar-img" :id="uid('cropPreview')" data-source-id="cropPreview" v-if="cropPreview"/></span><strong style="font-size:12px;color:var(--mi-text)">40 × 40 px · 与侧栏相同</strong><button @click="resetCrop" class="gs-cta gs-cta-muted" :id="uid('cropReset')" data-source-id="cropReset" type="button">恢复居中</button></div></div>
 <div class="crop-controls"><label :for="uid('cropZoom')">缩放图片</label><input @input="drawCrop" :id="uid('cropZoom')" data-source-id="cropZoom" max="8" min="1" step="0.05" type="range" v-model.number="cropZoom"/></div>
 <div class="crop-actions"><button @click="chooseAvatarFile" class="gs-cta gs-cta-muted" :id="uid('cropChooseFile')" data-source-id="cropChooseFile" type="button">选择本地图片</button><button @click="cropOpen=false" class="gs-cta gs-cta-muted" :id="uid('cropCancel')" data-source-id="cropCancel" type="button">取消</button><button @click="applyAvatar" :disabled="!cropPreview||avatarBusy" class="gs-cta" :id="uid('cropApply')" data-source-id="cropApply" type="button">保存头像</button></div>
 <input @change="loadAvatar" accept="image/png,image/jpeg,image/webp" hidden="" :id="uid('cropFileInput')" data-source-id="cropFileInput" type="file"/>
@@ -146,40 +147,40 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 <style scoped src="../styles/account-settings.css"></style>
 <style scoped src="../styles/assistant-avatar.css"></style>
 <style scoped>
-.account-settings-surface{position:relative;height:100%;min-height:0}.gs-return{text-decoration:none}.display-actions{display:flex;flex-wrap:wrap;gap:8px}.settings-error{color:#e8a094;font-size:13px;line-height:1.7}
-/* 全站深炭黑 + 暖金点缀统一基线，保留所有设置功能与状态 */
-.global-settings-page{background:#0c0d0f;color:#fff}
-.gs-top{background:#0c0d0f;border-bottom:1px solid rgba(241,236,226,.10)}
-.gs-return{border-color:rgba(241,236,226,.22);color:#fff}
-.gs-return:hover{background:rgba(255,255,255,.07)}
-.gs-brand small{color:#a9a294}
-.gs-tag{color:#a9a294;background:transparent;border-color:rgba(241,236,226,.14)}
-.gs-nav{background:#121317;border-color:rgba(241,236,226,.10)}
-.gs-tab{color:#b7b1a5}
-.gs-tab:hover{background:rgba(255,255,255,.06);color:#fff}
-.gs-tab.active{color:#fff;background:rgba(255,255,255,.08);border-color:rgba(200,164,106,.45)}
-.gs-eyebrow{color:#c8a46a}
-.gs-intro p,.gs-card p,.gs-setting-row p{color:#b7b1a5}
-.gs-card{background:#141519;border-color:rgba(241,236,226,.12);border-radius:14px;box-shadow:none}
-.gs-input,.gs-select{background:#0c0d0f;border-color:rgba(241,236,226,.18);color:#fff;border-radius:10px}
-.gs-input:focus,.gs-select:focus{border-color:#c8a46a;outline:none}
-.gs-cta{background:transparent;border-color:rgba(241,236,226,.26);color:#fff;border-radius:10px}
-.gs-cta:hover{background:rgba(255,255,255,.08)}
-.gs-cta-muted{background:transparent;border-color:rgba(241,236,226,.16);color:#ded8cc}
-.gs-pill{color:#e6dcc6;background:rgba(200,164,106,.08);border-color:rgba(200,164,106,.30)}
-.gs-notice{background:#141519;border-color:rgba(241,236,226,.12);color:#cfc8ba}
-.gs-inline-link{color:#c8a46a}
-.gs-card a{color:#c8a46a;text-underline-offset:3px}
-.gs-setting-row h3{color:#fff}
-.crop-dialog{background:#141519;border-color:rgba(241,236,226,.14);border-radius:16px}
-.crop-head p,.crop-preview-block,.crop-controls label{color:#b7b1a5}
-.crop-viewport{border-color:rgba(241,236,226,.22);box-shadow:none;background:#101115}
-.crop-controls input[type=range]{accent-color:#c8a46a}
-.prototype-ai .settings-api :is(input:not([type=checkbox]),select){background:#0c0d0f;border-color:rgba(241,236,226,.18);color:#fff}
-.prototype-ai .settings-api :is(input:not([type=checkbox]),select):focus{border-color:#c8a46a;outline:none}
-.prototype-ai .settings-api input[type=checkbox]{accent-color:#c8a46a}
-.prototype-ai .settings-api button{background:transparent;border-color:rgba(241,236,226,.26);color:#fff}
-.prototype-ai .settings-api button:hover:not(:disabled){background:#1f2027;border-color:rgba(241,236,226,.38)}
-.prototype-ai .settings-api label,.prototype-ai .settings-api .assistant-note{color:#b7b1a5}
-.prototype-ai :focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.account-settings-surface{position:relative;height:100%;min-height:0}.gs-return{text-decoration:none}.display-actions{display:flex;flex-wrap:wrap;gap:8px}.settings-error{color:var(--mi-negative);font-size:13px;line-height:1.7}
+/* 全站双主题语义映射，保留所有设置功能与结构 */
+.global-settings-page{background:var(--mi-bg);color:var(--mi-text)}
+.gs-top{background:var(--mi-bg);border-bottom:1px solid var(--mi-border)}
+.gs-return{border-color:var(--mi-border-strong);color:var(--mi-text)}
+.gs-return:hover{background:var(--mi-surface-hover)}
+.gs-brand small{color:var(--mi-text-muted)}
+.gs-tag{color:var(--mi-text-muted);background:transparent;border-color:var(--mi-border)}
+.gs-nav{background:var(--mi-surface-warm);border-color:var(--mi-border)}
+.gs-tab{color:var(--mi-text-secondary)}
+.gs-tab:hover{background:var(--mi-surface-hover);color:var(--mi-text)}
+.gs-tab.active{color:var(--mi-text);background:var(--mi-surface-active);border-color:var(--mi-accent-border)}
+.gs-eyebrow{color:var(--mi-accent)}
+.gs-intro p,.gs-card p,.gs-setting-row p{color:var(--mi-text-secondary)}
+.gs-card{background:var(--mi-surface);border-color:var(--mi-border);border-radius:14px;box-shadow:var(--mi-shadow-sm)}
+.gs-input,.gs-select{background:var(--mi-input-bg);border-color:var(--mi-border-strong);color:var(--mi-text);border-radius:10px}
+.gs-input:focus,.gs-select:focus{border-color:var(--mi-accent);outline:none}
+.gs-cta{background:transparent;border-color:var(--mi-border-strong);color:var(--mi-text);border-radius:10px}
+.gs-cta:hover{background:var(--mi-surface-hover)}
+.gs-cta-muted{background:transparent;border-color:var(--mi-border);color:var(--mi-text-soft)}
+.gs-pill{color:var(--mi-accent-text);background:var(--mi-accent-soft);border-color:var(--mi-accent-border)}
+.gs-notice{background:var(--mi-surface-raised);border-color:var(--mi-border);color:var(--mi-text-soft)}
+.gs-inline-link{color:var(--mi-accent)}
+.gs-card a{color:var(--mi-accent);text-underline-offset:3px}
+.gs-setting-row h3{color:var(--mi-text)}
+.crop-dialog{background:var(--mi-surface);border-color:var(--mi-border-strong);border-radius:16px;color:var(--mi-text)}
+.crop-head p,.crop-preview-block,.crop-controls label{color:var(--mi-text-secondary)}
+.crop-viewport{border-color:var(--mi-border-strong);box-shadow:none;background:var(--mi-surface-raised)}
+.crop-controls input[type=range]{accent-color:var(--mi-accent)}
+.prototype-ai .settings-api :is(input:not([type=checkbox]),select){background:var(--mi-input-bg);border-color:var(--mi-border-strong);color:var(--mi-text)}
+.prototype-ai .settings-api :is(input:not([type=checkbox]),select):focus{border-color:var(--mi-accent);outline:none}
+.prototype-ai .settings-api input[type=checkbox]{accent-color:var(--mi-accent)}
+.prototype-ai .settings-api button{background:transparent;border-color:var(--mi-border-strong);color:var(--mi-text)}
+.prototype-ai .settings-api button:hover:not(:disabled){background:var(--mi-surface-hover);border-color:var(--mi-border-strong)}
+.prototype-ai .settings-api label,.prototype-ai .settings-api .assistant-note{color:var(--mi-text-secondary)}
+.prototype-ai :focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 </style>

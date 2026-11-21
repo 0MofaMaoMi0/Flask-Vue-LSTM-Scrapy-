@@ -6,8 +6,51 @@ import AppSidebar from '../components/AppSidebar.vue'
 import {movieArtwork as art} from '../services/movieArtwork'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 const RAIL=13
+const HOME_REQUEST_TIMEOUT_MS=15000
+const HOME_CACHE_TTL_MS=180_000
+type SwrGlobalBus={behaviorEpoch:number;authEpoch:number;listening:boolean}
+type HomeCacheEntry={
+  userKey:string
+  authEpoch:number
+  epoch:number
+  updatedAt:number
+  complete:boolean
+  dailyItems:any[]
+  popularItems:any[]
+  behavior:Record<string,any>
+  featuredId:number
+  railErrors:Record<string,string>
+  posterLoaded:Record<string,boolean>
+  loadedHeroBackdrop:string
+}
+const swrBus:SwrGlobalBus=((globalThis as any).__mi2SwrBus??={behaviorEpoch:1,authEpoch:1,listening:false})
+if(!swrBus.listening&&typeof window!=='undefined'){
+  swrBus.listening=true
+  const bumpBehavior=()=>{swrBus.behaviorEpoch++}
+  window.addEventListener('mi2-behavior-changed',bumpBehavior)
+  window.addEventListener('mi2-tmdb-status',bumpBehavior)
+}
+const homeCache:Map<string,HomeCacheEntry>=((globalThis as any).__mi2HomeSwrCache??=new Map<string,HomeCacheEntry>())
+const heroDetailCache:Map<number,any>=((globalThis as any).__mi2HomeHeroDetailCache??=new Map<number,any>())
+const heroDetailInFlight:Map<number,Promise<any>>=((globalThis as any).__mi2HomeHeroDetailInFlight??=new Map<number,Promise<any>>())
+function clearHomeCaches(bumpAuth=false){
+  homeCache.clear()
+  heroDetailCache.clear()
+  heroDetailInFlight.clear()
+  if(bumpAuth)swrBus.authEpoch++
+}
 const router=useRouter(),auth=useAuthStore(),behavior=ref<Record<string,any>>({}),featuredId=ref(0),loading=ref(true),error=ref(''),logoutError=ref(''),failed=ref<Record<string,boolean>>({}),posterLoaded=ref<Record<string,boolean>>({}),heroLoaded=ref(false),sidebarExpanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
-const dailyItems=ref<any[]>([]),popularItems=ref<any[]>([]),homeBoards:Record<string,ReturnType<typeof createFeedbackBoard>>={}
+const dailyItems=ref<any[]>([]),popularItems=ref<any[]>([]),railLoading=ref<Record<string,boolean>>({personal:false,popular:false}),homeBoards:Record<string,ReturnType<typeof createFeedbackBoard>>={}
+function getUserCacheKey():string{
+  const u=auth.user as any
+  const id=u?.id??u?.user_id??u?.username
+  return id!==undefined&&id!==null&&String(id)!==''?String(id):'anon'
+}
+watch(()=>auth.user?(auth.user as any).id??(auth.user as any).username??'auth':null,(next,prev)=>{
+  if(prev!==undefined&&next!==prev){
+    clearHomeCaches(true)
+  }
+})
 const channels=computed(()=>[{id:'personal',title:'每日为你推荐',note:'同日稳定 · 根据你的收藏、想看与评分',items:dailyItems.value},{id:'popular',title:'TMDB 热门',note:'官方榜单 · 含库外影片',items:popularItems.value}])
 const localMovies=computed(()=>{const seen=new Set<number>(),out:any[]=[];for(const movie of [...popularItems.value,...dailyItems.value]){const id=localId(movie);if(id!==null&&!seen.has(id)){seen.add(id);out.push(movie)}}return out})
 const film=computed(()=>localMovies.value.find(m=>m.movie_id===featuredId.value)||localMovies.value[0]||null)
@@ -30,7 +73,29 @@ function posterError(movie:any,event:Event){
   if(src)posterFailures.value[cardKey(movie)+':'+src]=true
   posterLoaded.value[cardKey(movie)]=false
 }
-function backdrop(m:any){const a=(m.assets||[]).find((x:any)=>x.asset_type==='backdrop'&&x.is_primary)||(m.assets||[]).find((x:any)=>x.asset_type==='backdrop');const p=a?.source_path;if(p?.startsWith('/'))return '/api/media/poster?u='+encodeURIComponent('https://image.tmdb.org/t/p/w1280'+p);return p?.startsWith('http')?'/api/media/poster?u='+encodeURIComponent(p):(localId(m)!==null?art[String(localId(m))]?.backdrop:undefined)||poster(m)}
+function normalizeBackdropUrl(raw:unknown,isTmdbAssetPath=false):string|undefined{
+  if(typeof raw!=='string')return undefined
+  const p=raw.trim()
+  if(!p||p.startsWith('//'))return undefined
+  if(p.startsWith('/api/'))return p
+  if(/^https?:\/\//.test(p))return '/api/media/poster?u='+encodeURIComponent(p)
+  if(p.startsWith('/')){
+    return isTmdbAssetPath?'/api/media/poster?u='+encodeURIComponent('https://image.tmdb.org/t/p/w1280'+p):p
+  }
+  return undefined
+}
+function dedicatedBackdrop(m:any):string|undefined{
+  if(!m||typeof m!=='object')return undefined
+  const direct=normalizeBackdropUrl(m.backdrop)
+  if(direct)return direct
+  const assets=Array.isArray(m.assets)?m.assets:[]
+  const a=assets.find((x:any)=>x?.asset_type==='backdrop'&&x?.is_primary)||assets.find((x:any)=>x?.asset_type==='backdrop')
+  const fromAsset=normalizeBackdropUrl(a?.source_path,true)
+  if(fromAsset)return fromAsset
+  const id=localId(m)
+  return id!==null?normalizeBackdropUrl(art[String(id)]?.backdrop):undefined
+}
+function backdrop(m:any){return dedicatedBackdrop(m)||poster(m)}
 
 const counts=computed(()=>{const c={seen:0,want:0,fav:0};for(const s of Object.values(behavior.value||{}) as any[]){if(s?.watched)c.seen++;if(s?.want)c.want++;if(s?.favorite)c.fav++}return c})
 function mark(movie:any){const id=localId(movie);if(id===null)return '';const s=behavior.value[String(id)];if(!s)return '';if(s.watched)return '已看';if(s.want)return '想看';if(s.favorite)return '已收藏';return ''}
@@ -69,6 +134,11 @@ function normalizeItems(items:any):any[]{
     if(!raw||typeof raw!=='object')continue
     const movie={...raw},key=cardKey(movie)
     if(!key||seen.has(key))continue
+    const id=localId(movie)
+    if(id!==null&&heroDetailCache.has(id)){
+      const cachedDetail=heroDetailCache.get(id)
+      if(cachedDetail&&typeof cachedDetail==='object')Object.assign(movie,cachedDetail)
+    }
     seen.add(key);out.push(movie)
     if(out.length>=RAIL)break
   }
@@ -93,7 +163,6 @@ function runtimeLabel(movie:any){
   const minutes=finite(movie?.runtime_minutes)
   return minutes!==null&&Number.isInteger(minutes)&&minutes>=1&&minutes<=1440?`${minutes} 分钟`:''
 }
-const HOME_REQUEST_TIMEOUT_MS=8000
 class HomeRequestError extends Error {
   status?:number
   timedOut:boolean
@@ -106,6 +175,7 @@ let raf=0
 let unmounted=false
 const railErrors=ref<Record<string,string>>({})
 const hasRailError=computed(()=>Object.keys(railErrors.value).length>0)
+const isAnyRailLoading=computed(()=>railLoading.value.personal||railLoading.value.popular)
 const railRows:Record<string,HTMLElement|null>={}
 const arrowState=ref<Record<string,{left:boolean;right:boolean}>>({})
 let railFrame=0
@@ -147,6 +217,62 @@ function scrollRail(id:string,direction:number){
 }
 function isUnauthorized(error:unknown){return error instanceof HomeRequestError&&error.status===401}
 function clearBoards(){for(const b of Object.values(homeBoards))b.dispose();for(const key of Object.keys(homeBoards))delete homeBoards[key]}
+function rebuildBoard(channelId:'personal'|'popular',items:any[]){
+  homeBoards[channelId]?.dispose()
+  delete homeBoards[channelId]
+  if(items.length>0&&!railErrors.value[channelId]){
+    homeBoards[channelId]=createFeedbackBoard({channel:channelId==='personal'?'daily':'popular',context:'home',items})
+  }
+}
+function pickFeaturedId(){
+  const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
+  return (
+    localMovies.value.find(m=>String(m.movie_id)===saved)?.movie_id||
+    localMovies.value.find(m=>!!dedicatedBackdrop(m))?.movie_id||
+    localMovies.value[0]?.movie_id||
+    0
+  )
+}
+function syncFeaturedId(){
+  const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
+  const currentFilm=localMovies.value.find(m=>m.movie_id===featuredId.value)
+  if(
+    !currentFilm||
+    (saved&&String(featuredId.value)!==saved&&localMovies.value.some(m=>String(m.movie_id)===saved))||
+    (!dedicatedBackdrop(currentFilm)&&localMovies.value.some(m=>!!dedicatedBackdrop(m)))
+  ){
+    featuredId.value=pickFeaturedId()
+  }
+}
+function onPosterLoad(movie:any){
+  const key=cardKey(movie)
+  posterLoaded.value[key]=true
+  const snap=homeCache.get(getUserCacheKey())
+  if(snap)snap.posterLoaded[key]=true
+}
+function onHeroLoad(){
+  heroLoaded.value=true
+  const snap=homeCache.get(getUserCacheKey())
+  if(snap&&film.value)snap.loadedHeroBackdrop=backdrop(film.value)||''
+}
+function saveHomeSnapshot(userKey:string,epoch:number,complete:boolean){
+  if(!dailyItems.value.length&&!popularItems.value.length)return
+  const currentHeroBg=film.value?backdrop(film.value)||'':''
+  homeCache.set(userKey,{
+    userKey,
+    authEpoch:swrBus.authEpoch,
+    epoch,
+    updatedAt:Date.now(),
+    complete,
+    dailyItems:dailyItems.value.map(m=>({...m})),
+    popularItems:popularItems.value.map(m=>({...m})),
+    behavior:{...(behavior.value||{})},
+    featuredId:featuredId.value,
+    railErrors:{...railErrors.value},
+    posterLoaded:{...posterLoaded.value},
+    loadedHeroBackdrop:heroLoaded.value?currentHeroBg:'',
+  })
+}
 async function api(path:string,signal:AbortSignal=lifeController.signal):Promise<any>{
   if(signal.aborted)throw new HomeRequestError('请求已取消。')
   const request=new AbortController()
@@ -156,7 +282,10 @@ async function api(path:string,signal:AbortSignal=lifeController.signal):Promise
   signal.addEventListener('abort',onAbort,{once:true})
   try{
     const response=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:request.signal})
-    if(!response.ok)throw new HomeRequestError(response.status===401?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。',{status:response.status})
+    if(!response.ok){
+      if(response.status===401)clearHomeCaches(true)
+      throw new HomeRequestError(response.status===401?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。',{status:response.status})
+    }
     return (await response.json()).data
   }catch(error){
     if(timedOut)throw new HomeRequestError('请求超时，请重新加载。',{timedOut:true})
@@ -168,6 +297,42 @@ async function api(path:string,signal:AbortSignal=lifeController.signal):Promise
     signal.removeEventListener('abort',onAbort)
   }
 }
+async function ensureHeroBackdrop(signal:AbortSignal,seq:number){
+  const currentFilm=film.value
+  const id=localId(currentFilm)
+  if(id===null||dedicatedBackdrop(currentFilm))return
+  if(heroDetailCache.has(id)){
+    const cachedDetail=heroDetailCache.get(id)
+    if(cachedDetail&&typeof cachedDetail==='object'){
+      const mergeOne=(items:any[])=>items.map(m=>localId(m)===id?{...m,...cachedDetail}:m)
+      dailyItems.value=mergeOne(dailyItems.value)
+      popularItems.value=mergeOne(popularItems.value)
+    }
+    return
+  }
+  let task=heroDetailInFlight.get(id)
+  if(!task){
+    task=api('movies/'+id,signal)
+      .then(detail=>{
+        const valid=detail&&typeof detail==='object'?detail:null
+        heroDetailCache.set(id,valid)
+        return valid
+      })
+      .catch(()=>null)
+      .finally(()=>{heroDetailInFlight.delete(id)})
+    heroDetailInFlight.set(id,task)
+  }
+  const detail=await task
+  if(!detail||seq!==loadSequence||signal.aborted)return
+  const mergeOne=(items:any[])=>items.map(m=>localId(m)===id?{...m,...detail}:m)
+  dailyItems.value=mergeOne(dailyItems.value)
+  popularItems.value=mergeOne(popularItems.value)
+  const snap=homeCache.get(getUserCacheKey())
+  if(snap){
+    snap.dailyItems=mergeOne(snap.dailyItems)
+    snap.popularItems=mergeOne(snap.popularItems)
+  }
+}
 function railFailure(id:string,error:unknown,otherOk:boolean){
   const label=id==='personal'?'每日推荐':'TMDB 热门'
   let message:string
@@ -176,54 +341,160 @@ function railFailure(id:string,error:unknown,otherOk:boolean){
   else message=`${label}暂时无法读取，请稍后重试。`
   return otherOk?`${message} 已保留另一条推荐，可重新加载。`:message
 }
-async function load(){
+async function load(options?:{silent?:boolean;force?:boolean}|Event){
+  const isEvent=typeof Event!=='undefined'&&options instanceof Event
+  const opts:{silent?:boolean;force?:boolean}=options&&!(options instanceof Event)?options:{}
+  const force=isEvent?true:opts.force===true
+  const userKey=getUserCacheKey()
+  const existing=homeCache.get(userKey)
+  if(existing&&existing.authEpoch!==swrBus.authEpoch){
+    clearHomeCaches(false)
+  }
+  const validCached=homeCache.get(userKey)
+  if(!force&&validCached&&(validCached.dailyItems.length>0||validCached.popularItems.length>0)){
+    error.value=''
+    dailyItems.value=validCached.dailyItems.map(m=>({...m}))
+    popularItems.value=validCached.popularItems.map(m=>({...m}))
+    behavior.value={...(validCached.behavior||{})}
+    railErrors.value={...(validCached.railErrors||{})}
+    posterLoaded.value={...(validCached.posterLoaded||{})}
+    const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
+    featuredId.value=(saved&&localMovies.value.find(m=>String(m.movie_id)===saved)?.movie_id)||validCached.featuredId||pickFeaturedId()
+    const currentHeroBg=film.value?backdrop(film.value)||'':''
+    heroLoaded.value=!!currentHeroBg&&validCached.loadedHeroBackdrop===currentHeroBg
+    railLoading.value={personal:false,popular:false}
+    loading.value=false
+    rebuildBoard('personal',dailyItems.value)
+    rebuildBoard('popular',popularItems.value)
+    const isFresh=
+      validCached.complete&&
+      validCached.epoch===swrBus.behaviorEpoch&&
+      Date.now()-validCached.updatedAt<HOME_CACHE_TTL_MS&&
+      Object.keys(validCached.railErrors).length===0
+    if(isFresh){
+      void ensureHeroBackdrop(lifeController.signal,loadSequence)
+      return
+    }
+  }
+  const hasVisibleContent=!error.value&&(dailyItems.value.length>0||popularItems.value.length>0)
+  const silent=opts.silent===true||hasVisibleContent
   const sequence=++loadSequence
   loadController?.abort()
   const current=new AbortController()
   loadController=current
-  clearBoards()
-  error.value=''
-  railErrors.value={}
-  failed.value={}
-  posterFailures.value={}
-  posterLoaded.value={}
-  heroLoaded.value=false
-  loading.value=true
+  const startEpoch=swrBus.behaviorEpoch
+  if(!silent){
+    clearBoards()
+    error.value=''
+    railErrors.value={}
+    failed.value={}
+    posterFailures.value={}
+    posterLoaded.value={}
+    heroLoaded.value=false
+    loading.value=true
+    railLoading.value={personal:true,popular:true}
+  }else{
+    error.value=''
+    railLoading.value={
+      personal:dailyItems.value.length===0,
+      popular:popularItems.value.length===0,
+    }
+  }
   try{
-    const [dailyResult,popularResult]=await Promise.allSettled([
-      api('recommendations?channel=daily&limit='+RAIL,current.signal),
-      api('recommendations?channel=popular&scope=all&limit='+RAIL,current.signal),
-    ])
+    let dailyOk=false,popularOk=false
+    let dailyError:unknown=null,popularError:unknown=null
+    const handleRailSuccess=(railId:'personal'|'popular',payload:any)=>{
+      if(sequence!==loadSequence||current.signal.aborted)return
+      const prevHeroBg=film.value?backdrop(film.value)||'':''
+      const normalized=normalizeItems(payload?.items)
+      if(railId==='personal'){
+        dailyOk=true
+        dailyItems.value=normalized
+      }else{
+        popularOk=true
+        popularItems.value=normalized
+      }
+      railLoading.value={...railLoading.value,[railId]:false}
+      if(railId in railErrors.value){
+        const nextErr={...railErrors.value}
+        delete nextErr[railId]
+        railErrors.value=nextErr
+      }
+      syncFeaturedId()
+      const nextHeroBg=film.value?backdrop(film.value)||'':''
+      if(prevHeroBg&&nextHeroBg&&prevHeroBg!==nextHeroBg)heroLoaded.value=false
+      rebuildBoard(railId,normalized)
+      loading.value=false
+      void ensureHeroBackdrop(current.signal,sequence)
+      saveHomeSnapshot(userKey,startEpoch,dailyOk&&popularOk)
+    }
+    const behaviorTask=api('behavior',current.signal)
+      .then(state=>{
+        if(sequence!==loadSequence||current.signal.aborted)return null
+        if(state&&typeof state==='object'){
+          behavior.value=state.state||{}
+          const snap=homeCache.get(userKey)
+          if(snap)snap.behavior={...behavior.value}
+        }
+        return state
+      })
+      .catch(()=>null)
+    const dailyTask=api('recommendations?channel=daily&limit='+RAIL,current.signal)
+      .then(res=>{handleRailSuccess('personal',res);return res})
+      .catch(err=>{
+        dailyError=err
+        if(sequence===loadSequence&&!current.signal.aborted){
+          railLoading.value={...railLoading.value,personal:false}
+        }
+        return null
+      })
+    const popularTask=api('recommendations?channel=popular&scope=all&limit='+RAIL,current.signal)
+      .then(res=>{handleRailSuccess('popular',res);return res})
+      .catch(err=>{
+        popularError=err
+        if(sequence===loadSequence&&!current.signal.aborted){
+          railLoading.value={...railLoading.value,popular:false}
+        }
+        return null
+      })
+    await Promise.all([dailyTask,popularTask,behaviorTask])
     if(sequence!==loadSequence||current.signal.aborted)return
-    const daily=dailyResult.status==='fulfilled'?dailyResult.value:null
-    const popular=popularResult.status==='fulfilled'?popularResult.value:null
-    const dailyError=dailyResult.status==='rejected'?dailyResult.reason:null
-    const popularError=popularResult.status==='rejected'?popularResult.reason:null
-    if(isUnauthorized(dailyError)||isUnauthorized(popularError)){error.value='登录已失效，请重新登录。';return}
-    if(!daily&&!popular){error.value='电影目录暂时不可用，请重试。';return}
-    dailyItems.value=normalizeItems(daily?.items)
-    popularItems.value=normalizeItems(popular?.items)
-    const saved=String(sessionStorage.getItem('mi2_home_selected')||'')
-    featuredId.value=localMovies.value.find(m=>String(m.movie_id)===saved)?.movie_id||localMovies.value.find(m=>art[String(m.movie_id)]?.backdrop)?.movie_id||localMovies.value[0]?.movie_id||0
+    if(isUnauthorized(dailyError)||isUnauthorized(popularError)){
+      clearHomeCaches(true)
+      clearBoards()
+      dailyItems.value=[]
+      popularItems.value=[]
+      error.value='登录已失效，请重新登录。'
+      return
+    }
+    if(!dailyOk&&!popularOk){
+      if(silent&&(dailyItems.value.length>0||popularItems.value.length>0))return
+      error.value='电影目录暂时不可用，请重试。'
+      return
+    }
     const nextErrors:Record<string,string>={}
-    if(dailyError)nextErrors.personal=railFailure('personal',dailyError,!!popular)
-    if(popularError)nextErrors.popular=railFailure('popular',popularError,!!daily)
+    if(dailyError&&!(silent&&dailyItems.value.length>0)){
+      nextErrors.personal=railFailure('personal',dailyError,popularOk||popularItems.value.length>0)
+    }
+    if(popularError&&!(silent&&popularItems.value.length>0)){
+      nextErrors.popular=railFailure('popular',popularError,dailyOk||dailyItems.value.length>0)
+    }
     railErrors.value=nextErrors
-    for(const c of channels.value)if(!nextErrors[c.id])homeBoards[c.id]=createFeedbackBoard({channel:c.id==='personal'?'daily':c.id,context:'home',items:c.items})
-    loading.value=false
-    const wanted=localMovies.value.map(m=>m.movie_id)
-    const [details,state]=await Promise.all([Promise.all(wanted.map(id=>api('movies/'+id,current.signal).catch(()=>null))),api('behavior',current.signal).catch(()=>null)])
-    if(sequence!==loadSequence||current.signal.aborted)return
-    if(state)behavior.value=state.state||{}
-    const byId=new Map<number,any>();for(const d of details)if(d)byId.set(d.movie_id,d)
-    const mergeDetails=(items:any[])=>items.map(m=>{const id=localId(m);return id!==null&&byId.has(id)?{...m,...byId.get(id)}:m})
-    dailyItems.value=mergeDetails(dailyItems.value)
-    popularItems.value=mergeDetails(popularItems.value)
+    saveHomeSnapshot(userKey,startEpoch,dailyOk&&popularOk&&!dailyError&&!popularError)
   }catch(e){
     if(sequence!==loadSequence||current.signal.aborted)return
-    error.value=isUnauthorized(e)?'登录已失效，请重新登录。':'电影目录暂时不可用，请重试。'
+    if(isUnauthorized(e)){
+      clearHomeCaches(true)
+      error.value='登录已失效，请重新登录。'
+    }else if(!silent||(!dailyItems.value.length&&!popularItems.value.length)){
+      error.value='电影目录暂时不可用，请重试。'
+    }
   }finally{
-    if(sequence===loadSequence){loading.value=false;if(loadController===current)loadController=undefined}
+    if(sequence===loadSequence){
+      loading.value=false
+      railLoading.value={personal:false,popular:false}
+      if(loadController===current)loadController=undefined
+    }
   }
 }
 function clickCard(movie:any){
@@ -246,10 +517,18 @@ function detail(id:number){
   navigateLocal(id)
 }
 function openAI(){window.dispatchEvent(new Event('mi2-open-assistant'))}
-async function logout(){try{await auth.logout();router.replace('/login')}catch{logoutError.value='退出未确认，请重试。'}}
-const refreshBehavior=()=>api('behavior',lifeController.signal).then(b=>behavior.value=b.state||{}).catch(()=>{})
-onMounted(async()=>{window.addEventListener('mi2-behavior-changed',refreshBehavior);window.addEventListener('resize',scheduleArrows);await load();nextTick(syncAllArrows);if(!unmounted)raf=requestAnimationFrame(()=>window.scrollTo(0,Number(sessionStorage.getItem('mi2_home_position')||0)))})
-onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeController.abort();if(raf)cancelAnimationFrame(raf);if(railFrame)cancelAnimationFrame(railFrame);for(const id of Object.keys(railRows))delete railRows[id];railRefs.clear();window.removeEventListener('mi2-behavior-changed',refreshBehavior);window.removeEventListener('resize',scheduleArrows);clearBoards()})
+async function logout(){try{await auth.logout();clearHomeCaches(true);router.replace('/login')}catch{logoutError.value='退出未确认，请重试。'}}
+const refreshBehavior=()=>{
+  api('behavior',lifeController.signal).then(b=>{
+    behavior.value=b?.state||{}
+    const snap=homeCache.get(getUserCacheKey())
+    if(snap)snap.behavior={...behavior.value}
+  }).catch(()=>{})
+  void load({silent:true,force:true})
+}
+const onTmdbStatus=()=>{void load({silent:true,force:true})}
+onMounted(async()=>{window.addEventListener('mi2-behavior-changed',refreshBehavior);window.addEventListener('mi2-tmdb-status',onTmdbStatus);window.addEventListener('resize',scheduleArrows);await load();nextTick(syncAllArrows);if(!unmounted)raf=requestAnimationFrame(()=>window.scrollTo(0,Number(sessionStorage.getItem('mi2_home_position')||0)))})
+onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeController.abort();if(raf)cancelAnimationFrame(raf);if(railFrame)cancelAnimationFrame(railFrame);for(const id of Object.keys(railRows))delete railRows[id];railRefs.clear();window.removeEventListener('mi2-behavior-changed',refreshBehavior);window.removeEventListener('mi2-tmdb-status',onTmdbStatus);window.removeEventListener('resize',scheduleArrows);clearBoards()})
 </script>
 <template>
   <div class="cinema-source" :style="{'--navigation-width':sidebarExpanded?'280px':'52.5px'}">
@@ -267,10 +546,10 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
           <router-link class="action secondary" to="/login">重新登录</router-link>
         </div>
       </div>
-      <div v-else-if="film || railHasItems" class="site" data-version="A">
+      <div v-else-if="film || railHasItems || isAnyRailLoading" class="site" data-version="A">
         <section v-if="film" class="hero" :class="{loaded:heroLoaded}">
           <div class="image-fallback">背景剧照暂不可用</div>
-          <img v-if="backdrop(film)&&!failed['hero'+cardKey(film)]" class="backdrop" :src="backdrop(film)" :alt="film.title+'电影背景剧照'" @load="heroLoaded=true" @error="failed['hero'+cardKey(film)]=true"/>
+          <img v-if="backdrop(film)&&!failed['hero'+cardKey(film)]" class="backdrop" :src="backdrop(film)" :alt="film.title+'电影背景剧照'" @load="onHeroLoad" @error="failed['hero'+cardKey(film)]=true"/>
           <div class="hero-shade"/>
           <div class="hero-copy">
             <h1>{{film.title}}</h1>
@@ -293,7 +572,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
             </div>
           </div>
           <figure class="hero-poster" :class="{loaded:posterLoaded[cardKey(film)]}">
-            <img v-if="poster(film)" :key="poster(film)" :src="poster(film)" :alt="film.title+'电影海报'" @load="posterLoaded[cardKey(film)]=true" @error="posterError(film,$event)"/>
+            <img v-if="poster(film)" :key="poster(film)" :src="poster(film)" :alt="film.title+'电影海报'" @load="onPosterLoad(film)" @error="posterError(film,$event)"/>
             <div v-else class="hero-poster-fallback"><span>电影海报</span><strong>{{film.title}}</strong><span>海报暂未显示</span></div>
             <figcaption>电影海报 · {{film.title}}</figcaption>
           </figure>
@@ -314,7 +593,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
                 <component :is="isExternal(movie)?'a':'button'" class="poster-shell" :class="{loaded:posterLoaded[cardKey(movie)]}" :href="isExternal(movie)?externalUrl(movie):undefined" :target="isExternal(movie)?'_blank':undefined" :rel="isExternal(movie)?'noopener noreferrer':undefined" :type="isExternal(movie)?undefined:'button'" :aria-label="isExternal(movie)?'在 TMDB 新标签页查看'+movie.title+'（库外影片）':'查看'+movie.title+'详情'" @click="openCard(movie)">
                   <span class="marker" v-if="mark(movie)">{{mark(movie)}}</span>
                   <span v-if="isExternal(movie)" class="external-mark">TMDB</span>
-                  <img v-if="poster(movie)" :key="poster(movie)" :src="poster(movie)" :alt="movie.title+'电影海报'" loading="lazy" @load="posterLoaded[cardKey(movie)]=true" @error="posterError(movie,$event)"/>
+                  <img v-if="poster(movie)" :key="poster(movie)" :src="poster(movie)" :alt="movie.title+'电影海报'" loading="lazy" @load="onPosterLoad(movie)" @error="posterError(movie,$event)"/>
                   <span class="poster-fallback">
                     <span class="fallback-label">电影海报</span>
                     <strong class="large">{{movie.title}}</strong>
@@ -338,6 +617,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
             <span>{{railErrors[channel.id]}}</span>
             <button type="button" class="inline-retry" @click="load">重新加载</button>
           </div>
+          <p v-else-if="railLoading[channel.id]&&!channel.items.length" class="channel-empty" role="status">正在读取{{channel.title}}片单…</p>
           <p v-else-if="!channel.items.length" class="channel-empty">{{channel.id==='popular'?'暂无已验证且符合条件的 TMDB 热度影片。':'暂无符合当前偏好的推荐，试试完善评分或想看清单。'}}</p>
         </section>
 
@@ -388,34 +668,34 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
 </template>
 
 <style scoped>
-.cinema-source{--ink:#0c0d0f;--ink-soft:#141519;--paper:#fff;--paper-dim:#fff;--muted:#fff;--line:rgba(241,236,226,.16);--line-strong:rgba(241,236,226,.28);--accent:#c8a46a;--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;color:var(--paper);background:var(--ink);min-height:100vh;font-family:var(--sans)}
+.cinema-source{--ink:var(--mi-bg);--ink-soft:var(--mi-surface);--paper:var(--mi-text);--paper-dim:var(--mi-text-soft);--muted:var(--mi-text-secondary);--line:var(--mi-border);--line-strong:var(--mi-border-strong);--accent:var(--mi-accent);--serif:'Noto Serif SC','Source Han Serif SC','Songti SC',Georgia,'Times New Roman',serif;--sans:Inter,'PingFang SC','Microsoft YaHei',sans-serif;color:var(--paper);background:var(--ink);min-height:100vh;font-family:var(--sans)}
 .cinema-source *{box-sizing:border-box}
 .cinema-source button{font:inherit;cursor:pointer}
 .cinema-source a{color:inherit}
 .cinema-source :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
-.cinema-source ::selection{background:var(--accent);color:var(--ink)}
+.cinema-source ::selection{background:var(--mi-selection-bg);color:var(--mi-selection-text)}
 .source-content{margin-left:var(--navigation-width);min-width:0;min-height:100vh;background:var(--ink)}
 .site{background:var(--ink)}
 .hero{position:relative;min-height:960px;display:grid;grid-template-columns:minmax(0,1fr) minmax(280px,340px);align-items:center;gap:64px;padding:48px 64px 56px;overflow:hidden;border-bottom:1px solid var(--line);background:var(--ink-soft)}
-.hero .backdrop{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:64% 42%;opacity:.58;filter:saturate(.7) contrast(1.05) brightness(.62);z-index:0}
+.hero .backdrop{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;object-position:64% 42%;opacity:var(--mi-hero-backdrop-opacity);filter:var(--mi-hero-backdrop-filter);z-index:0}
 .hero .image-fallback{position:absolute;inset:0;z-index:0;display:flex;align-items:flex-end;justify-content:flex-end;padding:48px 64px;background:var(--ink-soft);color:var(--muted);font-size:12px}
 .hero.loaded .image-fallback{display:none}
-.hero-shade{position:absolute;inset:0;z-index:1;background:linear-gradient(90deg,rgba(12,13,15,.97) 0%,rgba(12,13,15,.88) 42%,rgba(12,13,15,.42) 74%,rgba(12,13,15,.78) 100%),linear-gradient(0deg,var(--ink) 0%,transparent 34%)}
+.hero-shade{position:absolute;inset:0;z-index:1;background:var(--mi-hero-shade)}
 .hero-copy{position:relative;z-index:2;max-width:620px;align-self:center;padding:20px 0}
 .section-rule{display:inline-block;flex:none;width:32px;height:1px;background:var(--accent)}
-.hero h1{font-family:var(--serif);font-size:clamp(48px,5.2vw,76px);font-weight:500;line-height:1.02;letter-spacing:-.02em;margin:0;color:#fff;text-wrap:balance}
-.title-en{font-size:14px;line-height:1.5;color:#fff;margin-top:14px;letter-spacing:.01em}
-.hero-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;margin-top:22px;color:#fff;font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
-.hero-meta span+span::before{content:"·";color:rgba(255,255,255,.55);margin-right:16px}
-.synopsis{max-width:560px;margin:22px 0 0;color:#fff;font-size:15px;line-height:1.9}
+.hero h1{font-family:var(--serif);font-size:clamp(48px,5.2vw,76px);font-weight:500;line-height:1.02;letter-spacing:-.02em;margin:0;color:var(--paper);text-wrap:balance}
+.title-en{font-size:14px;line-height:1.5;color:var(--paper-dim);margin-top:14px;letter-spacing:.01em}
+.hero-meta{display:flex;align-items:center;flex-wrap:wrap;gap:10px 16px;margin-top:22px;color:var(--paper-dim);font-size:12px;line-height:1.5;font-variant-numeric:tabular-nums}
+.hero-meta span+span::before{content:"·";color:var(--muted);margin-right:16px}
+.synopsis{max-width:560px;margin:22px 0 0;color:var(--paper-dim);font-size:15px;line-height:1.9}
 .hero-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin-top:30px}
 .action{min-height:44px;display:inline-flex;align-items:center;justify-content:center;gap:9px;padding:0 18px;border:1px solid transparent;border-radius:8px;font-size:13px;font-weight:500;line-height:1.2;text-decoration:none;transition:background-color .16s ease,border-color .16s ease,color .16s ease}
-.action.primary{background:transparent;color:var(--paper);border-color:var(--paper)}
-.action.primary:hover{background:rgba(241,236,226,.08);border-color:var(--paper)}
-.action.secondary{background:transparent;color:var(--paper);border-color:var(--paper)}
-.action.secondary:hover{border-color:var(--paper);background:rgba(241,236,226,.08)}
+.action.primary{background:var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text);border-color:var(--mi-primary-btn-bg)}
+.action.primary:hover{background:var(--mi-primary-btn-hover);border-color:var(--mi-primary-btn-hover)}
+.action.secondary{background:transparent;color:var(--paper);border-color:var(--line-strong)}
+.action.secondary:hover{border-color:var(--paper);background:var(--mi-chip-hover)}
 .action svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round}
-.hero-poster{position:relative;z-index:3;justify-self:end;align-self:center;width:100%;max-width:340px;margin:0;background:var(--ink);border:1px solid var(--line-strong);box-shadow:0 16px 36px rgba(0,0,0,.32)}
+.hero-poster{position:relative;z-index:3;justify-self:end;align-self:center;width:100%;max-width:340px;margin:0;background:var(--ink-soft);border:1px solid var(--line-strong);box-shadow:var(--mi-shadow-lg)}
 .hero-poster img{display:block;width:100%;aspect-ratio:2/3;object-fit:cover;opacity:0;transition:opacity .35s ease}
 .hero-poster.loaded img{opacity:1}
 .hero-poster-fallback{display:flex;flex-direction:column;justify-content:space-between;aspect-ratio:2/3;padding:22px;background:var(--ink-soft);color:var(--paper-dim);font-size:11px}
@@ -435,22 +715,22 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
 .filmrow{display:flex;align-items:flex-start;gap:20px;overflow-x:auto;margin-top:-8px;padding:12px 0 24px;scrollbar-width:none;-ms-overflow-style:none}
 .filmrow::-webkit-scrollbar{display:none}
 .rail-arrow{position:absolute;z-index:3;top:12px;bottom:72px;width:96px;display:grid;place-items:center;padding:0;border:0;border-radius:10px;background:transparent;color:var(--paper);cursor:pointer;opacity:.92;transition:opacity .16s ease,background .16s ease}
-.rail-arrow.left{left:0;justify-items:start;padding-left:10px;background:linear-gradient(90deg,rgba(12,13,15,.92),rgba(12,13,15,.58) 58%,rgba(12,13,15,0))}
-.rail-arrow.right{right:0;justify-items:end;padding-right:10px;background:linear-gradient(270deg,rgba(12,13,15,.92),rgba(12,13,15,.58) 58%,rgba(12,13,15,0))}
+.rail-arrow.left{left:0;justify-items:start;padding-left:10px;background:var(--mi-rail-left)}
+.rail-arrow.right{right:0;justify-items:end;padding-right:10px;background:var(--mi-rail-right)}
 .rail-arrow:hover{opacity:1}
 .rail-arrow svg{width:28px;height:28px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round}
 .rail-arrow:focus-visible{outline:2px solid var(--paper);outline-offset:-3px}
 .filmcard{width:160px;flex:none;min-width:0}
 .filmcard.lead{width:320px;display:grid;grid-template-columns:140px minmax(0,1fr);gap:20px;align-items:end;padding-right:20px;border-right:1px solid var(--line)}
-.poster-shell{position:relative;display:block;width:100%;aspect-ratio:2/3;padding:0;overflow:hidden;border:1px solid #ffffff28;border-radius:14px;background:#171927;color:var(--paper);text-align:left;text-decoration:none;box-shadow:0 5px 17px #0003;transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease}
-.poster-shell:hover,.poster-shell:focus-within{border-color:#ae9ae57c;transform:translateY(-4px);box-shadow:0 16px 35px #0009}
+.poster-shell{position:relative;display:block;width:100%;aspect-ratio:2/3;padding:0;overflow:hidden;border:1px solid var(--line);border-radius:14px;background:var(--ink-soft);color:var(--paper);text-align:left;text-decoration:none;box-shadow:var(--mi-shadow-sm);transition:transform .22s ease,box-shadow .22s ease,border-color .22s ease}
+.poster-shell:hover,.poster-shell:focus-within{border-color:var(--mi-accent);transform:translateY(-4px);box-shadow:var(--mi-shadow-md)}
 .poster-shell img{display:block;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s ease}
 .poster-shell.loaded img{opacity:1}
 .poster-fallback{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:space-between;padding:14px;background:var(--ink-soft);color:var(--paper-dim)}
 .poster-shell.loaded .poster-fallback{display:none}
 .poster-fallback .large{font-family:var(--serif);font-size:20px;font-weight:500;line-height:1.25;color:var(--paper)}
 .fallback-label,.fallback-note{font-size:10px;line-height:1.4;color:var(--muted)}
-.marker{position:absolute;z-index:2;top:8px;left:8px;padding:5px 8px;border:1px solid var(--line-strong);border-radius:2px;background:rgba(12,13,15,.86);color:var(--paper);font-size:10px;line-height:1.2}
+.marker{position:absolute;z-index:2;top:8px;left:8px;padding:5px 8px;border:1px solid rgba(255,255,255,.28);border-radius:2px;background:rgba(12,13,15,.82);color:#fff;font-size:10px;line-height:1.2}
 .external-mark{position:absolute;z-index:2;right:8px;bottom:8px;max-width:calc(100% - 16px);padding:6px 10px;border:1px solid rgba(255,255,255,.34);border-radius:999px;background:rgba(20,23,31,.78);box-shadow:inset 0 1px 0 rgba(255,255,255,.25),0 3px 10px rgba(0,0,0,.22);color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.6);font-family:var(--sans);font-size:10px;line-height:1.2;letter-spacing:.02em;white-space:nowrap;pointer-events:none}
 @supports ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){.external-mark{background:linear-gradient(145deg,rgba(255,255,255,.2),rgba(255,255,255,.05) 48%,rgba(255,255,255,.12)),rgba(18,21,29,.38);-webkit-backdrop-filter:blur(3px) saturate(150%);backdrop-filter:blur(3px) saturate(150%)}}
 .poster-shell:focus-visible{outline:2px solid var(--paper);outline-offset:3px}
@@ -462,7 +742,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
 .filmcard.lead .film-meta{font-size:12px}
 .channel-error{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 0 24px;color:var(--paper-dim);font-size:13px;line-height:1.7}
 .inline-retry{padding:8px 12px;border:1px solid var(--line-strong);border-radius:6px;background:transparent;color:var(--paper);font-size:12px}
-.inline-retry:hover{border-color:var(--paper);background:rgba(241,236,226,.06)}
+.inline-retry:hover{border-color:var(--paper);background:var(--mi-chip-hover)}
 .channel-empty{padding:4px 0 28px;color:var(--muted);font-size:13px;line-height:1.8}
 .below{padding:64px;border-top:1px solid var(--line);background:var(--ink)}
 .below-head{display:flex;align-items:baseline;justify-content:space-between;gap:24px;margin-bottom:20px}
@@ -484,7 +764,7 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
 .footer div{display:flex;align-items:center;gap:20px}
 .footer a,.footer button{padding:0;border:0;background:none;color:inherit;text-decoration:none}
 .footer a:hover,.footer button:hover{color:var(--paper)}
-.logout-error{margin:8px 0 0;color:#d99a8f;font-size:12px}
+.logout-error{margin:8px 0 0;color:var(--mi-negative);font-size:12px}
 .source-state{min-height:70vh;display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:14px;padding:96px 64px;background:var(--ink)}
 .source-state h1{font-family:var(--serif);font-size:clamp(34px,4vw,54px);font-weight:500;line-height:1.1;letter-spacing:-.02em;margin:0;color:var(--paper)}
 .source-state p{max-width:520px;margin:0;color:var(--paper-dim);font-size:14px;line-height:1.8}
@@ -495,10 +775,10 @@ onBeforeUnmount(()=>{unmounted=true;loadSequence++;loadController?.abort();lifeC
   .hero{display:block;min-height:0;padding:0 20px 32px;overflow:hidden}
   .hero .backdrop{top:0;bottom:auto;height:260px;object-position:58% 34%}
   .hero .image-fallback{inset:0 0 auto;height:260px;padding:20px;align-items:flex-start}
-  .hero-shade{background:linear-gradient(0deg,var(--ink) 0%,rgba(12,13,15,.55) 36%,rgba(12,13,15,.10) 100%)}
+  .hero-shade{background:var(--mi-hero-shade-mobile)}
   .hero-copy{padding:150px 0 0;max-width:none}
   .hero h1{font-size:clamp(34px,11vw,46px);max-width:calc(100% - 108px)}
-  .hero-poster{display:block;position:absolute;top:16px;right:20px;width:92px;max-width:92px;margin:0;box-shadow:0 12px 24px rgba(0,0,0,.32)}
+  .hero-poster{display:block;position:absolute;top:16px;right:20px;width:92px;max-width:92px;margin:0;box-shadow:var(--mi-shadow-md)}
   .hero-poster figcaption{display:none}
   .hero-index{display:none}
   .hero-meta{margin-top:14px;gap:8px 12px}

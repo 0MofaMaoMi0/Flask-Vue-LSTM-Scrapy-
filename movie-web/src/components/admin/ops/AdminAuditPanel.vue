@@ -63,18 +63,20 @@ async function loadBatchPage() {
   batchesBusy.value = true
   batchesError.value = ''
   try {
-    batches.value = await loadBatches({
+    const next = await loadBatches({
       limit: BATCH_LIMIT,
       offset: batchOffset.value,
       status: batchFilters.status || null,
       startedFrom: dayStart(batchFilters.from),
       startedTo: dayAfter(batchFilters.to),
     }, current.signal)
+    if (batchController !== current || current.signal.aborted) return
+    batches.value = next
   } catch (e) {
-    if (current.signal.aborted) return
+    if (batchController !== current || current.signal.aborted || (e as Error).name === 'AbortError') return
     batchesError.value = (e as Error).message
   } finally {
-    if (!current.signal.aborted) batchesBusy.value = false
+    if (batchController === current) batchesBusy.value = false
   }
 }
 
@@ -90,7 +92,7 @@ async function loadEventPage() {
   eventsBusy.value = true
   eventsError.value = ''
   try {
-    events.value = await loadEvents({
+    const next = await loadEvents({
       limit: EVENT_LIMIT,
       offset: eventOffset.value,
       from: dayStart(eventFilters.from),
@@ -98,11 +100,13 @@ async function loadEventPage() {
       kind: eventFilters.kind || null,
       movieId: rawMovie ? Number(rawMovie) : null,
     }, current.signal)
+    if (eventController !== current || current.signal.aborted) return
+    events.value = next
   } catch (e) {
-    if (current.signal.aborted) return
+    if (eventController !== current || current.signal.aborted || (e as Error).name === 'AbortError') return
     eventsError.value = (e as Error).message
   } finally {
-    if (!current.signal.aborted) eventsBusy.value = false
+    if (eventController === current) eventsBusy.value = false
   }
 }
 
@@ -213,10 +217,10 @@ const BATCH_CHOICES = BATCH_STATUSES.map(status => ({value: status, label: BATCH
       </div>
     </div>
 
-    <p v-if="batchesError" class="adm-errobox" role="alert">{{ batchesError }}
+    <p v-if="batchesError" class="adm-errobox" role="alert">{{ batchesError }}<span v-if="batches">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="loadBatchPage">重新读取</button>
     </p>
-    <p v-else-if="batchesBusy && !batches" class="adm-state" role="status">正在读取补采批次…</p>
+    <p v-if="batchesBusy && !batches" class="adm-state" role="status">正在读取补采批次…</p>
     <template v-else-if="batches">
       <p v-if="!batches.items.length" class="adm-empty">该过滤条件下没有补采批次记录。</p>
       <template v-else>
@@ -291,10 +295,10 @@ const BATCH_CHOICES = BATCH_STATUSES.map(status => ({value: status, label: BATCH
       </div>
     </div>
 
-    <p v-if="eventsError" class="adm-errobox" role="alert">{{ eventsError }}
+    <p v-if="eventsError" class="adm-errobox" role="alert">{{ eventsError }}<span v-if="events">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="loadEventPage">重新读取</button>
     </p>
-    <p v-else-if="eventsBusy && !events" class="adm-state" role="status">正在读取行为事件…</p>
+    <p v-if="eventsBusy && !events" class="adm-state" role="status">正在读取行为事件…</p>
     <template v-else-if="events">
       <p v-if="!events.items.length" class="adm-empty">该过滤条件下没有行为事件。</p>
       <template v-else>
@@ -342,20 +346,20 @@ const BATCH_CHOICES = BATCH_STATUSES.map(status => ({value: status, label: BATCH
 <style scoped>
 .ops-toolbar-actions{margin:0 0 2px}
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
-.ops-missing{display:block;margin-top:4px;color:#8f8a80;font-size:10px;line-height:1.5}
-.ops-code{display:inline-block;margin:0 6px 4px 0;padding:1px 6px;border:1px solid rgba(232,160,148,.3);border-radius:4px;color:#e0b1a7;font-size:10.5px}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
+.ops-missing{display:block;margin-top:4px;color:var(--mi-text-muted);font-size:10px;line-height:1.5}
+.ops-code{display:inline-block;margin:0 6px 4px 0;padding:1px 6px;border:1px solid var(--mi-negative-border);border-radius:4px;color:var(--mi-negative);font-size:10.5px}
 .ops-batch-table{min-width:900px}
-.ops-link{border:0;background:transparent;padding:0;font:inherit;color:#e6dfd3;text-align:left;cursor:pointer;text-underline-offset:3px}
-.ops-link:hover{color:#d9c7f3;text-decoration:underline}
-.ops-embed{margin-top:26px;border-top:1px solid rgba(241,236,226,.10);padding-top:18px}
+.ops-link{border:0;background:transparent;padding:0;font:inherit;color:var(--mi-text);text-align:left;cursor:pointer;text-underline-offset:3px}
+.ops-link:hover{color:var(--mi-accent-text);text-decoration:underline}
+.ops-embed{margin-top:26px;border-top:1px solid var(--mi-border);padding-top:18px}
 .ops-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-audit :is(.ops-status, .ops-missing, .ops-code, .ops-inline-btn){font-size:11px}
-.ops-audit :is(button,input,select,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-audit :is(button,input,select,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 </style>

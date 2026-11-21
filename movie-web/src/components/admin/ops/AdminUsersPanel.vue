@@ -49,6 +49,15 @@ const accounts = ref<AccountRow[]>([])
 const accountsError = ref('')
 const accountsBusy = ref(false)
 const accountsOpen = ref(false)
+const ACCOUNTS_PAGE = 25
+const accountOffset = ref(0)
+const pagedAccounts = computed(() => accounts.value.slice(accountOffset.value, accountOffset.value + ACCOUNTS_PAGE))
+
+function stepAccounts(delta: number) {
+  const next = accountOffset.value + delta
+  if (next < 0 || next >= accounts.value.length) return
+  accountOffset.value = next
+}
 
 async function load() {
   const current = new AbortController()
@@ -59,9 +68,9 @@ async function load() {
   error.value = ''
   try {
     const result = await loadUsersAnalytics(activeDays.value, kind.value || null, current.signal)
-    if (mine === ticket) data.value = result
+    if (mine === ticket && !current.signal.aborted) data.value = result
   } catch (e) {
-    if (current.signal.aborted || mine !== ticket) return
+    if (current.signal.aborted || mine !== ticket || (e as Error).name === 'AbortError') return
     error.value = (e as Error).message
   } finally {
     if (mine === ticket) busy.value = false
@@ -78,13 +87,14 @@ async function loadAccounts() {
   try {
     const response = await fetch('/api/admin/users', {credentials: 'same-origin', signal: opsSignal(current.signal)})
     const body = await response.json().catch(() => null)
-    if (mine !== accountsTicket) return
+    if (mine !== accountsTicket || current.signal.aborted) return
     if (!response.ok || !body || body.code !== 'OK' || !body.data) {
-      throw new Error(response.status === 401 ? '登录已失效，请重新登录。' : '账号清单暂时无法读取。')
+      throw new Error(response.status === 401 ? '登录已失效，请重新登录。' : (response.status === 503 || body?.code === 'DATA_UNAVAILABLE') ? '账号统计来源暂时不可用（DATA_UNAVAILABLE），请稍后重试。' : '账号清单暂时无法读取。')
     }
     accounts.value = Array.isArray(body.data.items) ? body.data.items : []
+    if (accountOffset.value >= accounts.value.length) accountOffset.value = 0
   } catch (e) {
-    if (current.signal.aborted || mine !== accountsTicket) return
+    if (current.signal.aborted || mine !== accountsTicket || (e as Error).name === 'AbortError') return
     accountsError.value = (e as Error).message
   } finally {
     if (mine === accountsTicket) accountsBusy.value = false
@@ -193,9 +203,9 @@ const dimensionTables = computed(() => {
 const boardGroups = computed(() => {
   const boards = data.value?.boards
   return [
-    {key: 'events', title: '窗口事件最多', hint: '含设置与撤销的行为事件数，不等于当前收藏人数', rows: boards?.most_events || []},
-    {key: 'favorite', title: '当前收藏人数最多', hint: '当前状态快照，按去重账户数', rows: boards?.most_favorited || []},
-    {key: 'want', title: '当前想看人数最多', hint: '当前状态快照，按去重账户数', rows: boards?.most_wanted || []},
+    {key: 'events', title: '窗口事件最多', hint: '含设置与撤销的行为事件数，不等于当前收藏人数', rows: (boards?.most_events || []).slice(0, 10)},
+    {key: 'favorite', title: '当前收藏人数最多', hint: '当前状态快照，按去重账户数', rows: (boards?.most_favorited || []).slice(0, 10)},
+    {key: 'want', title: '当前想看人数最多', hint: '当前状态快照，按去重账户数', rows: (boards?.most_wanted || []).slice(0, 10)},
   ]
 })
 
@@ -245,10 +255,10 @@ function openMovie(id: number | null | undefined) {
       </p>
     </div>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }}
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="data">（已保留上一份可用快照）</span>
       <button type="button" class="adm-btn ops-inline-btn" @click="refresh">重新读取</button>
     </p>
-    <p v-else-if="busy && !data" class="adm-state" role="status">正在读取用户与行为统计…</p>
+    <p v-if="busy && !data" class="adm-state" role="status">正在读取用户与行为统计…</p>
 
     <template v-else-if="data">
       <div class="adm-kpis">
@@ -394,26 +404,36 @@ function openMovie(id: number | null | undefined) {
 
       <details class="ops-disclosure ops-accounts" @toggle="onAccountsToggle">
         <summary>只读账号清单 <small>{{ accounts.length ? accounts.length + ' 个账户' : '按需加载' }}</small></summary>
-        <p v-if="accountsError" class="adm-errobox" role="alert">{{ accountsError }}</p>
-        <p v-else-if="accountsBusy && !accounts.length" class="adm-state" role="status">正在读取账号清单…</p>
-        <div v-else class="adm-tablewrap">
-          <table>
-            <caption class="ops-sr">管理员授权范围内的账号聚合视图</caption>
-            <thead>
-              <tr><th scope="col">账号</th><th scope="col">状态</th><th scope="col" class="num">状态行</th><th scope="col" class="num">已看</th><th scope="col">最近事件</th><th scope="col">注册时间</th></tr>
-            </thead>
-            <tbody>
-              <tr v-for="row in accounts" :key="row.id">
-                <td>{{ row.username }}</td>
-                <td>{{ row.status }}</td>
-                <td class="num">{{ row.states }}</td>
-                <td class="num">{{ row.watched }}</td>
-                <td>{{ fmtUtc(row.last_event) }}</td>
-                <td>{{ fmtUtc(row.created_at) }}</td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+        <p v-if="accountsError" class="adm-errobox" role="alert">{{ accountsError }}<span v-if="accounts.length">（已保留上一份可用快照）</span>
+          <button type="button" class="adm-btn ops-inline-btn" @click="loadAccounts">重新读取</button>
+        </p>
+        <p v-if="accountsBusy && !accounts.length" class="adm-state" role="status">正在读取账号清单…</p>
+        <template v-else-if="accounts.length">
+          <div class="adm-tablewrap">
+            <table>
+              <caption class="ops-sr">管理员授权范围内的账号聚合视图</caption>
+              <thead>
+                <tr><th scope="col">账号</th><th scope="col">状态</th><th scope="col" class="num">状态行</th><th scope="col" class="num">已看</th><th scope="col">最近事件</th><th scope="col">注册时间</th></tr>
+              </thead>
+              <tbody>
+                <tr v-for="row in pagedAccounts" :key="row.id">
+                  <td>{{ row.username }}</td>
+                  <td>{{ row.status }}</td>
+                  <td class="num">{{ row.states }}</td>
+                  <td class="num">{{ row.watched }}</td>
+                  <td>{{ fmtUtc(row.last_event) }}</td>
+                  <td>{{ fmtUtc(row.created_at) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div v-if="accounts.length > ACCOUNTS_PAGE" class="adm-pager">
+            <button type="button" class="adm-btn" :disabled="accountOffset === 0 || accountsBusy" @click="stepAccounts(-ACCOUNTS_PAGE)">上一页</button>
+            <span>第 {{ accountOffset + 1 }}–{{ accountOffset + pagedAccounts.length }} 个 / 共 {{ fmtInt(accounts.length) }} 个账户</span>
+            <button type="button" class="adm-btn" :disabled="accountOffset + ACCOUNTS_PAGE >= accounts.length || accountsBusy" @click="stepAccounts(ACCOUNTS_PAGE)">下一页</button>
+          </div>
+        </template>
+        <p v-else-if="!accountsError" class="adm-empty">当前没有可展示的账户记录。</p>
         <p class="adm-note">仅返回账号聚合字段，不包含行为载荷、评分明细或私人内容。</p>
       </details>
     </template>
@@ -423,58 +443,58 @@ function openMovie(id: number | null | undefined) {
 </template>
 
 <style scoped>
-.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:#8f8a80;font-size:11px}
-.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid rgba(241,236,226,.16);border-radius:999px;padding:2px 8px;font-size:10.5px;color:#a9a294;white-space:nowrap}
+.ops-meta{display:flex;flex-wrap:wrap;align-items:center;gap:8px 12px;margin:0;color:var(--mi-text-muted);font-size:11px}
+.ops-status{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--mi-border);border-radius:999px;padding:2px 8px;font-size:10.5px;color:var(--mi-text-secondary);white-space:nowrap}
 .ops-status::before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor;opacity:.9}
-.ops-status.tone-ok{color:#a9c4ae;border-color:rgba(156,191,166,.32)}
-.ops-status.tone-warn{color:#dcc49b;border-color:rgba(200,164,106,.32)}
-.ops-status.tone-bad{color:#e0a79c;border-color:rgba(232,160,148,.34)}
-.ops-status.tone-muted{color:#a9a294}
+.ops-status.tone-ok{color:var(--mi-positive);border-color:var(--mi-positive-border)}
+.ops-status.tone-warn{color:var(--mi-warning);border-color:var(--mi-accent-border)}
+.ops-status.tone-bad{color:var(--mi-negative);border-color:var(--mi-negative-border)}
+.ops-status.tone-muted{color:var(--mi-text-secondary)}
 .ops-inline-btn{margin-left:10px;padding:3px 9px;font-size:11px}
-.ops-states{border:1px solid rgba(241,236,226,.10);border-radius:10px;padding:12px 14px;margin:0 0 6px;background:#191a1f}
-.ops-states-title{margin:0 0 10px;font-size:11.5px;color:#cbb38f}
-.ops-states-title span{color:#8f8a80;margin-left:8px;font-size:11px}
+.ops-states{border:1px solid var(--mi-border);border-radius:10px;padding:12px 14px;margin:0 0 6px;background:var(--mi-surface-warm)}
+.ops-states-title{margin:0 0 10px;font-size:11.5px;color:var(--mi-accent-text)}
+.ops-states-title span{color:var(--mi-text-muted);margin-left:8px;font-size:11px}
 .ops-state-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:8px}
-.ops-state-grid div{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid rgba(241,236,226,.08);border-radius:8px;background:#141519}
-.ops-state-grid span{color:#a9a294;font-size:10.5px}
-.ops-state-grid b{font-size:17px;font-weight:500;color:#f0eadf;font-variant-numeric:tabular-nums}
+.ops-state-grid div{display:flex;flex-direction:column;gap:4px;padding:8px 10px;border:1px solid var(--mi-border-subtle);border-radius:8px;background:var(--mi-surface)}
+.ops-state-grid span{color:var(--mi-text-secondary);font-size:10.5px}
+.ops-state-grid b{font-size:17px;font-weight:500;color:var(--mi-text);font-variant-numeric:tabular-nums}
 .ops-trends{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 4px}
-.ops-trend{margin:0;border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:10px 12px 6px;min-width:0}
-.ops-trend figcaption{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 6px;font-size:11px;color:#a9a294}
-.ops-trend figcaption b{color:#e9e3d7;font-weight:500;font-size:14px;font-variant-numeric:tabular-nums}
+.ops-trend{margin:0;border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:10px 12px 6px;min-width:0}
+.ops-trend figcaption{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:0 0 6px;font-size:11px;color:var(--mi-text-secondary)}
+.ops-trend figcaption b{color:var(--mi-text);font-weight:500;font-size:14px;font-variant-numeric:tabular-nums}
 .ops-chart{height:142px;min-width:0}
 .ops-dims{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px 18px;margin:0 0 4px}
 .ops-dim{min-width:0}
-.ops-dim h4{margin:0 0 8px;font-size:11.5px;font-weight:500;color:#c9c2b8;border-bottom:1px solid rgba(241,236,226,.08);padding-bottom:6px}
-.ops-dim .adm-bar small{color:#8f8a80;font-size:10px;margin-left:2px}
-.ops-trunc{margin:8px 0 0;color:#8f8a80;font-size:10.5px}
+.ops-dim h4{margin:0 0 8px;font-size:11.5px;font-weight:500;color:var(--mi-text-soft);border-bottom:1px solid var(--mi-border-subtle);padding-bottom:6px}
+.ops-dim .adm-bar small{color:var(--mi-text-muted);font-size:10px;margin-left:2px}
+.ops-trunc{margin:8px 0 0;color:var(--mi-text-muted);font-size:10.5px}
 .ops-boards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}
-.ops-board{border:1px solid rgba(241,236,226,.10);border-radius:10px;background:#191a1f;padding:12px 14px;min-width:0}
-.ops-board header h4{margin:0 0 3px;font-size:12.5px;font-weight:500;color:#efe9de}
-.ops-board header span{display:block;color:#8f8a80;font-size:10.5px;line-height:1.6;margin-bottom:8px}
+.ops-board{border:1px solid var(--mi-border);border-radius:10px;background:var(--mi-surface-warm);padding:12px 14px;min-width:0}
+.ops-board header h4{margin:0 0 3px;font-size:12.5px;font-weight:500;color:var(--mi-text)}
+.ops-board header span{display:block;color:var(--mi-text-muted);font-size:10.5px;line-height:1.6;margin-bottom:8px}
 .ops-board ol{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:2px}
-.ops-board li{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid rgba(241,236,226,.06)}
+.ops-board li{display:grid;grid-template-columns:16px minmax(0,1fr) auto;align-items:baseline;gap:8px;padding:5px 0;border-bottom:1px solid var(--mi-border-subtle)}
 .ops-board li:last-child{border-bottom:0}
-.ops-rank{color:#6f6a62;font-size:10.5px;font-variant-numeric:tabular-nums}
-.ops-movie{border:0;background:transparent;padding:0;font:inherit;font-size:12px;color:#e6dfd3;text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ops-movie:hover{color:#d9c7f3;text-decoration:underline;text-underline-offset:3px}
-.ops-board li > b{color:#dcc49b;font-weight:500;font-size:12px;font-variant-numeric:tabular-nums}
-.ops-disclosure{margin-top:18px;border-top:1px solid rgba(241,236,226,.08);padding-top:12px}
-.ops-disclosure summary{cursor:pointer;font-size:12px;color:#c9c2b8}
-.ops-disclosure summary small{color:#8f8a80;font-size:10.5px;margin-left:6px}
+.ops-rank{color:var(--mi-text-muted);font-size:10.5px;font-variant-numeric:tabular-nums}
+.ops-movie{border:0;background:transparent;padding:0;font:inherit;font-size:12px;color:var(--mi-text);text-align:left;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ops-movie:hover{color:var(--mi-accent-text);text-decoration:underline;text-underline-offset:3px}
+.ops-board li > b{color:var(--mi-accent-text);font-weight:500;font-size:12px;font-variant-numeric:tabular-nums}
+.ops-disclosure{margin-top:18px;border-top:1px solid var(--mi-border-subtle);padding-top:12px}
+.ops-disclosure summary{cursor:pointer;font-size:12px;color:var(--mi-text-soft)}
+.ops-disclosure summary small{color:var(--mi-text-muted);font-size:10.5px;margin-left:6px}
 .ops-defs{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:6px 14px;margin:12px 0 0;font-size:11.5px;line-height:1.7}
-.ops-defs dt{color:#a9a294}
-.ops-defs dd{margin:0;color:#c9c2b8}
+.ops-defs dt{color:var(--mi-text-secondary)}
+.ops-defs dd{margin:0;color:var(--mi-text-soft)}
 .ops-sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap}
 /* Legibility floor: functional micro-text stays at 11px or above. */
 .ops-users :is(.ops-status, .ops-meta, .ops-state-grid span, .ops-states-title span, .ops-rank,
   .ops-board header span, .ops-trunc, .ops-disclosure summary small, .ops-dim .adm-bar small,
   .ops-inline-btn) {font-size: 11px}
 .ops-users .ops-states-title {font-size: 12px}
-.ops-users .ops-rank {color: #9a938a}
+.ops-users .ops-rank {color: var(--mi-text-muted)}
 .ops-users .ops-defs {font-size: 12px}
 .ops-users .ops-meta {font-size: 11.5px}
-.ops-users :is(button,select,summary):focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
+.ops-users :is(button,select,summary):focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
 @media (max-width: 1100px){
   .ops-trends,.ops-dims,.ops-boards{grid-template-columns:minmax(0,1fr)}
 }

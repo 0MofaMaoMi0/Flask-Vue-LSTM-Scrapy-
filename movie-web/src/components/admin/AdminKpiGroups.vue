@@ -50,7 +50,7 @@ const props = defineProps<{
   analyticsError?: string
   days: number
 }>()
-const emit = defineEmits<{navigate: [tab: string]}>()
+const emit = defineEmits<{navigate: [tab: string]; retryAnalytics: []}>()
 
 const snapshot = computed(() => props.dashboard ? formatUtc(props.dashboard.as_of) : '—')
 const analyticsSnapshot = computed(() => props.analytics ? formatUtc(props.analytics.snapshot.latest_fetched_at) : '—')
@@ -70,7 +70,9 @@ const unmappedMovies = computed(() => {
 const cacheLine = computed(() => {
   const cache = props.analytics?.scope.cache
   if (!cache) return ''
-  return `文档缓存${cache.hit ? '命中' : '冷载'} · 载入 ${formatUtc(cache.loaded_at)} · 水位 ${formatUtc(cache.watermark?.max_updated_at || cache.watermark?.max_fetched_at)}`
+  const status = String(cache.status || '').toUpperCase()
+  const modeLabel = status === 'WARMING' ? '预热中' : status === 'STALE' || status === 'REFRESHING' ? '旧快照续刷（SWR）' : status === 'DEGRADED' ? '降级快照' : cache.hit ? '命中' : '冷载'
+  return `文档缓存${modeLabel} · 载入 ${formatUtc(cache.loaded_at)} · 水位 ${formatUtc(cache.watermark?.max_updated_at || cache.watermark?.max_fetched_at)}`
 })
 const dashboardRecommendation = computed<RecommendationBlock | null>(() => {
   const block = props.dashboard?.recommendation
@@ -89,12 +91,24 @@ const recommendationNote = computed(() => {
 })
 const countryCount = computed(() => props.analytics?.countries?.total
   ?? props.dashboard?.catalog.countries?.length ?? null)
+const analyticsErrorText = computed(() => (props.analyticsError || '未知原因').replace(/。+$/, ''))
 const posterCoverage = computed(() => {
   const coverage = props.analytics?.coverage?.assets
   const movies = props.analytics?.coverage?.movies
-  if (!coverage || !movies) return null
-  const posters = coverage.poster
-  return typeof posters === 'number' ? posters / movies : null
+  if (coverage && movies) {
+    const posters = coverage.poster
+    return typeof posters === 'number' ? posters / movies : null
+  }
+  const fallbackPosters = props.dashboard?.catalog?.quality?.posters
+  const total = props.dashboard?.catalog?.total
+  return typeof fallbackPosters === 'number' && typeof total === 'number' && total > 0
+    ? fallbackPosters / total
+    : null
+})
+const posterCoverageFromFallback = computed(() => {
+  const coverage = props.analytics?.coverage?.assets
+  const movies = props.analytics?.coverage?.movies
+  return !(coverage && movies) && posterCoverage.value != null
 })
 const knownTokens = computed(() => {
   const ai = props.dashboard?.ai
@@ -128,8 +142,9 @@ const systemGenerated = computed(() => formatUtc(props.dashboard?.system?.genera
 
 <template>
   <section class="admin-kpi-groups" aria-label="管理员驾驶舱关键指标分组">
-    <div v-if="analyticsStatus === 'error'" class="adm-warnbox" role="status">
-      资源分析接口暂不可用：{{ analyticsError || '未知原因' }}。本页保留基础快照，地图退回旧国家统计口径。
+    <div v-if="analyticsStatus === 'error'" class="adm-warnbox kpi-warn" role="status">
+      <span>资源分析接口暂不可用：{{ analyticsErrorText }}。本页保留基础快照，地图退回旧国家统计口径。</span>
+      <button type="button" class="group-link" @click="emit('retryAnalytics')">重试资源分析</button>
     </div>
 
     <article class="kpi-group">
@@ -152,7 +167,7 @@ const systemGenerated = computed(() => formatUtc(props.dashboard?.system?.genera
         </div>
         <div>
           <span>海报资料覆盖</span><strong>{{ posterCoverage == null ? '暂不可用' : fmtPercent(posterCoverage) }}</strong>
-          <p class="kpi-source">已关联影片资料覆盖</p><p class="kpi-time">按有海报影片计</p>
+          <p class="kpi-source">{{ posterCoverageFromFallback ? '全库基础快照' : '已关联影片资料覆盖' }}</p><p class="kpi-time">按有海报影片计</p>
         </div>
       </div>
       <p class="scope-line">
@@ -269,25 +284,26 @@ const systemGenerated = computed(() => formatUtc(props.dashboard?.system?.genera
 
 <style scoped>
 .admin-kpi-groups{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:14px;margin:0 0 18px;font-variant-numeric:tabular-nums}
-.kpi-group{grid-column:span 2;border:1px solid #ffffff10;border-radius:12px;background:#11111d;padding:15px 17px;min-width:0;display:flex;flex-direction:column}
+.kpi-warn{grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.kpi-group{grid-column:span 2;border:1px solid var(--mi-border);border-radius:12px;background:var(--mi-surface);padding:15px 17px;min-width:0;display:flex;flex-direction:column}
 .kpi-group.wide{grid-column:span 3}
 .kpi-group header{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:12px;flex-wrap:wrap}
-.kpi-group h2{font-size:13.5px;font-weight:600;margin:0;color:#e6dff0;letter-spacing:0}
-.kpi-group header p{font-size:11px;color:#9e8fae;margin:4px 0 0;line-height:1.55}
-.group-link{border:0;background:transparent;color:#c1a7ef;font:inherit;font-size:11px;cursor:pointer;padding:2px 0;white-space:nowrap}
-.group-link:hover{color:#fff;text-decoration:underline;text-underline-offset:3px}
+.kpi-group h2{font-size:13.5px;font-weight:600;margin:0;color:var(--mi-text);letter-spacing:0}
+.kpi-group header p{font-size:11px;color:var(--mi-text-muted);margin:4px 0 0;line-height:1.55}
+.group-link{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:11px;cursor:pointer;padding:2px 0;white-space:nowrap}
+.group-link:hover{color:var(--mi-text);text-decoration:underline;text-underline-offset:3px}
 .kpi-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px 14px;flex:1}
 .kpi-group.wide .kpi-grid{grid-template-columns:repeat(4,minmax(0,1fr))}
 .kpi-grid>div{min-width:0}
-.kpi-grid span{display:block;font-size:11px;color:#a99aba;margin-bottom:5px;line-height:1.35}
-.kpi-grid strong{display:block;font-size:clamp(18px,1.55vw,24px);font-weight:600;letter-spacing:-.02em;color:#ede8f5;line-height:1.2;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
-.kpi-grid strong small{font-size:11px;color:#aa9dbe;font-weight:400;margin-left:3px;letter-spacing:0}
+.kpi-grid span{display:block;font-size:11px;color:var(--mi-text-secondary);margin-bottom:5px;line-height:1.35}
+.kpi-grid strong{display:block;font-size:clamp(18px,1.55vw,24px);font-weight:600;letter-spacing:-.02em;color:var(--mi-text);line-height:1.2;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.kpi-grid strong small{font-size:11px;color:var(--mi-text-muted);font-weight:400;margin-left:3px;letter-spacing:0}
 .kpi-grid strong.small-value{font-size:12.5px;font-weight:500;line-height:1.45;word-break:keep-all}
-.kpi-source,.kpi-time{font-size:11px;color:#9287a4;margin:0;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi-source,.kpi-time{font-size:11px;color:var(--mi-text-muted);margin:0;line-height:1.5;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .kpi-source{margin-top:6px}
-.kpi-time{color:#867c98;margin-top:2px}
-.scope-line{margin:12px 0 0;font-size:11px;line-height:1.65;color:#a99aba;border-top:1px solid #ffffff0e;padding-top:8px}
-.cache-line{margin:5px 0 0;font-size:11px;line-height:1.55;color:#9287a4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi-time{color:var(--mi-text-subtle);margin-top:2px}
+.scope-line{margin:12px 0 0;font-size:11px;line-height:1.65;color:var(--mi-text-secondary);border-top:1px solid var(--mi-border-subtle);padding-top:8px}
+.cache-line{margin:5px 0 0;font-size:11px;line-height:1.55;color:var(--mi-text-muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media(max-width:1280px){
  .admin-kpi-groups{grid-template-columns:repeat(2,minmax(0,1fr))}
  .kpi-group,.kpi-group.wide{grid-column:span 1}

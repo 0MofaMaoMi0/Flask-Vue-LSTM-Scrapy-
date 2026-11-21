@@ -140,7 +140,7 @@ async function load() {
   controller.value = current
   busy.value = true; error.value = ''
   try {
-    payload.value = await loadAnalytics({
+    const next = await loadAnalytics({
       country: countryFilter.value || undefined,
       genre: genreInput.value.trim() || undefined,
       decade: decadeInput.value || undefined,
@@ -151,8 +151,12 @@ async function load() {
       company: companyFilter.value?.id ?? null,
       top: 10, limit: PAGE, offset: offset.value, countryLimit: 200,
     }, current.signal)
+    if (controller.value !== current || current.signal.aborted) return
+    payload.value = next
   } catch (e) {
-    if ((e as Error).name !== 'AbortError') error.value = (e as Error).message
+    if (controller.value === current && !current.signal.aborted && (e as Error).name !== 'AbortError') {
+      error.value = (e as Error).message
+    }
   } finally {
     if (controller.value === current) busy.value = false
   }
@@ -202,8 +206,10 @@ defineExpose({refresh: () => load()})
       <p class="adm-note">分类维度可下钻：点击下方类型/年代条目会写入筛选并刷新明细。点击影片进入既有电影详情。</p>
     </div>
 
-    <p v-if="error" class="adm-errobox" role="alert">{{ error }} <button type="button" class="link-btn" @click="load">重试</button></p>
+    <p v-if="error" class="adm-errobox" role="alert">{{ error }}<span v-if="payload">（已保留上一份可用快照）</span> <button type="button" class="link-btn" @click="load">重试</button></p>
     <p v-else-if="busy && !payload" class="adm-state">正在读取全库资源结构…</p>
+    <p v-if="payload?.scope.catalog?.status === 'UNAVAILABLE'" class="adm-warnbox" role="status">在架目录计数暂不可用；当前按已载入的 TMDB 补采快照展示。</p>
+    <p v-if="payload?.scope.repository?.truncated" class="adm-warnbox" role="status">文档库规模较大，当前统计按受控容量上限（{{ fmtNumber(payload.scope.repository.documents_loaded) }} / {{ fmtNumber(payload.scope.repository.cap) }} 份）截断计算。</p>
 
     <template v-if="assetGlobal">
       <section class="adm-panel">
@@ -365,7 +371,7 @@ defineExpose({refresh: () => load()})
           <table>
             <thead><tr><th>片名</th><th>年份</th><th>类型</th><th>制作国家</th><th class="num">TMDB 评分</th><th class="num">票数</th><th class="num">热度</th><th>资料缺失</th></tr></thead>
             <tbody>
-              <tr v-for="movie in details?.items || []" :key="movie.movie_id">
+              <tr v-for="movie in (details?.items || []).slice(0, PAGE)" :key="movie.movie_id">
                 <td><button type="button" class="link-btn" @click="emit('openMovie', movie.movie_id)">{{ movie.title }}</button><br><small>#{{ movie.movie_id }} · TMDB {{ movie.tmdb_id ?? '—' }}</small></td>
                 <td>{{ movie.release_year || '—' }}</td>
                 <td><small>{{ movie.genres.slice(0, 3).join(' / ') || '—' }}</small></td>
@@ -398,27 +404,27 @@ defineExpose({refresh: () => load()})
 <style scoped>
 .assets-view{min-width:0}
 .assets-head{display:flex;justify-content:space-between;align-items:flex-end;gap:16px;flex-wrap:wrap;margin:0 0 14px}
-.assets-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:#f3eee4}
-.assets-meta{margin:0;font-size:11px;color:#8f8a80;line-height:1.7}
+.assets-head h2{margin:2px 0 4px;font-family:var(--serif);font-size:23px;font-weight:500;color:var(--mi-text-ivory)}
+.assets-meta{margin:0;font-size:11px;color:var(--mi-text-muted);line-height:1.7}
 .filter-panel{padding:15px 17px}
 .asset-bars{display:flex;flex-direction:column;gap:8px;margin-top:12px}
-.asset-row{display:grid;grid-template-columns:70px 1fr 64px;align-items:center;gap:10px;font-size:11.5px;color:#c9c2b8}
-.asset-row progress{width:100%;height:5px;border:0;border-radius:3px;overflow:hidden;background:#242030;accent-color:#9e81c6}
-.asset-row progress::-webkit-progress-bar{background:#242030}
-.asset-row progress::-webkit-progress-value{background:#9e81c6}
-.asset-row b{font-weight:500;color:#e6dff0;text-align:right}
+.asset-row{display:grid;grid-template-columns:70px 1fr 64px;align-items:center;gap:10px;font-size:11.5px;color:var(--mi-text-soft)}
+.asset-row progress{width:100%;height:5px;border:0;border-radius:3px;overflow:hidden;background:var(--mi-bar-track);accent-color:var(--mi-bar-fill)}
+.asset-row progress::-webkit-progress-bar{background:var(--mi-bar-track)}
+.asset-row progress::-webkit-progress-value{background:var(--mi-bar-fill)}
+.asset-row b{font-weight:500;color:var(--mi-text);text-align:right}
 .adm-bar.clickable{cursor:pointer;border-radius:5px;padding:2px 4px;margin:-2px -4px;transition:background-color .15s ease}
-.adm-bar.clickable:hover{background:rgba(175,145,231,.10)}
-.adm-bar.clickable:focus-visible{outline:2px solid #c8a46a;outline-offset:2px}
-.mini-title{margin:0 0 6px;font-size:11px;color:#a9a294;letter-spacing:.04em}
+.adm-bar.clickable:hover{background:var(--mi-chip-hover)}
+.adm-bar.clickable:focus-visible{outline:2px solid var(--mi-accent);outline-offset:2px}
+.mini-title{margin:0 0 6px;font-size:11px;color:var(--mi-text-secondary);letter-spacing:.04em}
 .adm-two-col.compact{gap:12px}
 .adm-poster-row.one{grid-template-columns:repeat(auto-fill,minmax(112px,148px))}
-.link-btn{border:0;background:transparent;color:#dcc49b;font:inherit;font-size:12px;cursor:pointer;padding:0;text-align:left;text-decoration:underline;text-underline-offset:2px}
-.link-btn:hover{color:#fff}
-.block-meta{margin:0 0 7px;font-size:11px;color:#8f83a0;line-height:1.5}
-.missing-tag{display:inline-block;font-size:11px;line-height:1.5;border-radius:3px;padding:0 4px;margin:0 3px 2px 0;background:#22202a;color:#b7a9c6;white-space:nowrap}
-.missing-tag.reason-empty{color:#9b9388;background:#20201f}
-.missing-tag.reason-failed{color:#e7b2a8;background:#2d2020}
-.missing-tag.reason-missing,.missing-tag.reason-not_fetched{color:#dcc49b;background:#2a2419}
-.missing-ok{color:#8f8a80;font-size:11px}
+.link-btn{border:0;background:transparent;color:var(--mi-accent-text);font:inherit;font-size:12px;cursor:pointer;padding:0;text-align:left;text-decoration:underline;text-underline-offset:2px}
+.link-btn:hover{color:var(--mi-text)}
+.block-meta{margin:0 0 7px;font-size:11px;color:var(--mi-text-muted);line-height:1.5}
+.missing-tag{display:inline-block;font-size:11px;line-height:1.5;border-radius:3px;padding:0 4px;margin:0 3px 2px 0;background:var(--mi-surface-raised);color:var(--mi-text-secondary);white-space:nowrap}
+.missing-tag.reason-empty{color:var(--mi-text-muted);background:var(--mi-surface-raised)}
+.missing-tag.reason-failed{color:var(--mi-negative);background:var(--mi-negative-soft)}
+.missing-tag.reason-missing,.missing-tag.reason-not_fetched{color:var(--mi-warning);background:var(--mi-warning-soft)}
+.missing-ok{color:var(--mi-text-muted);font-size:11px}
 </style>

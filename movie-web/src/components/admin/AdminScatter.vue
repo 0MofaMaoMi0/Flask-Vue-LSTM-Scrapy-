@@ -4,6 +4,7 @@ import {init, use, type EChartsType} from 'echarts/core'
 import {ScatterChart} from 'echarts/charts'
 import {AriaComponent, GridComponent, TooltipComponent} from 'echarts/components'
 import {CanvasRenderer} from 'echarts/renderers'
+import {isLightTheme, siteTheme} from '../../services/theme'
 
 use([ScatterChart, AriaComponent, GridComponent, TooltipComponent, CanvasRenderer])
 
@@ -14,6 +15,10 @@ let chart: EChartsType | undefined, observer: ResizeObserver | undefined, frame 
 
 function draw() {
   if (!chart || !host.value) return
+  const light = isLightTheme.value
+  const labelInk = light ? '#000000' : '#FFFFFF'
+  const gridLine = light ? 'rgba(31,27,22,.08)' : '#ffffff08'
+  const axisLine = light ? 'rgba(31,27,22,.18)' : '#ffffff15'
   chart.setOption({
     animation: false,
     backgroundColor: 'transparent',
@@ -26,24 +31,27 @@ function draw() {
         if (!point) return ''
         return `${point.label}\n${props.xName}: ${point.x}\n${props.yName}: ${point.y}${point.meta ? '\n' + point.meta : ''}`
       },
-      backgroundColor: '#1c192b', borderColor: '#6d5a8c', borderWidth: 1,
-      padding: [8, 11], textStyle: {color: '#f2edf9', fontSize: 11, lineHeight: 18},
+      backgroundColor: light ? '#FFFFFF' : '#1c192b',
+      borderColor: light ? 'rgba(31,27,22,.16)' : '#6d5a8c',
+      borderWidth: 1,
+      padding: [8, 11],
+      textStyle: {color: light ? '#000000' : '#FFFFFF', fontSize: 11, lineHeight: 18},
     },
     xAxis: {
       type: 'value', name: props.xName, nameLocation: 'middle', nameGap: 20,
-      nameTextStyle: {color: '#a9a1bc', fontSize: 10},
-      min: 0, max: 10, splitLine: {lineStyle: {color: '#ffffff08'}},
-      axisLabel: {color: '#a9a1bc', fontSize: 10}, axisLine: {lineStyle: {color: '#ffffff15'}},
+      nameTextStyle: {color: labelInk, fontSize: 10},
+      min: 0, max: 10, splitLine: {lineStyle: {color: gridLine}},
+      axisLabel: {color: labelInk, fontSize: 10}, axisLine: {lineStyle: {color: axisLine}},
     },
     yAxis: {
-      type: 'value', name: props.yName, nameTextStyle: {color: '#a9a1bc', fontSize: 10},
-      splitLine: {lineStyle: {color: '#ffffff08'}},
-      axisLabel: {color: '#a9a1bc', fontSize: 10}, axisLine: {lineStyle: {color: '#ffffff15'}},
+      type: 'value', name: props.yName, nameTextStyle: {color: labelInk, fontSize: 10},
+      splitLine: {lineStyle: {color: gridLine}},
+      axisLabel: {color: labelInk, fontSize: 10}, axisLine: {lineStyle: {color: axisLine}},
     },
     series: [{
       type: 'scatter', symbolSize: 7,
-      itemStyle: {color: 'rgba(185,160,244,.72)', borderColor: '#cbb3f3', borderWidth: .5},
-      emphasis: {itemStyle: {color: '#d8c3f8'}},
+      itemStyle: {color: light ? 'rgba(140,98,38,.72)' : 'rgba(185,160,244,.72)', borderColor: light ? '#754F1B' : '#cbb3f3', borderWidth: .5},
+      emphasis: {itemStyle: {color: light ? '#1F1B16' : '#d8c3f8'}},
       data: props.points.map(point => [point.x, point.y]),
     }],
   })
@@ -59,7 +67,7 @@ onMounted(async () => {
     draw()
   } catch { failed.value = true }
 })
-watch(() => props.points, draw, {deep: false})
+watch([() => props.points, siteTheme], draw, {deep: false})
 onBeforeUnmount(() => { cancelAnimationFrame(frame); observer?.disconnect(); chart?.dispose() })
 </script>
 

@@ -4,6 +4,7 @@ import { init, use, type EChartsType } from 'echarts/core'
 import { BarChart, LineChart, PieChart } from 'echarts/charts'
 import { AriaComponent, GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
+import { isLightTheme, siteTheme } from '../../services/theme'
 
 use([BarChart, LineChart, PieChart, AriaComponent, GridComponent, LegendComponent, TooltipComponent, CanvasRenderer])
 
@@ -42,14 +43,19 @@ function draw() {
   if (!host.value.clientWidth || !host.value.clientHeight) return
   try {
     if (!chart) chart = init(host.value, undefined, { renderer: 'canvas' })
-    const tooltipDefaults = { renderMode: 'richText', backgroundColor: '#201a30', borderColor: '#66517f', textStyle: { color: '#e9e4f4' } }
+    const light = isLightTheme.value
+    const tooltipDefaults = light
+      ? { renderMode: 'richText', backgroundColor: '#FFFFFF', borderColor: 'rgba(31,27,22,.16)', textStyle: { color: '#000000' } }
+      : { renderMode: 'richText', backgroundColor: '#201a30', borderColor: '#66517f', textStyle: { color: '#FFFFFF' } }
     const tooltip = Array.isArray(props.option.tooltip)
       ? props.option.tooltip.map(item => ({ ...tooltipDefaults, ...item, renderMode: 'richText' }))
       : { ...tooltipDefaults, ...props.option.tooltip, renderMode: 'richText' }
     chart.setOption({
       backgroundColor: 'transparent',
-      color: ['#b9a0f4', '#8770bc', '#d3bb91', '#9aafcb', '#b58da8'],
-      textStyle: { color: '#aaa2bb', fontFamily: getComputedStyle(host.value).fontFamily, fontSize: 11 },
+      color: light
+        ? ['#8C6226', '#4E6E81', '#5C7D68', '#A67C52', '#7B7266']
+        : ['#b9a0f4', '#8770bc', '#d3bb91', '#9aafcb', '#b58da8'],
+      textStyle: { color: light ? '#000000' : '#FFFFFF', fontFamily: getComputedStyle(host.value).fontFamily, fontSize: 11 },
       animationDuration: 420,
       animationDurationUpdate: 240,
       ...props.option,
@@ -84,7 +90,7 @@ onMounted(async () => {
   draw()
 })
 
-watch([() => props.option, () => props.rows], () => {
+watch([() => props.option, () => props.rows, siteTheme], () => {
   renderError.value = false
   nextTick(draw)
 }, { deep: true, flush: 'post' })
@@ -127,22 +133,22 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.dashboard-chart{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;color:#e9e4f4}
+.dashboard-chart{position:relative;display:flex;flex-direction:column;min-width:0;min-height:0;height:100%;color:var(--mi-text)}
 .chart-plot{width:100%;height:auto;min-height:110px;flex:1 1 0}
-.chart-state{display:grid;place-items:center;flex:1;min-height:110px;margin:0;padding:20px;text-align:center;color:#aaa2bb;font-size:12px;line-height:1.7}
-.chart-data{flex:none;margin-top:3px;color:#aaa2bb;font-size:11px;line-height:1.6}
+.chart-state{display:grid;place-items:center;flex:1;min-height:110px;margin:0;padding:20px;text-align:center;color:var(--mi-text-muted);font-size:12px;line-height:1.7}
+.chart-data{flex:none;margin-top:3px;color:var(--mi-text-muted);font-size:11px;line-height:1.6}
 .chart-data summary{width:fit-content;padding:3px 0;cursor:pointer;text-underline-offset:3px}
-.chart-data summary:hover{color:#d7c6ff;text-decoration:underline}
-.chart-data[open] summary{color:#d7c6ff}
-.data-scroll{position:absolute;right:0;bottom:28px;left:0;z-index:4;max-height:min(180px,100%);overflow:auto;padding:6px 10px;background:#191524;border:1px solid #655278;border-radius:9px;scrollbar-width:thin;scrollbar-color:#795e9d #191524}
+.chart-data summary:hover{color:var(--mi-accent);text-decoration:underline}
+.chart-data[open] summary{color:var(--mi-accent)}
+.data-scroll{position:absolute;right:0;bottom:28px;left:0;z-index:4;max-height:min(180px,100%);overflow:auto;padding:6px 10px;background:var(--mi-surface);border:1px solid var(--mi-border-strong);border-radius:9px;box-shadow:var(--mi-shadow-md);scrollbar-width:thin;scrollbar-color:var(--mi-scroll-thumb) var(--mi-scroll-track)}
 .chart-data:not([open]) .data-scroll{display:none}
-table{width:100%;border-collapse:collapse;color:#e9e4f4;font-size:11px;line-height:1.6;text-align:left}
-th,td{padding:7px 4px;border-bottom:1px solid #ffffff14;overflow-wrap:anywhere}
-thead th{color:#c0b6d1;font-weight:600}
+table{width:100%;border-collapse:collapse;color:var(--mi-text);font-size:11px;line-height:1.6;text-align:left}
+th,td{padding:7px 4px;border-bottom:1px solid var(--mi-border-subtle);overflow-wrap:anywhere}
+thead th{color:var(--mi-text-secondary);font-weight:600}
 tbody th{font-weight:400}
 td:last-child,thead th:last-child{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
 tbody tr:last-child th,tbody tr:last-child td{border-bottom:0}
-summary:focus-visible,.data-scroll:focus-visible{outline:2px solid #b9a0f4;outline-offset:3px;border-radius:3px}
-::selection{color:#fff;background:#62498d}
+summary:focus-visible,.data-scroll:focus-visible{outline:2px solid var(--mi-accent);outline-offset:3px;border-radius:3px}
+::selection{color:var(--mi-selection-text);background:var(--mi-selection-bg)}
 .sr-only{position:absolute;width:1px;height:1px;margin:-1px;padding:0;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 </style>

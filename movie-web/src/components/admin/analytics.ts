@@ -20,25 +20,115 @@ export class AdminRequestError extends Error {
 function describe(status: number, code: string): string {
   if (status === 401) return '登录已失效，请重新登录。'
   if (status === 403) return '需要管理员权限。'
-  if (status === 503) return '统计来源暂时不可用（DATA_UNAVAILABLE）。'
+  if (code === 'CACHE_WARMING') return '统计缓存正在后台预热（CACHE_WARMING），请稍后刷新。'
+  if (status === 503 || code === 'DATA_UNAVAILABLE') return '统计来源暂时不可用（DATA_UNAVAILABLE）。'
   if (status === 409) return 'TMDB 身份数据存在冲突，等待人工复核。'
   if (status === 400) return '筛选参数不合法（' + (code || 'INVALID_INPUT') + '）。'
   return '资源分析数据暂时不可用，请稍后手动刷新。'
 }
 
+function makeAbortError(): Error {
+  if (typeof DOMException !== 'undefined') return new DOMException('The operation was aborted.', 'AbortError')
+  const err = new Error('The operation was aborted.')
+  err.name = 'AbortError'
+  return err
+}
+
+/** 25 s ceiling so a stalled large-catalog analytics query cannot freeze a panel. */
+export function adminSignal(outer?: AbortSignal): AbortSignal | undefined {
+  if (typeof AbortSignal === 'undefined') return outer
+  const timeout = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(25000) : undefined
+  if (!outer) return timeout
+  if (timeout && typeof AbortSignal.any === 'function') return AbortSignal.any([outer, timeout])
+  return outer
+}
+
+interface InFlightEntry {
+  controller: AbortController
+  subscribers: Set<symbol>
+  promise: Promise<unknown>
+}
+
+const inFlightAdminGets = new Map<string, InFlightEntry>()
+
 export async function adminGet<T>(path: string, signal?: AbortSignal): Promise<T> {
-  const response = await fetch('/api/admin/' + path.replace(/^\//, ''), {
-    credentials: 'same-origin', signal,
+  if (signal?.aborted) throw makeAbortError()
+  const cleanPath = path.replace(/^\//, '')
+  const url = '/api/admin/' + cleanPath
+  let entry = inFlightAdminGets.get(url)
+  if (!entry) {
+    const controller = new AbortController()
+    const subscribers = new Set<symbol>()
+    const promise = (async () => {
+      const response = await fetch(url, {
+        credentials: 'same-origin',
+        signal: adminSignal(controller.signal),
+      })
+      let body: any = null
+      try { body = await response.json() } catch { body = null }
+      if (!response.ok) {
+        throw new AdminRequestError(describe(response.status, body?.code || ''), response.status, body?.code || '')
+      }
+      if (!body || body.code !== 'OK' || body.data == null) {
+        throw new AdminRequestError(
+          body?.code === 'DATA_UNAVAILABLE' || body?.code === 'CACHE_WARMING'
+            ? describe(503, body.code)
+            : '管理数据响应格式异常（缺少 data）。',
+          response.status,
+          body?.code || 'BAD_ENVELOPE',
+        )
+      }
+      return body.data
+    })().finally(() => {
+      if (inFlightAdminGets.get(url)?.controller === controller) {
+        inFlightAdminGets.delete(url)
+      }
+    })
+    entry = { controller, subscribers, promise }
+    inFlightAdminGets.set(url, entry)
+  }
+
+  const activeEntry = entry
+  const token = Symbol('adminGet')
+  activeEntry.subscribers.add(token)
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      activeEntry.subscribers.delete(token)
+      if (activeEntry.subscribers.size === 0) {
+        inFlightAdminGets.delete(url)
+        activeEntry.controller.abort()
+      }
+      reject(makeAbortError())
+    }
+    if (signal) {
+      if (signal.aborted) {
+        onAbort()
+        return
+      }
+      signal.addEventListener('abort', onAbort, { once: true })
+    }
+    activeEntry.promise.then(
+      value => {
+        signal?.removeEventListener('abort', onAbort)
+        activeEntry.subscribers.delete(token)
+        if (signal?.aborted) {
+          reject(makeAbortError())
+          return
+        }
+        resolve(value as T)
+      },
+      error => {
+        signal?.removeEventListener('abort', onAbort)
+        activeEntry.subscribers.delete(token)
+        if (signal?.aborted) {
+          reject(makeAbortError())
+          return
+        }
+        reject(error)
+      },
+    )
   })
-  let body: any = null
-  try { body = await response.json() } catch { body = null }
-  if (!response.ok) {
-    throw new AdminRequestError(describe(response.status, body?.code || ''), response.status, body?.code || '')
-  }
-  if (!body || body.code !== 'OK' || body.data == null) {
-    throw new AdminRequestError('管理数据响应格式异常（缺少 data）。', response.status, body?.code || 'BAD_ENVELOPE')
-  }
-  return body.data as T
 }
 
 export interface CountRow { name: string; count: number }
@@ -534,6 +624,7 @@ export function loadBatches(filters: BatchFilters, signal?: AbortSignal): Promis
   return adminGet<BatchesPayload>('tmdb-supplement/batches' + (query ? '?' + query : ''), signal)
 }
 
+const MAX_POSTER_CACHE = 300
 const posterCache = new Map<number, Promise<string | null>>()
 
 /**
@@ -544,10 +635,17 @@ const posterCache = new Map<number, Promise<string | null>>()
 export function loadPoster(movieId: number): Promise<string | null> {
   if (!Number.isFinite(movieId) || movieId <= 0) return Promise.resolve(null)
   const cached = posterCache.get(movieId)
-  if (cached) return cached
+  if (cached) {
+    posterCache.delete(movieId)
+    posterCache.set(movieId, cached)
+    return cached
+  }
   const request = (async () => {
     try {
-      const response = await fetch('/api/catalog/movies/' + movieId, { credentials: 'same-origin' })
+      const signal = typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function'
+        ? AbortSignal.timeout(10000)
+        : undefined
+      const response = await fetch('/api/catalog/movies/' + movieId, { credentials: 'same-origin', signal })
       if (!response.ok) return null
       const body = await response.json().catch(() => null)
       if (!body || body.code !== 'OK') return null
@@ -560,6 +658,10 @@ export function loadPoster(movieId: number): Promise<string | null> {
     if (url === null) posterCache.delete(movieId)
     return url
   })
+  if (posterCache.size >= MAX_POSTER_CACHE) {
+    const oldestKey = posterCache.keys().next().value
+    if (oldestKey !== undefined) posterCache.delete(oldestKey)
+  }
   posterCache.set(movieId, request)
   return request
 }
