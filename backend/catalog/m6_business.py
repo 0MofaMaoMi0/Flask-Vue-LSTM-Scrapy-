@@ -188,7 +188,15 @@ def install_m6_business(app):
             user=identity(mutate=True)
             if user is None:return response(status=401,code='AUTHENTICATION_REQUIRED')
             if not request.is_json:return response(status=400,code='INVALID_INPUT')
-            return response(repository.apply(user,request.get_json(silent=True)))
+            result=repository.apply(user,request.get_json(silent=True))
+            if not result.get('duplicate'):
+                try:
+                    from .recommendation_boards import invalidate_board_cache, warm_user_home_async
+                    invalidate_board_cache(engine,user,behavior_version=result['version'])
+                    warm_user_home_async(app,user)
+                except Exception:
+                    app.logger.warning('Recommendation cache refresh could not be scheduled')
+            return response(result)
         except PermissionError:return response(status=403,code='REQUEST_VERIFICATION_FAILED')
         except Conflict:return response(status=409,code='STATE_CONFLICT')
         except ValueError:return response(status=400,code='INVALID_INPUT')

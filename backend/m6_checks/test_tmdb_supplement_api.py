@@ -209,9 +209,6 @@ def build_app(tables, *, username='deepseek'):
     app.config['ADMIN_USERS'] = ['deepseek']
     app.extensions['auth_db'] = FakeAuthDb(FakeUser(username))
     app.extensions['catalog_engine'] = FakeEngine(tables)
-    # Each app gets an empty document cache so one test cannot leak its snapshot
-    # into the next one through the module-level singleton.
-    api_module._DOCUMENT_CACHE = api_module.DocumentCache()
     api_module.install(app)
     return app
 
@@ -503,6 +500,65 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(200, ok.status_code)
         self.assertEqual(400, too_many.status_code)
         self.assertEqual(len(ok.get_json()['data']['comparison']['countries']), 3)
+
+    def test_repository_queries_avoid_mysql_1038_sort_buffers(self):
+        # Child loaders must omit SQL ORDER BY so MySQL never filesorts wide text columns.
+        for sql in (
+            repository.COUNTRIES_SQL,
+            repository.COMPANIES_SQL,
+            repository.LANGUAGES_SQL,
+            repository.KEYWORDS_SQL,
+            repository.RELEASES_SQL,
+            repository.CREDITS_SQL,
+            repository.METRICS_SQL,
+        ):
+            self.assertNotIn('ORDER BY', sql.upper())
+
+        # DOCUMENTS_SQL and BATCHES_SQL only ORDER BY inside the key-only page subquery.
+        for sql in (repository.DOCUMENTS_SQL, repository.BATCHES_SQL):
+            upper = sql.upper()
+            self.assertIn('ORDER BY', upper)
+            order_tail = upper.split('ORDER BY', 1)[1]
+            self.assertIn('AS PAGE', order_tail)
+            after_page = order_tail.split('AS PAGE', 1)[1]
+            self.assertNotIn('ORDER BY', after_page)
+
+    def test_load_documents_chunks_child_queries_and_sorts_in_python(self):
+        tables = relation_tables()
+        # Reverse child rows in fixture to verify deterministic Python sorting.
+        tables['tmdb_movie_countries'] = [
+            {'movie_id': 1, 'country_iso2': 'US', 'country_name': 'United States'},
+            {'movie_id': 1, 'country_iso2': 'FR', 'country_name': 'France'},
+        ]
+        tables['tmdb_movie_credits_unsorted'] = []
+        tables['movie_credits'] = [
+            {'movie_id': 1, 'person_id': 2, 'role_type': 'cast', 'sort_order': 3,
+             'person_name': 'Second Actor', 'character_name': 'B', 'job': None},
+            {'movie_id': 1, 'person_id': 1, 'role_type': 'cast', 'sort_order': 1,
+             'person_name': 'First Actor', 'character_name': 'A', 'job': None},
+        ]
+        docs = repository.load_documents(FakeConnection(tables))
+        self.assertEqual(['FR', 'US'], [c['iso_3166_1'] for c in docs[0]['facts']['countries']])
+        self.assertEqual([1, 2], [c['person_id'] for c in docs[0]['facts']['credits']])
+
+        with mock.patch.object(repository, 'CHILD_QUERY_CHUNK_SIZE', 1):
+            conn = FakeConnection(tables)
+            chunked_docs = repository.load_documents(conn)
+        self.assertEqual(2, len(chunked_docs))
+        # Each of the 7 child tables executes once per movie_id when chunk_size=1.
+        self.assertEqual(1 + 7 * 2, len(conn.statements))
+
+    def test_load_all_documents_paginates_past_single_page_limit(self):
+        tables = relation_tables()
+        tables['tmdb_movie_metadata'] = [metadata_row(i) for i in range(1, 6)]
+        tables['movies'] = [{'movie_id': i, 'catalog_status': 'active'} for i in range(1, 6)]
+        app = build_app(tables)
+        with signed_in(True), mock.patch.object(api_module, 'DOCUMENT_PAGE_SIZE', 2):
+            response = app.test_client().get('/api/admin/tmdb-supplement/analytics')
+        self.assertEqual(200, response.status_code)
+        data = response.get_json()['data']
+        self.assertEqual(5, data['scope']['repository']['documents_loaded'])
+        self.assertFalse(data['scope']['repository']['truncated'])
 
 
 if __name__ == '__main__':

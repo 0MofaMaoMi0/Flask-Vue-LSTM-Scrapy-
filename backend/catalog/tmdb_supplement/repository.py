@@ -64,6 +64,7 @@ MISSING_STATUSES = ('MISSING', 'NOT_FETCHED', 'FAILED')
 
 DEFAULT_DOCUMENTS = 2000
 MAX_DOCUMENTS = 5000
+CHILD_QUERY_CHUNK_SIZE = 200
 MAX_OFFSET = 1000000
 DEFAULT_MISSING_ROWS = 200
 MAX_MISSING_ROWS = 500
@@ -127,6 +128,20 @@ def _query(connection, sql, movie_ids=None, params=None):
 
 def _in(table_alias):
     return ' WHERE %s.movie_id IN :movie_ids' % table_alias
+
+
+def _query_chunked(connection, sql, movie_ids, chunk_size=None):
+    """Run an ``IN :movie_ids`` query in bounded index-dive chunks."""
+    if not movie_ids:
+        return []
+    if chunk_size is None:
+        chunk_size = CHILD_QUERY_CHUNK_SIZE
+    if len(movie_ids) <= chunk_size:
+        return list(_query(connection, sql, movie_ids))
+    rows = []
+    for start in range(0, len(movie_ids), chunk_size):
+        rows.extend(_query(connection, sql, movie_ids[start:start + chunk_size]))
+    return rows
 
 
 def _json_mapping(value):
@@ -222,6 +237,8 @@ def _base_facts(payload):
 
 # ------------------------------------------------------------------ queries
 
+# Paginate ONLY on the 8-byte movie_id key first so MySQL never puts large
+# metadata_json / field_status_json blobs into sort_buffer_size (error 1038).
 DOCUMENTS_SQL = """
 SELECT m.movie_id AS movie_id,
        m.tmdb_id AS tmdb_id,
@@ -231,16 +248,23 @@ SELECT m.movie_id AS movie_id,
        sr.metadata_json AS metadata_json
 FROM tmdb_movie_metadata AS m
 JOIN movies AS mv ON mv.movie_id = m.movie_id
+JOIN (
+    SELECT m0.movie_id
+    FROM tmdb_movie_metadata AS m0
+    JOIN movies AS mv0 ON mv0.movie_id = m0.movie_id
+    {page_where}
+    ORDER BY m0.movie_id
+    LIMIT :limit OFFSET :offset
+) AS page ON page.movie_id = m.movie_id
 LEFT JOIN movie_source_records AS sr ON sr.id = m.source_record_pk
 {where}
-ORDER BY m.movie_id
-LIMIT :limit OFFSET :offset
 """
 
+# Child loaders omit SQL ORDER BY so MySQL never filesorts wide VARCHAR(500)
+# text columns in sort_buffer_size; deterministic order is restored in Python.
 COUNTRIES_SQL = """
 SELECT movie_id, country_iso2, country_name
 FROM tmdb_movie_countries{c_in}
-ORDER BY movie_id, country_iso2
 """
 
 COMPANIES_SQL = """
@@ -251,13 +275,11 @@ SELECT c.movie_id AS movie_id,
        co.logo_path AS logo_path
 FROM tmdb_movie_companies AS c
 JOIN tmdb_companies AS co ON co.company_id = c.company_id{c_in}
-ORDER BY c.movie_id, co.tmdb_company_id
 """
 
 LANGUAGES_SQL = """
 SELECT movie_id, language_code, english_name, name
 FROM tmdb_movie_languages{c_in}
-ORDER BY movie_id, language_code
 """
 
 KEYWORDS_SQL = """
@@ -266,14 +288,12 @@ SELECT k.movie_id AS movie_id,
        kw.name AS name
 FROM tmdb_movie_keywords AS k
 JOIN tmdb_keywords AS kw ON kw.keyword_id = k.keyword_id{c_in}
-ORDER BY k.movie_id, kw.tmdb_keyword_id
 """
 
 RELEASES_SQL = """
 SELECT movie_id, country_iso2, release_type, release_date,
        certification, note, certification_language
 FROM tmdb_release_records{c_in}
-ORDER BY movie_id, country_iso2, release_date
 """
 
 CREDITS_SQL = """
@@ -286,7 +306,6 @@ SELECT c.movie_id AS movie_id,
        p.name AS person_name
 FROM movie_credits AS c
 LEFT JOIN people AS p ON p.person_id = c.person_id{c_in}
-ORDER BY c.movie_id, c.role_type, c.sort_order
 """
 
 METRICS_SQL = """
@@ -300,7 +319,6 @@ JOIN (SELECT movie_id, MAX(observed_at) AS observed_at
       FROM tmdb_metric_observations{c_in}
       GROUP BY movie_id) AS latest
   ON latest.movie_id = o.movie_id AND latest.observed_at = o.observed_at
-ORDER BY o.movie_id
 """
 
 STATUS_EXPR = ("COALESCE(NULLIF(JSON_UNQUOTE(JSON_EXTRACT("
@@ -375,12 +393,16 @@ LIMIT :limit
 """
 
 BATCHES_SQL = """
-SELECT batch_id, source, mode, status, started_at, finished_at,
-       source_snapshot_ref, counts_json, error_summary
-FROM ingest_batches
-WHERE source = :source{extra}
-ORDER BY started_at DESC, batch_id DESC
-LIMIT :limit OFFSET :offset
+SELECT b.batch_id, b.source, b.mode, b.status, b.started_at, b.finished_at,
+       b.source_snapshot_ref, b.counts_json, b.error_summary
+FROM ingest_batches AS b
+JOIN (
+    SELECT batch_id
+    FROM ingest_batches
+    WHERE source = :source{extra}
+    ORDER BY started_at DESC, batch_id DESC
+    LIMIT :limit OFFSET :offset
+) AS page ON page.batch_id = b.batch_id
 """
 
 BATCHES_COUNT_SQL = """
@@ -424,25 +446,28 @@ def load_documents(connection, *, movie_ids=None, limit=DEFAULT_DOCUMENTS,
 
     where = ("WHERE mv.catalog_status = 'active' AND m.movie_id IN :movie_ids"
              if ids is not None else "WHERE mv.catalog_status = 'active'")
-    rows = _query(connection, DOCUMENTS_SQL.format(where=where), ids,
+    page_where = ("WHERE mv0.catalog_status = 'active' AND m0.movie_id IN :movie_ids"
+                  if ids is not None else "WHERE mv0.catalog_status = 'active'")
+    rows = _query(connection, DOCUMENTS_SQL.format(page_where=page_where, where=where), ids,
                   {'limit': limit, 'offset': offset})
     if not rows:
         return []
+    rows = sorted(rows, key=lambda row: int(row['movie_id']))
     loaded_ids = [int(row['movie_id']) for row in rows]
 
-    countries = _group(_query(connection, COUNTRIES_SQL.format(
+    countries = _group(_query_chunked(connection, COUNTRIES_SQL.format(
         c_in=_in('tmdb_movie_countries')), loaded_ids), 'movie_id')
-    companies = _group(_query(connection, COMPANIES_SQL.format(
+    companies = _group(_query_chunked(connection, COMPANIES_SQL.format(
         c_in=_in('c')), loaded_ids), 'movie_id')
-    languages = _group(_query(connection, LANGUAGES_SQL.format(
+    languages = _group(_query_chunked(connection, LANGUAGES_SQL.format(
         c_in=_in('tmdb_movie_languages')), loaded_ids), 'movie_id')
-    keywords = _group(_query(connection, KEYWORDS_SQL.format(
+    keywords = _group(_query_chunked(connection, KEYWORDS_SQL.format(
         c_in=_in('k')), loaded_ids), 'movie_id')
-    releases = _group(_query(connection, RELEASES_SQL.format(
+    releases = _group(_query_chunked(connection, RELEASES_SQL.format(
         c_in=_in('tmdb_release_records')), loaded_ids), 'movie_id')
-    credits = _group(_query(connection, CREDITS_SQL.format(
+    credits = _group(_query_chunked(connection, CREDITS_SQL.format(
         c_in=_in('c')), loaded_ids), 'movie_id')
-    metrics = _group(_query(connection, METRICS_SQL.format(
+    metrics = _group(_query_chunked(connection, METRICS_SQL.format(
         c_in=_in('tmdb_metric_observations')), loaded_ids), 'movie_id')
 
     documents = []
@@ -492,71 +517,80 @@ def _document(row, countries, companies, languages, keywords, releases,
     elif empty('base'):
         facts['base'] = {}
     if present('countries'):
-        facts['countries'] = [
-            {'iso_3166_1': item['country_iso2'],
-             'name': item.get('country_name')}
-            for item in countries
-        ]
+        facts['countries'] = sorted(
+            [{'iso_3166_1': item['country_iso2'],
+              'name': item.get('country_name')}
+             for item in countries],
+            key=lambda entry: entry['iso_3166_1'] or '',
+        )
     elif empty('countries'):
         facts['countries'] = []
     if present('companies'):
-        facts['companies'] = [
-            {'company_id': _integer(item.get('tmdb_company_id')),
-             'name': item.get('name'),
-             'origin_country': item.get('origin_country'),
-             'logo_path': item.get('logo_path')}
-            for item in companies
-            if _integer(item.get('tmdb_company_id')) is not None
-        ]
+        facts['companies'] = sorted(
+            [{'company_id': _integer(item.get('tmdb_company_id')),
+              'name': item.get('name'),
+              'origin_country': item.get('origin_country'),
+              'logo_path': item.get('logo_path')}
+             for item in companies
+             if _integer(item.get('tmdb_company_id')) is not None],
+            key=lambda entry: entry['company_id'],
+        )
     elif empty('companies'):
         facts['companies'] = []
     if present('spoken_languages'):
-        facts['spoken_languages'] = [
-            {'iso_639_1': item.get('language_code'),
-             'english_name': item.get('english_name'),
-             'name': item.get('name')}
-            for item in languages
-            if item.get('language_code')
-        ]
+        facts['spoken_languages'] = sorted(
+            [{'iso_639_1': item.get('language_code'),
+              'english_name': item.get('english_name'),
+              'name': item.get('name')}
+             for item in languages
+             if item.get('language_code')],
+            key=lambda entry: entry['iso_639_1'] or '',
+        )
     elif empty('spoken_languages'):
         facts['spoken_languages'] = []
     if present('keywords'):
-        facts['keywords'] = [
-            {'keyword_id': _integer(item.get('tmdb_keyword_id')),
-             'name': item.get('name')}
-            for item in keywords
-            if _integer(item.get('tmdb_keyword_id')) is not None
-        ]
+        facts['keywords'] = sorted(
+            [{'keyword_id': _integer(item.get('tmdb_keyword_id')),
+              'name': item.get('name')}
+             for item in keywords
+             if _integer(item.get('tmdb_keyword_id')) is not None],
+            key=lambda entry: entry['keyword_id'],
+        )
     elif empty('keywords'):
         facts['keywords'] = []
     if present('releases'):
-        facts['releases'] = [
-            {'iso_3166_1': item['country_iso2'],
-             'release_date': _iso(item.get('release_date')),
-             'type': item.get('release_type'),
-             'certification': item.get('certification'),
-             'note': item.get('note'),
-             'iso_639_1': item.get('certification_language')}
-            for item in releases
-            if item.get('release_date') is not None
-        ]
+        facts['releases'] = sorted(
+            [{'iso_3166_1': item['country_iso2'],
+              'release_date': _iso(item.get('release_date')),
+              'type': item.get('release_type'),
+              'certification': item.get('certification'),
+              'note': item.get('note'),
+              'iso_639_1': item.get('certification_language')}
+             for item in releases
+             if item.get('release_date') is not None],
+            key=lambda entry: (entry['iso_3166_1'] or '', entry['release_date'] or ''),
+        )
     elif empty('releases'):
         facts['releases'] = []
     if present('credits'):
-        facts['credits'] = [
-            {'role_type': item.get('role_type'),
-             'person_id': _integer(item.get('person_id')),
-             'person_name': item.get('person_name'),
-             'character': item.get('character_name'),
-             'job': item.get('job'),
-             'sort_order': item.get('sort_order')}
-            for item in credits
-            if _integer(item.get('person_id')) is not None
-        ]
+        facts['credits'] = sorted(
+            [{'role_type': item.get('role_type'),
+              'person_id': _integer(item.get('person_id')),
+              'person_name': item.get('person_name'),
+              'character': item.get('character_name'),
+              'job': item.get('job'),
+              'sort_order': item.get('sort_order')}
+             for item in credits
+             if _integer(item.get('person_id')) is not None],
+            key=lambda entry: (
+                entry['role_type'] or '',
+                int(entry['sort_order']) if entry.get('sort_order') is not None else 0,
+            ),
+        )
     elif empty('credits'):
         facts['credits'] = []
     if present('metrics'):
-        latest = metrics[-1] if metrics else None
+        latest = max(metrics, key=lambda item: _iso(item.get('observed_at')) or '') if metrics else None
         facts['metrics'] = {} if latest is None else {
             'vote_average': _number(latest.get('vote_average')),
             'vote_count': _non_negative_int(latest.get('vote_count')),
@@ -781,6 +815,11 @@ def load_batches(connection, *, limit=DEFAULT_BATCH_ROWS, offset=0, status=None,
     if not rows:
         return {'total': total, 'items': [], 'statuses': list(BATCH_STATUSES),
                 'source': params['source']}
+    rows = sorted(
+        rows,
+        key=lambda row: (_iso(row.get('started_at')) or '', int(row['batch_id'])),
+        reverse=True,
+    )
 
     batch_ids = [int(row['batch_id']) for row in rows]
     item_rows = _query_in(connection, BATCH_ITEM_STATUS_SQL, 'batch_ids', batch_ids)

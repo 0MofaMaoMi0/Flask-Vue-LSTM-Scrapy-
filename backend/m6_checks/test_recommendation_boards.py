@@ -49,6 +49,11 @@ def test_reliable_rating_and_revenue_unknowns():
     assert [m['movie_id'] for m in board(rows,channel='revenue')['items']]==[3,2]
     assert board(rows,channel='revenue',filters={'year_to':2002})['items'][0]['movie_id']==2
 
+
+def test_pure_board_keeps_dto_and_does_not_fetch_backdrops():
+    result=board([movie(1,backdrop='/ignored.jpg')],channel='personal')
+    assert result['candidate_count']==1 and 'backdrop' not in result['items'][0]
+
 @pytest.mark.parametrize('channel',['daily','weekly'])
 def test_period_persistence_negative_feedback_and_user_isolation(tmp_path,channel):
     rows=[movie(i) for i in range(1,20)]

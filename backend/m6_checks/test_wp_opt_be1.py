@@ -389,15 +389,16 @@ def test_wave2_two_tier_cache_prepares_once_and_evicts_lru_on_32_plus():
             assert r3_hit.status_code == 200 and r3_hit.get_json()['data']['cache']['hit'] is True
 
             # Mutating returned data in-memory must not pollute LRU entry
-            base_entry = api_module._DOCUMENT_CACHE._lru[next(iter(api_module._DOCUMENT_CACHE._lru))]
+            cache = api_module._cache_for(app, api_module._catalog_engine(app))
+            base_entry = cache._lru[next(iter(cache._lru))]
             assert 'cache' not in base_entry['scope']
             assert 'catalog' not in base_entry['scope']
 
-            # Exceed LRU maxsize=32 -> bounded at 32
-            for votes in range(1, 40):
+            # Exceed the configured capacity to exercise eviction.
+            for votes in range(1, api_module.DEFAULT_RESULT_LRU_MAXSIZE + 10):
                 resp = client.get(f'/api/admin/tmdb-supplement/analytics?min_votes={votes}')
                 assert resp.status_code == 200
-            assert len(api_module._DOCUMENT_CACHE._lru) == 32
+            assert len(cache._lru) == api_module.DEFAULT_RESULT_LRU_MAXSIZE
 
             # Watermark bump clears old generation LRU and triggers a single new prepare
             tables['tmdb_movie_metadata'][0]['updated_at'] = LATER

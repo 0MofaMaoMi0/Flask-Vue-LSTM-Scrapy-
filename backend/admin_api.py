@@ -5,11 +5,76 @@ No raw event payloads, prompts, keys, or request bodies are returned.
 """
 from datetime import datetime, timedelta, timezone
 from flask import Blueprint, g, jsonify, request
-from sqlalchemy import select, func, distinct
+from sqlalchemy import select, func, distinct, inspect
 from sqlalchemy.exc import SQLAlchemyError
 from app.auth import session_row
 from app.models import User, Base
 from catalog.models import CatalogBase
+
+
+CATALOG_CHUNK_SIZE = 200
+MAX_CATALOG_LIMIT = 500
+MAX_CATALOG_OFFSET = (1 << 63) - 1
+
+
+def _catalog_page_args(args):
+    if any(len(args.getlist(key)) > 1 for key in ('limit', 'offset')):
+        raise ValueError('Repeated catalog pagination parameter')
+
+    def integer(key, default, minimum, maximum):
+        raw = args.get(key)
+        if raw is None:
+            return default
+        if not raw.isascii() or not raw.isdecimal() or len(raw) > 19:
+            raise ValueError(key)
+        value = int(raw)
+        if not minimum <= value <= maximum:
+            raise ValueError(key)
+        return value
+
+    default_limit = MAX_CATALOG_LIMIT if 'offset' in args else None
+    return (integer('limit', default_limit, 1, MAX_CATALOG_LIMIT),
+            integer('offset', 0, 0, MAX_CATALOG_OFFSET))
+
+
+def _catalog_items(connection, rows, has_countries):
+    from admin_dashboard import _movie_countries
+
+    tables = CatalogBase.metadata.tables
+    links, genres = tables['movie_genres'], tables['genres']
+    ratings = tables['movie_ratings_summary']
+    ids = [row.movie_id for row in rows]
+    genre_map = {}
+    for mid, name in connection.execute(
+        select(links.c.movie_id, genres.c.name_zh)
+        .join(genres, genres.c.genre_id == links.c.genre_id)
+        .where(links.c.movie_id.in_(ids))
+        .order_by(links.c.movie_id, links.c.genre_id)
+    ):
+        genre_map.setdefault(mid, []).append(name)
+    rating_map = dict(connection.execute(
+        select(ratings.c.movie_id, func.max(ratings.c.score_value))
+        .where(ratings.c.movie_id.in_(ids)).group_by(ratings.c.movie_id)
+    ).all())
+    country_map = _movie_countries(
+        connection, ids, has_supplement=has_countries, fallback_sources=('tmdb',),
+    )
+
+    def counts(table):
+        return dict(connection.execute(
+            select(table.c.movie_id, func.count()).where(table.c.movie_id.in_(ids))
+            .group_by(table.c.movie_id)
+        ).all())
+
+    credit_map = counts(tables['movie_credits'])
+    asset_map = counts(tables['movie_assets'])
+    return [{
+        'movie_id': int(mid), 'title': title, 'year': year,
+        'genres': genre_map.get(mid, []),
+        'rating': float(rating_map[mid]) if rating_map.get(mid) is not None else None,
+        'countries': country_map.get(mid, []),
+        'credits': int(credit_map.get(mid, 0)), 'assets': int(asset_map.get(mid, 0)),
+    } for mid, title, year in rows]
 
 
 def install(app):
@@ -108,29 +173,38 @@ def install(app):
 
     @bp.get('/catalog')
     def catalog():
-        md = CatalogBase.metadata
-        m, ml, g = md.tables['movies'], md.tables['movie_genres'], md.tables['genres']
-        ratings, sources = md.tables['movie_ratings_summary'], md.tables['movie_source_records']
-        credits, assets = md.tables['movie_credits'], md.tables['movie_assets']
-        with engine.connect() as c:
-            rows = c.execute(select(m.c.movie_id, m.c.title, m.c.release_year).where(m.c.catalog_status == 'active').order_by(m.c.movie_id)).all()
-            genre_map = {}
-            for mid, name in c.execute(select(ml.c.movie_id, g.c.name_zh).join(g, g.c.genre_id == ml.c.genre_id)):
-                genre_map.setdefault(mid, []).append(name)
-            rating_map = dict(c.execute(select(ratings.c.movie_id, func.max(ratings.c.score_value)).group_by(ratings.c.movie_id)).all())
-            country_map = {}
-            for mid, payload in c.execute(select(sources.c.movie_id, sources.c.metadata_json).where(sources.c.source == 'tmdb')):
-                if mid in country_map or not isinstance(payload, dict):
-                    continue
-                country_map[mid] = [x.get('iso_3166_1') for x in (payload.get('production_countries') or []) if isinstance(x, dict) and x.get('iso_3166_1')]
-            credit_map = dict(c.execute(select(credits.c.movie_id, func.count()).group_by(credits.c.movie_id)).all())
-            asset_map = dict(c.execute(select(assets.c.movie_id, func.count()).group_by(assets.c.movie_id)).all())
-        items = [{
-            'movie_id': int(mid), 'title': title, 'year': year,
-            'genres': genre_map.get(mid, []), 'rating': float(rating_map[mid]) if rating_map.get(mid) is not None else None,
-            'countries': country_map.get(mid, []), 'credits': int(credit_map.get(mid, 0)), 'assets': int(asset_map.get(mid, 0)),
-        } for mid, title, year in rows]
-        return reply({'items': items})
+        try:
+            limit, offset = _catalog_page_args(request.args)
+        except ValueError:
+            return jsonify(code='INVALID_INPUT', data=None), 400
+        movies = CatalogBase.metadata.tables['movies']
+        active = movies.c.catalog_status == 'active'
+        movie_page = (select(movies.c.movie_id, movies.c.title, movies.c.release_year)
+                      .where(active).order_by(movies.c.movie_id))
+        items = []
+        try:
+            catalog_engine = app.extensions.get('catalog_engine') or engine
+            with catalog_engine.connect() as connection:
+                total = int(connection.scalar(select(func.count()).select_from(movies).where(active)))
+                if offset < total:
+                    has_countries = inspect(connection).has_table('tmdb_movie_countries')
+                    if limit is not None:
+                        rows = connection.execute(movie_page.limit(limit).offset(offset)).all()
+                        for start in range(0, len(rows), CATALOG_CHUNK_SIZE):
+                            items.extend(_catalog_items(connection, rows[start:start + CATALOG_CHUNK_SIZE],
+                                                        has_countries))
+                    else:
+                        statement = movie_page.limit(CATALOG_CHUNK_SIZE)
+                        while rows := connection.execute(statement).all():
+                            items.extend(_catalog_items(connection, rows, has_countries))
+                            if len(rows) < CATALOG_CHUNK_SIZE:
+                                break
+                            statement = movie_page.where(movies.c.movie_id > rows[-1].movie_id).limit(
+                                CATALOG_CHUNK_SIZE)
+        except SQLAlchemyError:
+            return jsonify(code='DATA_UNAVAILABLE', data=None), 503
+        return reply({'items': items, 'total': total, 'limit': limit, 'offset': offset,
+                      'returned': len(items), 'has_more': offset + len(items) < total})
 
     @bp.get('/users')
     def users():

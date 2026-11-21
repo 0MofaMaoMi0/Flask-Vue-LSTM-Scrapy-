@@ -29,6 +29,7 @@ CURRENT_SOURCE = "TMDB_CURRENT_STATE"
 HISTORICAL_SOURCE = "TMDB_HISTORICAL_DATABASE_SNAPSHOT"
 REVENUE_CANDIDATES = 8
 REVENUE_CHUNK = 200
+CHUNK_SIZE = 300
 
 
 def json_mapping(value):
@@ -52,15 +53,22 @@ def has_metadata_table(engine):
         return False
 
 
-def load_topics(connection):
+def load_topics(connection, *, movie_ids=None):
     """``{movie_id: {"tmdb_id", "topics": {topic: entry}}}`` from metadata."""
     columns = {column["name"] for column in
                inspect(connection).get_columns("tmdb_movie_metadata")}
     wanted = [name for name in ("movie_id", "tmdb_id", "source_record_pk",
                                 "provenance_json", "base_at", "countries_at",
                                 "metrics_at") if name in columns]
-    rows = connection.execute(text(
-        "SELECT %s FROM tmdb_movie_metadata" % ", ".join(wanted))).mappings().all()
+    statement = "SELECT %s FROM tmdb_movie_metadata" % ", ".join(wanted)
+    if movie_ids is None:
+        rows = connection.execute(text(statement)).mappings()
+    else:
+        ids = sorted({int(movie_id) for movie_id in movie_ids})
+        bounded = text(statement + " WHERE movie_id IN :ids").bindparams(
+            bindparam("ids", expanding=True))
+        rows = (row for offset in range(0, len(ids), CHUNK_SIZE)
+                for row in connection.execute(bounded, {"ids": ids[offset:offset + CHUNK_SIZE]}).mappings())
     result = {}
     for row in rows:
         movie_id = row["movie_id"]

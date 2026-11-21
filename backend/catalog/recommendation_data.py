@@ -9,8 +9,9 @@ titles) and cumulative revenue that a newer heat-only capture dropped.
 """
 import math,json
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
-from sqlalchemy import select, case
+from sqlalchemy import Integer, Numeric, String, and_, case, cast, column, func, inspect, literal, or_, select, table
 from . import current_state, public_catalog_cache
 from .models import CatalogBase
 from .media_urls import asset_url
@@ -20,14 +21,37 @@ def invalidate(engine):
     public_catalog_cache.invalidate(engine)
 
 
+def _cached_candidates(engine, copy_mode):
+    def build_all(counters):
+        return _load_candidates(engine, stats=counters)
+
+    def build_subset(movie_ids, counters):
+        return _load_candidates(engine, stats=counters, movie_ids=movie_ids)
+
+    return public_catalog_cache.load(
+        engine, build_all, build_subset, finalize, copy_mode=copy_mode, swr=True,
+    )["movies"]
+
+
 def load_candidates(engine):
     from .tmdb_connection import enrich
-    def build_all(counters):
-        return _load_candidates(engine,stats=counters)
-    def build_subset(movie_ids,counters):
-        return _load_candidates(engine,stats=counters,movie_ids=movie_ids)
-    entry=public_catalog_cache.load(engine,build_all,build_subset,finalize)
-    return enrich(entry["movies"])
+
+    movies = _cached_candidates(engine, "shallow")
+    for movie in movies:
+        # Keep mutable fields local to this call for existing consumers.
+        movie["genres"] = list(movie["genres"])
+        movie["director_ids"] = list(movie.get("director_ids") or ())
+        movie["actor_ids"] = list(movie.get("actor_ids") or ())
+        if "production_countries" in movie:
+            movie["production_countries"] = [
+                dict(country) for country in movie["production_countries"]
+            ]
+    return enrich(movies)
+
+
+def load_candidates_readonly(engine):
+    """Return immutable public ranking inputs without request-scoped TMDB enrichment."""
+    return _cached_candidates(engine, "readonly")
 
 
 def valid_number(value,maximum=None):
@@ -74,7 +98,7 @@ def _ordered_source_snapshots(connection,sources,movies,*,source_names=('tmdb',)
                 yield result+(source,) if include_source else result
 
 
-def _apply_current(connection,byid,mappings,stats):
+def _apply_current(connection,byid,mappings,stats,*,bounded=False):
     """Attach each topic's current facts; return ids that still need fallback.
 
     Topics are resolved independently: countries come from the ``countries``
@@ -85,7 +109,7 @@ def _apply_current(connection,byid,mappings,stats):
     pending=set(byid)
     if not current_state.has_metadata_table(connection.engine if hasattr(connection,'engine') else None):
         return pending
-    meta={movie_id:entry for movie_id,entry in current_state.load_topics(connection).items()
+    meta={movie_id:entry for movie_id,entry in current_state.load_topics(connection,movie_ids=byid if bounded else None).items()
           if movie_id in byid}
     pks=[entry['source_record_pk'] for movie in meta.values()
          for entry in movie['topics'].values() if entry.get('source_record_pk') is not None]
@@ -141,6 +165,9 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
     stats=stats if isinstance(stats,dict) else {}
     subset=sorted({int(mid) for mid in movie_ids}) if movie_ids is not None else None
     stats.setdefault('json_reads',0)
+    if subset == []:
+        stats.update(movies=0, legacy_fallback_movies=0)
+        return []
     t=CatalogBase.metadata.tables
     m,g,links,sources,external,assets=[t[n] for n in ('movies','genres','movie_genres','movie_source_records','movie_external_ids','movie_assets')]
     with engine.connect() as c:
@@ -159,7 +186,7 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
         mappings=dict(c.execute(mapping_query).all())
         for mid,tid in mappings.items():
             if mid in byid:byid[mid]['tmdb_id']=tid
-        pending=_apply_current(c,byid,mappings,stats)
+        pending=_apply_current(c,byid,mappings,stats,bounded=subset is not None)
         stats['legacy_fallback_movies']=len(pending)
         seen=set()
         if pending:
@@ -173,12 +200,10 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
                 # revenue. Preserve its actual observation date, not today's date.
                 elif byid[mid]['revenue'] is None and valid_number(payload.get('revenue')) and payload['revenue']>0:
                     byid[mid].update(revenue=int(payload['revenue']),revenue_as_of=stamp,revenue_source='TMDB_HISTORICAL_DATABASE_SNAPSHOT')
-        archive=Path(__file__).with_name('data')/'archived_features.json'
-        if archive.is_file():
-            doc=json.loads(archive.read_text(encoding='utf-8'))
-            for fact in doc.get('rows',[]):
-                mid=fact.get('movie_id');row=byid.get(mid) if subset is None or mid in byid else None
-                if not row or str(row['tmdb_id'])!=str(fact.get('id')):continue
+        archive=archived_features()
+        for mid,row in byid.items():
+            for fact in archive.get(mid,()):
+                if str(row['tmdb_id'])!=str(fact.get('id')):continue
                 stamp=fact.get('archive_date','')+'T00:00:00Z'
                 if not row['feature_as_of'] or row['feature_as_of']<stamp:
                     features(row,fact,stamp,'APPROVED_STATIC_TMDB_CAPTURE')
@@ -201,6 +226,167 @@ def _load_candidates(engine,*,stats=None,movie_ids=None):
     for row in movies:row.update(row.pop('_retained_current_fields',{}))
     if subset is None:finalize(movies)
     return movies
+
+
+def archived_features():
+    path = Path(__file__).with_name('data') / 'archived_features.json'
+    try:
+        stat = path.stat()
+    except FileNotFoundError:
+        return {}
+    return _read_archive(path, stat.st_mtime_ns, stat.st_size)
+
+
+@lru_cache(maxsize=2)
+def _read_archive(path, modified, size):
+    rows = {}
+    for fact in json.loads(path.read_text(encoding='utf-8')).get('rows', []):
+        rows.setdefault(fact.get('movie_id'), []).append(fact)
+    return rows
+
+
+def attach_backdrops(engine, items):
+    ids = {item['movie_id'] for item in items if item.get('movie_id') is not None
+           and not item.get('backdrop')}
+    urls = {}
+    if ids:
+        assets = CatalogBase.metadata.tables['movie_assets']
+        statement = (select(assets.c.movie_id, assets.c.source, assets.c.asset_type,
+                            assets.c.source_path)
+                     .where(assets.c.movie_id.in_(sorted(ids)), assets.c.asset_type == 'backdrop')
+                     .order_by(assets.c.is_primary.desc(), assets.c.asset_id))
+        with engine.connect() as connection:
+            for row in connection.execute(statement).mappings():
+                if row['movie_id'] not in urls and (url := asset_url(row)):
+                    urls[row['movie_id']] = url
+    for item in items:
+        if not item.get('backdrop'):
+            item['backdrop'] = urls.get(item.get('movie_id'))
+
+
+def sql_feature_projection(connection, pool, *, revenue=False):
+    """Project verified scalar facts in SQL without returning source payloads to Python."""
+    tables = CatalogBase.metadata.tables
+    sources, external = (tables[name] for name in ('movie_source_records', 'movie_external_ids'))
+    mysql = connection.dialect.name == 'mysql'
+
+    def value(document, path):
+        expression = func.json_extract(document, path)
+        return func.json_unquote(expression) if mysql else expression
+
+    def kind(document, path):
+        return func.lower(func.json_type(func.json_extract(document, path)) if mysql
+                          else func.json_type(document, path))
+
+    def number(document, name, *, integer=False):
+        path = '$.' + name
+        types = ('integer',) if integer else ('integer', 'real', 'double', 'decimal')
+        return case((kind(document, path).in_(types), cast(value(document, path), Integer if integer else Numeric(32, 12))))
+
+    mapped = (select(pool.c.movie_id, external.c.external_id)
+              .select_from(pool.outerjoin(external, and_(external.c.movie_id == pool.c.movie_id,
+                                                         external.c.source == 'tmdb')))
+              .cte('rec_mapped'))
+    payload = sources.c.metadata_json
+    def historical(field, *conditions):
+        return (select(field).select_from(sources)
+                .where(sources.c.movie_id == mapped.c.movie_id, sources.c.source == 'tmdb',
+                       cast(value(payload, '$.id'), String) == mapped.c.external_id, *conditions)
+                .order_by(sources.c.fetched_at.desc(), sources.c.id.desc()).limit(1)
+                .correlate(mapped).scalar_subquery())
+
+    latest = sources.alias('rec_latest_payload')
+    join = mapped
+    latest_payload = latest.c.metadata_json
+    feature_stamp = cast(latest.c.fetched_at, String)
+    base_applied, base_empty = literal(False), literal(False)
+    metrics_applied = literal(False)
+    metrics_payload, base_payload = latest_payload, latest_payload
+    inspector = inspect(connection)
+    if inspector.has_table('tmdb_movie_metadata'):
+        columns = {entry['name'] for entry in inspector.get_columns('tmdb_movie_metadata')}
+        meta = table('tmdb_movie_metadata', *(column(name) for name in columns))
+        provenance = meta.c.get('provenance_json', literal(None))
+        base_pk = meta.c.get('source_record_pk', literal(None))
+        base_at = meta.c.get('base_at', literal(None))
+        base_state = value(provenance, '$.base.state')
+        metrics_state = value(provenance, '$.metrics.state')
+        base = sources.alias('rec_base_payload')
+        metrics = sources.alias('rec_metrics_payload')
+        matching_meta = cast(meta.c.tmdb_id, String) == mapped.c.external_id
+        join = join.outerjoin(meta, and_(meta.c.movie_id == mapped.c.movie_id, matching_meta))
+
+        def attributed_record(record, pk):
+            return and_(record.c.id == pk, record.c.movie_id == mapped.c.movie_id,
+                        record.c.source == 'tmdb',
+                        cast(value(record.c.metadata_json, '$.id'), String) == mapped.c.external_id)
+
+        join = join.outerjoin(base, attributed_record(base, func.coalesce(number(provenance, 'base.source_record_pk', integer=True), base_pk)))
+        join = join.outerjoin(metrics, attributed_record(metrics, number(provenance, 'metrics.source_record_pk', integer=True)))
+        base_empty = base_state == 'EMPTY'
+        base_present = and_(base.c.id.is_not(None), or_(base_state == 'PRESENT', base_at.is_not(None)))
+        base_applied = or_(base_empty, base_present)
+        metrics_empty = metrics_state == 'EMPTY'
+        metrics_applied = or_(metrics_empty, and_(metrics_state == 'PRESENT', metrics.c.id.is_not(None)))
+        metrics_payload = case((metrics_empty, None), (metrics_applied, metrics.c.metadata_json),
+                               (base_applied, None), else_=latest_payload)
+        base_payload = case((base_empty, None), (base_present, base.c.metadata_json), else_=latest_payload)
+        feature_stamp = case((base_applied, func.coalesce(value(provenance, '$.base.fetched_at'),
+                                                           cast(base_at, String))), else_=feature_stamp)
+
+    latest_pk = case((base_applied, None), else_=historical(sources.c.id))
+    join = join.outerjoin(latest, latest.c.id == latest_pk)
+
+    amount = literal(None)
+    if revenue:
+        base_amount = number(base_payload, 'revenue')
+        historical_amount = number(payload, 'revenue')
+        amount = case((base_empty, None), (base_amount > 0, base_amount),
+                      else_=historical(historical_amount, historical_amount > 0))
+
+    archive_ids, archive = _archive_projection()
+    archive_key = literal('$.') + func.json_quote(cast(mapped.c.movie_id, String) + literal(':') + mapped.c.external_id)
+    archive_doc = case((mapped.c.movie_id.in_(archive_ids), func.json_extract(literal(archive), archive_key))) if archive_ids else literal(None)
+    archive_stamp = value(archive_doc, '$.stamp')
+    newer_archive = and_(archive_stamp.is_not(None),
+                         or_(feature_stamp.is_(None),
+                             func.substr(func.replace(feature_stamp, ' ', 'T'), 1, 19) < func.substr(archive_stamp, 1, 19)))
+    raw = (select(mapped.c.movie_id, feature_stamp.label('feature_stamp'), metrics_payload.label('metrics_doc'),
+                  amount.label('amount'), archive_doc.label('archive_doc'), newer_archive.label('newer_archive'),
+                  metrics_applied.label('metrics_applied'), base_applied.label('base_applied'))
+           .select_from(join).cte('rec_raw_facts'))
+    effective_metrics = case((and_(raw.c.newer_archive, ~func.coalesce(raw.c.metrics_applied, False)),
+                              raw.c.archive_doc), else_=raw.c.metrics_doc)
+    heat = number(effective_metrics, 'popularity')
+    votes = number(effective_metrics, 'vote_count', integer=True)
+    score = number(effective_metrics, 'vote_average')
+    archive_amount = number(raw.c.archive_doc, 'revenue') if revenue else literal(None)
+    total_revenue = case((and_(raw.c.newer_archive, ~func.coalesce(raw.c.base_applied, False), archive_amount > 0),
+                          archive_amount), else_=raw.c.amount)
+    total_revenue = func.floor(total_revenue) if mysql else cast(total_revenue, Integer)
+    return (select(raw.c.movie_id,
+                   case((heat >= 0, heat)).label('heat'),
+                   case((votes >= 0, votes)).label('votes'),
+                   case((and_(votes > 0, score.between(0, 10)), score)).label('score'),
+                   total_revenue.label('revenue'))
+            .cte('rec_facts'))
+
+
+def _archive_projection():
+    archive = archived_features()
+    projected = {}
+    for movie_id, facts in archive.items():
+        for fact in facts:
+            key = f"{movie_id}:{fact.get('id')}"
+            stamp = fact.get('archive_date', '') + 'T00:00:00Z'
+            old = projected.get(key, {})
+            if old.get('stamp', '') >= stamp:
+                continue
+            projected[key] = {field: fact[field] for field in ('popularity', 'vote_average', 'vote_count', 'revenue') if field in fact}
+            if not valid_number(projected[key].get('revenue')) or not projected[key]['revenue']:
+                projected[key]['revenue'] = old.get('revenue')
+            projected[key]['stamp'] = stamp
+    return sorted(mid for mid in archive if type(mid) is int), json.dumps(projected, separators=(',', ':'))
 
 
 def finalize(movies):

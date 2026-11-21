@@ -1,11 +1,18 @@
 """Shared read-only recommendation channels. No model calls or catalog mutations."""
-import hashlib,json,math,os,threading
+import hashlib,json,math,os,threading,time
+from collections import Counter, OrderedDict
+from concurrent.futures import Future, ThreadPoolExecutor
+from contextlib import nullcontext
+from heapq import nlargest
 from pathlib import Path
 from datetime import datetime,timedelta,timezone
-from .recommendation import recommend
-from .recommendation_pipeline import rank_movies,RECOMMENDATION_VERSION
-from .recommendation_data import load_candidates,valid_number
-from assistant.conditions import matches,validate_filters
+from weakref import WeakKeyDictionary
+from sqlalchemy import and_, case, func, inspect, literal, or_, select
+from .recommendation_pipeline import rank_movies
+from .recommendation_data import _load_candidates, attach_backdrops, finalize, sql_feature_projection, valid_number
+from .models import CatalogBase
+from . import public_catalog_cache
+from assistant.conditions import genre_groups,matches,validate_filters
 
 VERSION='boards-m10-v2'
 CHANNELS={
@@ -32,10 +39,29 @@ def period_for(channel,now):
     date=local.date()
     return (date-timedelta(days=date.weekday())).isoformat() if channel=='weekly' else date.isoformat()
 
+def _period_key(user, channel, period, options):
+    return hashlib.sha256(json.dumps([VERSION,str(user),channel,period,options],
+                                     sort_keys=True,separators=(',',':')).encode()).hexdigest()
+
+
+def _period_options(filters, keyword, min_votes, weights):
+    return dict(filters={key:value for key,value in filters.items() if value not in (None,[],False)},
+                keyword=keyword, min_votes=min_votes, weights=weights)
+
+
+def _read_period_ids(target, period):
+    if target.is_symlink() or target.parent.is_symlink():raise ValueError('Unsafe cache')
+    if not target.is_file():return []
+    doc=json.loads(target.read_text(encoding='utf-8'))
+    if doc.get('version')!=VERSION or doc.get('period')!=period:return []
+    ids=doc.get('ids',[])
+    if type(ids) is not list or any(type(mid) is not int or mid<1 for mid in ids):raise ValueError('Invalid period cache')
+    return ids
+
 def persisted_order(folder,user,channel,period,filters,ordered):
     """Cache only IDs, never credentials or behavior payloads; fail explicitly if unwritable."""
     if folder is None:return ordered,'DETERMINISTIC_ONLY'
-    key=hashlib.sha256(json.dumps([VERSION,str(user),channel,period,filters],sort_keys=True,separators=(',',':')).encode()).hexdigest()
+    key=_period_key(user,channel,period,filters)
     folder=Path(folder);folder.mkdir(parents=True,exist_ok=True,mode=0o700)
     if folder.is_symlink():raise ValueError('Unsafe cache')
     target=folder/(key+'.json')
@@ -49,12 +75,7 @@ def persisted_order(folder,user,channel,period,filters,ordered):
                 fcntl.flock(stream.fileno(),fcntl.LOCK_EX)
             except ImportError:pass
             if target.is_symlink() or lock.is_symlink():raise ValueError('Unsafe cache')
-            if target.is_file():
-                doc=json.loads(target.read_text(encoding='utf-8'))
-                if doc.get('version')==VERSION and doc.get('period')==period:
-                    old=doc.get('ids',[])
-                    if type(old) is not list or any(type(i) is not int or i<1 for i in old):raise ValueError('Invalid period cache')
-                    ordered=list(dict.fromkeys(old+ordered))
+            ordered=list(dict.fromkeys(_read_period_ids(target,period)+ordered))
             tmp=folder/(key+'.'+str(os.getpid())+'.tmp')
             tmp.write_text(json.dumps({'version':VERSION,'period':period,'ids':ordered}),encoding='utf-8');os.chmod(tmp,0o600);os.replace(tmp,target)
     return ordered,'PERSISTED_PERIOD'
@@ -101,6 +122,13 @@ def external_movie(row,genres):
         'tmdb_popularity':row.get('popularity') if valid_number(row.get('popularity')) else None}
 
 def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='',min_votes=None,scope='all',cache_dir=None,now=None,weights=None,trusted_filters=False):
+    filters, now, weights = _board_arguments(channel, limit, filters, keyword, min_votes,
+                                            scope, now, weights, trusted_filters)
+    return _board(movies, state, user, channel, limit=limit, filters=filters, keyword=keyword,
+                  min_votes=min_votes, scope=scope, cache_dir=cache_dir, now=now, weights=weights)
+
+
+def _board_arguments(channel, limit, filters, keyword, min_votes, scope, now, weights, trusted_filters):
     if channel not in CHANNELS or type(limit) is not int or not 1<=limit<=50 or scope not in ('all','local'):raise ValueError('Channel arguments')
     if type(keyword) is not str or len(keyword)>100:raise ValueError('Keyword')
     if min_votes is not None and (type(min_votes) is not int or not 0<=min_votes<=10000000):raise ValueError('Votes')
@@ -108,6 +136,14 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     weights={'favorite':3.,'want':2.,'rating':1.} if weights is None else weights
     if set(weights)!={'favorite','want','rating'} or any(type(v) not in (int,float) or not math.isfinite(v) or not 0<=v<=10 for v in weights.values()):raise ValueError('Weights')
     if now.tzinfo is None:raise ValueError('Aware time required')
+    return filters, now, weights
+
+
+_UNREAD_SNAPSHOT = object()
+
+
+def _board(movies, state, user, channel, *, limit, filters, keyword, min_votes, scope,
+           cache_dir, now, weights, snapshot=_UNREAD_SNAPSHOT, rating_mean=None):
     active=[m for m in movies if m.get('catalog_status')=='active' and m.get('is_adult') is not True]
     byid={m['movie_id']:m for m in active};bytmdb={str(m['tmdb_id']):m for m in active if m.get('tmdb_id')}
     personal=channel in ('daily','weekly','because','personal')
@@ -122,7 +158,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     if channel in PUBLIC:
         # Browsing uses published snapshots; explicit TMDB refresh and scheduled
         # jobs update them without tying a catalog GET to external network work.
-        snapshot=public_snapshot(channel,online=False)
+        if snapshot is _UNREAD_SNAPSHOT:snapshot=public_snapshot(channel,online=False)
         if snapshot is None:return dict(result,status='UNAVAILABLE',source='TMDB_OFFICIAL_SNAPSHOT',limitations=['尚未取得该频道官方快照，不以其他榜单替代。'])
         captured=datetime.fromisoformat(snapshot['captured_at']);age=(now-captured).total_seconds()
         result.update(source='TMDB_OFFICIAL_SNAPSHOT',source_as_of=snapshot['captured_at'],scope='LOCAL_SUBSET_OF_TMDB_BOARD' if scope=='local' else 'TMDB_BOARD_LOCAL_AND_EXTERNAL',snapshot_id=hashlib.sha256(json.dumps(snapshot,sort_keys=True).encode()).hexdigest()[:20],status='STALE' if age>21600 else 'OK')
@@ -174,7 +210,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
                     chosen=max(remaining,key=lambda m:(score(m),-m['movie_id']));ranked.append(chosen);remaining.remove(chosen)
                     for genre in chosen.get('genres',[]):counts[genre]=counts.get(genre,0)+1
                     decade=(chosen.get('release_year') or 0)//10;decades[decade]=decades.get(decade,0)+1
-                options=dict(filters={k:v for k,v in filters.items() if v not in (None,[],False)},keyword=keyword,min_votes=min_votes,weights=weights)
+                options=_period_options(filters,keyword,min_votes,weights)
                 order,cache_status=persisted_order(cache_dir,user,channel,period,options,[m['movie_id'] for m in ranked])
                 # Cached IDs are always checked against current visibility, hard filters and negative feedback.
                 valid={m['movie_id']:m for m in eligible};ranked=[valid[mid] for mid in order if mid in valid]
@@ -186,7 +222,7 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
         elif channel=='top_rated':
             threshold=100 if min_votes is None else max(1,min_votes)
             eligible=[m for m in eligible if m.get('tmdb_rating') is not None and (m.get('vote_count') or 0)>=threshold]
-            mean=sum(m['tmdb_rating'] for m in eligible)/len(eligible) if eligible else 0
+            mean=rating_mean if rating_mean is not None else sum(m['tmdb_rating'] for m in eligible)/len(eligible) if eligible else 0
             for m in eligible:
                 n=m['vote_count'];scores[str(m['movie_id'])]=(n*m['tmdb_rating']+100*mean)/(n+100);reasons[str(m['movie_id'])]=['TMDB评分及票数 · 贝叶斯平滑（先验权重100票）']
             ranked=sorted(eligible,key=lambda m:(-scores[str(m['movie_id'])],-m['vote_count'],m['movie_id']))
@@ -227,13 +263,477 @@ def board(movies,state,user,channel='personal',*,limit=12,filters=None,keyword='
     if not result['items'] and result['status']=='OK':result['status']='NO_DATA'
     return result
 
-def for_app(app,user,channel='personal',**kwargs):
-    folder=os.environ.get('MI2_RECOMMENDATION_CACHE_DIR') or str(Path(app.config['MEDIA_CACHE_DIR'])/'.private-recommendations')
-    from .tmdb_connection import using,request_binding
-    service=app.extensions.get('tmdb_connection');binding=request_binding(app)
-    with using(service,user,binding):
-        result=board(load_candidates(app.extensions['auth_engine']),app.extensions['m6_behavior'].snapshot(user),user,channel,cache_dir=folder,**kwargs)
-        if service:
-            result['tmdb_connection']=service.status(user,binding)
-            if result['tmdb_connection']['last_error']:result['limitations'].append('TMDB在线读取失败，当前使用可用缓存；可在数据连接中检查原因。')
-        return result
+_TABLES = CatalogBase.metadata.tables
+_MOVIES = _TABLES['movies']
+_GENRES = _TABLES['genres']
+_GENRE_LINKS = _TABLES['movie_genres']
+_CREDITS = _TABLES['movie_credits']
+_EXTERNAL = _TABLES['movie_external_ids']
+_RATINGS = _TABLES['movie_ratings_summary']
+_PERSONAL = frozenset(('daily', 'weekly', 'personal', 'because'))
+_PERIOD = frozenset(('daily', 'weekly'))
+MAX_RECALL = 500
+MAX_SEEDS = 60
+
+
+def _active_ids():
+    return select(_MOVIES.c.movie_id).where(_MOVIES.c.catalog_status == 'active',
+                                            _MOVIES.c.is_adult.is_not(True))
+
+
+def _state_ids(state, predicate):
+    return {int(mid) for mid, behavior in state.items() if predicate(behavior)}
+
+
+def _genre_match(movie_id, expression):
+    return (select(literal(1)).select_from(_GENRE_LINKS.join(_GENRES,
+            _GENRES.c.genre_id == _GENRE_LINKS.c.genre_id))
+            .where(_GENRE_LINKS.c.movie_id == movie_id, expression).correlate_except(_GENRE_LINKS, _GENRES).exists())
+
+
+def _genre_contains(movie_id, labels):
+    return _genre_match(movie_id, or_(*(func.instr(_GENRES.c.name_zh, label) > 0 for label in labels)))
+
+
+def _eligible_ids(state, channel, filters, keyword):
+    statement = _active_ids()
+    year = _MOVIES.c.release_year
+    if filters.get('year_from') is not None:
+        statement = statement.where(year >= filters['year_from'])
+    if filters.get('year_to') is not None:
+        statement = statement.where(year <= filters['year_to'])
+    if filters.get('runtime_max') is not None:
+        statement = statement.where(_MOVIES.c.runtime_minutes <= filters['runtime_max'])
+    if filters.get('years_any') is not None:
+        statement = statement.where(year.in_(filters['years_any']))
+    year_groups = filters.get('_year_groups', [filters['year_ranges_any']] if filters.get('year_ranges_any') else [])
+    for group in year_groups:
+        statement = statement.where(or_(literal(False), *(year.between(low, high) for low, high in group)))
+    if filters.get('excluded_year_ranges'):
+        statement = statement.where(~or_(*(year.between(low, high) for low, high in filters['excluded_year_ranges'])))
+    if filters.get('language'):
+        statement = statement.where(_MOVIES.c.original_language == filters['language'])
+    for group in genre_groups(filters):
+        statement = statement.where(_genre_contains(_MOVIES.c.movie_id, group) if group else literal(False))
+    if filters.get('excluded_genres'):
+        statement = statement.where(~_genre_contains(_MOVIES.c.movie_id, filters['excluded_genres']))
+    if keyword:
+        names = _MOVIES.c.title + literal(' ') + func.coalesce(_MOVIES.c.original_title, '')
+        statement = statement.where(func.instr(func.lower(names), keyword.casefold()) > 0)
+    exclude_watched = filters.get('unwatched') or (channel in _PERSONAL and filters.get('unwatched') is not False)
+    excluded = _state_ids(state, lambda item: item.get('not_interested') or (exclude_watched and item.get('watched')))
+    if excluded:
+        statement = statement.where(_MOVIES.c.movie_id.not_in(sorted(excluded)))
+    return statement
+
+
+def _credit_match(movie_id, person_ids, *, directors):
+    if not person_ids:
+        return literal(False)
+    roles = (_CREDITS.c.role_type == 'crew', _CREDITS.c.job == 'Director') if directors else (
+        _CREDITS.c.role_type == 'cast', _CREDITS.c.sort_order < 10)
+    return (select(literal(1)).where(_CREDITS.c.movie_id == movie_id,
+            _CREDITS.c.person_id.in_(sorted(person_ids)), *roles).correlate_except(_CREDITS).exists())
+
+
+def _relations(movie_id, seeds):
+    directors = {person for seed in seeds for person in seed['director_ids']}
+    actors = {person for seed in seeds for person in seed['actor_ids']}
+    names = {genre for seed in seeds for genre in seed['genres']}
+    return (_credit_match(movie_id, directors, directors=True),
+            _credit_match(movie_id, actors, directors=False),
+            _genre_match(movie_id, _GENRES.c.name_zh.in_(sorted(names))) if names else literal(False))
+
+
+def _seed_weight(behavior, weights):
+    if behavior.get('not_interested'):
+        return 0
+    rating = behavior.get('rating')
+    rating_weight = weights['rating'] * max(0, rating - 3) if valid_number(rating, 5) else 0
+    return weights['favorite'] * bool(behavior.get('favorite')) + weights['want'] * bool(behavior.get('want')) + rating_weight
+
+
+def _profile_ids(state, channel, weights, small):
+    if channel == 'because':
+        return _state_ids(state, lambda item: item.get('favorite') or item.get('rating', 0) >= 4)
+    positive, negative = [], []
+    for mid, behavior in state.items():
+        weight = _seed_weight(behavior, weights)
+        rating = behavior.get('rating')
+        if weight:
+            positive.append((weight, int(mid)))
+        if behavior.get('not_interested') or (valid_number(rating, 5) and rating < 3):
+            negative.append((2 if behavior.get('not_interested') else min(2, 3 - rating), int(mid)))
+    if small or len(positive) + len(negative) <= MAX_SEEDS:
+        return {mid for _, mid in positive + negative}
+    positive_count = min(len(positive), MAX_SEEDS - min(len(negative), MAX_SEEDS // 3))
+    return {mid for _, mid in nlargest(positive_count, positive) + nlargest(MAX_SEEDS - positive_count, negative)}
+
+
+def _catalog_counts(engine, cache, catalog_token):
+    with _cache_lock:
+        previous = cache.coverage
+        if previous and previous[0] == catalog_token and previous[1] > time.monotonic():
+            return previous[2]
+        pending = cache.coverage_inflight.get(catalog_token)
+        if pending is None:
+            pending = cache.coverage_inflight[catalog_token] = Future()
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        return pending.result()
+    try:
+        with engine.connect() as connection:
+            facts = sql_feature_projection(connection, _active_ids().cte('rec_active'))
+            totals = tuple(connection.execute(select(func.count(), func.count(facts.c.heat)).select_from(facts)).one())
+        with _cache_lock:
+            if cache.catalog_token is catalog_token[0]:
+                cache.coverage = (catalog_token, time.monotonic() + BOARD_TTL, totals)
+        pending.set_result(totals)
+        return totals
+    except BaseException as error:
+        pending.set_exception(error)
+        raise
+    finally:
+        with _cache_lock:
+            cache.coverage_inflight.pop(catalog_token, None)
+
+
+def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, persisted, catalog_total, snapshot):
+    if channel in PUBLIC:
+        upstream = [str(row['id']) for row in (snapshot or {}).get('items', [])[:60]
+                    if type(row.get('id')) is int and row['id'] > 0]
+        if not upstream:
+            return [], None, None
+        query = _active_ids().join(_EXTERNAL, _EXTERNAL.c.movie_id == _MOVIES.c.movie_id).where(
+                                 _EXTERNAL.c.source == 'tmdb', _EXTERNAL.c.external_id.in_(upstream)).limit(60)
+        with engine.connect() as connection:
+            ids = connection.execute(query).scalars().all()
+        return finalize(_load_candidates(engine, movie_ids=ids)), None, None
+
+    if channel == 'watchlist':
+        wanted = sorted(_state_ids(state, lambda item: item.get('want') and not item.get('watched')))
+        movies = [movie for offset in range(0, len(wanted), MAX_RECALL)
+                  for movie in _load_candidates(engine, movie_ids=wanted[offset:offset + MAX_RECALL])]
+        return finalize(movies), None, None
+
+    small = catalog_total < MAX_RECALL
+    if small and channel in ('daily', 'weekly', 'personal'):
+        with engine.connect() as connection:
+            ids = connection.execute(_active_ids().order_by(_MOVIES.c.movie_id).limit(MAX_RECALL)).scalars().all()
+        return finalize(_load_candidates(engine, movie_ids=ids)), None, None
+    seed_ids = _profile_ids(state, channel, weights, small) if channel in _PERSONAL else set()
+    seed_order = sorted(seed_ids)
+    seeds = [seed for offset in range(0, len(seed_order), MAX_RECALL)
+             for seed in _load_candidates(engine, movie_ids=seed_order[offset:offset + MAX_RECALL])]
+    seeds = [seed for seed in seeds if seed.get('is_adult') is not True]
+    if channel == 'because' and not seeds:
+        return [], 0, None
+
+    matching_count, rating_mean = None, None
+    eligible = _eligible_ids(state, channel, filters, keyword).cte('rec_eligible')
+    with engine.connect() as connection:
+        start = eligible
+        if min_votes is not None or channel in ('top_rated', 'revenue'):
+            facts = sql_feature_projection(connection, eligible, revenue=channel == 'revenue')
+            narrowed = select(facts)
+            if min_votes is not None:
+                narrowed = narrowed.where(facts.c.votes >= min_votes)
+            if channel == 'top_rated':
+                threshold = 100 if min_votes is None else max(1, min_votes)
+                narrowed = narrowed.where(facts.c.score.is_not(None), facts.c.votes >= threshold)
+            elif channel == 'revenue':
+                narrowed = narrowed.where(facts.c.revenue >= 1)
+            start = narrowed.cte('rec_filtered_facts')
+        ids = select(start.c.movie_id)
+        if channel == 'top_rated':
+            window = select(start, func.count().over().label('matching_count'),
+                            func.avg(start.c.score).over().label('rating_mean')).cte('rec_rating_window')
+            score = (window.c.votes * window.c.score + 100 * window.c.rating_mean) / (window.c.votes + 100)
+            rows = connection.execute(select(window.c.movie_id, window.c.matching_count, window.c.rating_mean)
+                                      .order_by(score.desc(), window.c.votes.desc(), window.c.movie_id).limit(400)).all()
+            matching_count, rating_mean = (rows[0].matching_count, float(rows[0].rating_mean)) if rows else (0, 0)
+            recalled, ids = [row.movie_id for row in rows], None
+        elif channel == 'revenue':
+            rows = connection.execute(ids.add_columns(func.count().over().label('matching_count'))
+                                      .order_by(start.c.revenue.desc(), start.c.movie_id).limit(400)).all()
+            matching_count = rows[0].matching_count if rows else 0
+            recalled, ids = [row.movie_id for row in rows], None
+        elif channel == 'because':
+            directors, actors, genres = _relations(start.c.movie_id, seeds)
+            ids = ids.where(start.c.movie_id.not_in(sorted(seed_ids)), or_(directors, actors, genres))
+            matching_count = connection.scalar(select(func.count()).select_from(ids.subquery()))
+            ids, quality = _quality(connection, ids, start, eligible)
+            ids = ids.order_by(case((directors, 3), else_=0).desc(), case((actors, 2), else_=0).desc(), *quality).limit(400)
+        else:
+            matching_count = connection.scalar(select(func.count()).select_from(start))
+            seed_loaded = {seed['movie_id'] for seed in seeds}
+            capacity = min(450, MAX_RECALL - len(seed_loaded))
+            if not small and matching_count > capacity:
+                pinned = []
+                for offset in range(0, len(persisted), 300):
+                    chunk = persisted[offset:offset + 300]
+                    valid = set(connection.execute(ids.where(start.c.movie_id.in_(chunk))).scalars())
+                    pinned.extend(mid for mid in chunk if mid in valid)
+                    if len(pinned) >= 50:
+                        break
+                directors, actors, _ = _relations(start.c.movie_id, seeds)
+                preferred = Counter()
+                for seed in seeds:
+                    for genre in seed['genres']:
+                        preferred[genre] += _seed_weight(state[str(seed['movie_id'])], weights)
+                genre_ids = [genre for genre, weight in preferred.most_common(5) if weight > 0]
+                quality_ids, quality = _quality(connection, ids, start, eligible)
+                lanes = [connection.execute(quality_ids.order_by(*quality).limit(140)).scalars().all(),
+                         connection.execute(ids.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id)
+                                            .order_by(_MOVIES.c.updated_at.desc(), start.c.movie_id).limit(40)).scalars().all()]
+                if seeds:
+                    lanes.append(connection.execute(quality_ids.where(or_(directors, actors))
+                                 .order_by(case((directors, 1), else_=0).desc(), *quality).limit(160)).scalars().all())
+                if genre_ids:
+                    lanes.append(connection.execute(quality_ids.where(_genre_match(start.c.movie_id, _GENRES.c.name_zh.in_(genre_ids)))
+                                 .order_by(*quality).limit(180)).scalars().all())
+                recalled = dict.fromkeys(pinned[:50])
+                for index in range(max(map(len, lanes))):
+                    for lane in lanes:
+                        if index < len(lane) and len(recalled) < capacity:
+                            recalled.setdefault(lane[index], None)
+                ids = None
+        if ids is not None:
+            recalled = connection.execute(ids).scalars().all()
+    loaded = {seed['movie_id']: seed for seed in seeds}
+    loaded.update((movie['movie_id'], movie) for movie in _load_candidates(engine, movie_ids=set(recalled) - loaded.keys()))
+    return finalize([loaded[mid] for mid in sorted(loaded)]), matching_count, rating_mean
+
+
+def _quality(connection, query, start, eligible):
+    inspector = inspect(connection)
+    if 'score' in start.c:
+        quality = (start.c.score.desc(), start.c.votes.desc(), start.c.heat.desc())
+    elif inspector.has_table(_RATINGS.name):
+        tmdb_r = _RATINGS.alias('rec_tmdb_ratings')
+        douban_r = _RATINGS.alias('rec_douban_ratings')
+        tmdb_on = and_(tmdb_r.c.movie_id == start.c.movie_id, tmdb_r.c.source == 'tmdb')
+        douban_on = and_(douban_r.c.movie_id == start.c.movie_id, douban_r.c.source == 'douban')
+        if any(column['name'] == 'score_scale' for column in inspector.get_columns(_RATINGS.name)):
+            douban_on = and_(douban_on, douban_r.c.score_scale == 10)
+        query = query.outerjoin(tmdb_r, tmdb_on).outerjoin(douban_r, douban_on)
+        score_val = func.coalesce(tmdb_r.c.score_value, douban_r.c.score_value)
+        vote_cnt = func.coalesce(tmdb_r.c.vote_count, douban_r.c.vote_count)
+        bayes = (vote_cnt * score_val + 650) / (vote_cnt + 100)
+        quality = (bayes.desc(), vote_cnt.desc())
+    else:
+        facts = sql_feature_projection(connection, eligible)
+        query = query.join(facts, facts.c.movie_id == start.c.movie_id)
+        quality = (facts.c.score.desc(), facts.c.votes.desc(), facts.c.heat.desc())
+    query = query.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id)
+    return query, (*quality, _MOVIES.c.updated_at.desc(), start.c.movie_id)
+
+
+BOARD_TTL = 120
+BOARD_STALE_GRACE = 15
+MAX_BOARD_CACHE = 256
+_cache_lock = threading.RLock()
+_board_caches = WeakKeyDictionary()
+_refresh_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix='recommendation-warm')
+
+
+class _BoardCache:
+    def __init__(self):
+        self.results = OrderedDict()
+        self.inflight = {}
+        self.warming = {}
+        self.versions = OrderedDict()
+        self.catalog_token = object()
+        self.coverage = None
+        self.coverage_inflight = {}
+
+
+def _engine_cache(engine):
+    with _cache_lock:
+        return _board_caches.setdefault(engine, _BoardCache())
+
+
+def invalidate_board_cache(engine=None, user=None, *, behavior_version=None):
+    with _cache_lock:
+        caches = list(_board_caches.values()) if engine is None else [_engine_cache(engine)]
+        for cache in caches:
+            if user is None:
+                cache.results.clear()
+                cache.catalog_token = object()
+                cache.coverage = None
+            else:
+                principal = str(user)
+                previous, _ = cache.versions.get(principal, (None, None))
+                version = max(previous, behavior_version) if previous is not None and behavior_version is not None else behavior_version
+                cache.versions[principal] = (version, object())
+                cache.versions.move_to_end(principal)
+                for key in [key for key in cache.results if key[0] == principal]:
+                    del cache.results[key]
+                if len(cache.versions) > MAX_BOARD_CACHE:
+                    dropped, _ = cache.versions.popitem(last=False)
+                    for key in [key for key in cache.results if key[0] == dropped]:
+                        del cache.results[key]
+
+
+def _canonical_filters(filters):
+    return json.dumps(filters, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+
+
+def _clone_dto(value):
+    if type(value) is dict:
+        return {key: _clone_dto(item) for key, item in value.items()}
+    if type(value) is list:
+        return [_clone_dto(item) for item in value]
+    return value
+
+
+def _tmdb_token(service, user, binding):
+    if not service:
+        return None
+    lock = getattr(service, '_lock', None)
+    with lock if lock is not None else nullcontext():
+        entry = getattr(service, '_entries', {}).get((user, binding))
+        if entry and (getattr(service, 'store', None) or entry['expires'] > time.monotonic()):
+            state = tuple(entry.get(field) for field in ('generation', 'enabled', 'verification', 'last_error', 'last_checked_at'))
+        else:
+            state = None
+    return id(service), binding, state
+
+
+def _request_binding(app):
+    from flask import has_request_context
+    from .tmdb_connection import request_binding
+    return request_binding(app) if has_request_context() else hashlib.sha256(b'').hexdigest()
+
+
+def _schedule_home_work(app, user, callback, *, replace=False):
+    cache = _engine_cache(app.extensions['auth_engine'])
+    principal = str(user)
+    with _cache_lock:
+        if principal in cache.warming:
+            if replace:
+                cache.warming[principal] = callback
+            return False
+        if len(cache.warming) >= 64:
+            return False
+        cache.warming[principal] = None
+
+    def run():
+        task = callback
+        while task is not None:
+            try:
+                with app.app_context():
+                    task()
+            except Exception as error:
+                app.logger.warning('Recommendation cache background refresh failed: %s', type(error).__name__)
+            with _cache_lock:
+                task = cache.warming[principal]
+                if task is None:
+                    del cache.warming[principal]
+                else:
+                    cache.warming[principal] = None
+
+    try:
+        _refresh_workers.submit(run)
+    except RuntimeError:
+        with _cache_lock:
+            del cache.warming[principal]
+        return False
+    return True
+
+
+def warm_user_home_async(app, user):
+    binding = _request_binding(app)
+    return _schedule_home_work(app, user, lambda: _for_app(app, user, 'daily', binding=binding, limit=13), replace=True)
+
+
+def for_app(app, user, channel='personal', **kwargs):
+    return _for_app(app, user, channel, binding=_request_binding(app), **kwargs)
+
+
+def _for_app(app, user, channel, *, binding, limit=12, filters=None, keyword='', min_votes=None,
+             scope='all', now=None, weights=None, trusted_filters=False, refresh=False):
+    from .tmdb_connection import using
+
+    explicit_now = now
+    filters, now, weights = _board_arguments(channel, limit, filters, keyword, min_votes,
+                                            scope, now, weights, trusted_filters)
+    weights = {key: float(value) for key, value in weights.items()}
+    folder = os.environ.get('MI2_RECOMMENDATION_CACHE_DIR') or str(Path(app.config['MEDIA_CACHE_DIR']) / '.private-recommendations')
+    engine = app.extensions['auth_engine']
+    repository = app.extensions['m6_behavior']
+    service = app.extensions.get('tmdb_connection')
+    cache = _engine_cache(engine)
+    period = period_for(channel, now) if channel in _PERIOD else None
+    principal = str(user)
+    with using(service, user, binding):
+        snapshot = public_snapshot(channel, online=False) if channel in PUBLIC else None
+        stamp = snapshot['captured_at'] if snapshot else None
+        snapshot_token = (stamp, (now - datetime.fromisoformat(stamp)).total_seconds() > 21600) if stamp else None
+        catalog_version = (public_catalog_cache.peek(engine) or {}).get('version')
+        with _cache_lock:
+            catalog_token = (cache.catalog_token, catalog_version)
+            behavior_token = cache.versions.get(principal)
+            options_key = (principal, channel, scope, limit, _canonical_filters(filters), keyword, min_votes,
+                           tuple(sorted(weights.items())), period, catalog_token, behavior_token,
+                           snapshot_token, explicit_now, folder, id(repository))
+            key = (*options_key, _tmdb_token(service, user, binding))
+            hit = cache.results.get(key)
+            if hit:
+                age = time.monotonic() - hit[0]
+                if not refresh and age < BOARD_TTL + BOARD_STALE_GRACE:
+                    cache.results.move_to_end(key)
+                    if age >= BOARD_TTL:
+                        _schedule_home_work(app, user, lambda: _for_app(app, user, channel, binding=binding, limit=limit,
+                                            filters=filters, keyword=keyword, min_votes=min_votes, scope=scope,
+                                            now=explicit_now, weights=weights, trusted_filters=True, refresh=True))
+                    return _clone_dto(hit[1])
+            future = cache.inflight.get(key)
+            if future is None:
+                future = cache.inflight[key] = Future()
+                owner = True
+            else:
+                owner = False
+        if not owner:
+            return _clone_dto(future.result())
+        try:
+            state = repository.snapshot(user)
+            totals = _catalog_counts(engine, cache, catalog_token)
+            persisted = []
+            if period:
+                options = _period_options(filters, keyword, min_votes, weights)
+                persisted = _read_period_ids(Path(folder) / (_period_key(user, channel, period, options) + '.json'), period)
+            movies, candidate_count, mean = _recall(engine, channel, state, filters=filters, keyword=keyword,
+                                                    min_votes=min_votes, weights=weights, persisted=persisted,
+                                                    catalog_total=totals[0], snapshot=snapshot)
+            result = _board(movies, state, user, channel, limit=limit, filters=filters, keyword=keyword,
+                            min_votes=min_votes, scope=scope, cache_dir=folder, now=now, weights=weights,
+                            snapshot=snapshot, rating_mean=mean)
+            result['catalog_total'], result['popularity_covered'] = totals
+            if candidate_count is not None:
+                result['candidate_count'] = candidate_count
+            elif channel in PUBLIC and 'candidate_count' not in result:
+                result['candidate_count'] = result['ranked_window_count'] = 0
+            attach_backdrops(engine, result['items'])
+            if service:
+                result['tmdb_connection'] = service.status(user, binding)
+                if result['tmdb_connection']['last_error']:
+                    result['limitations'].append('TMDB在线读取失败，当前使用可用缓存；可在数据连接中检查原因。')
+            final_tmdb_token = _tmdb_token(service, user, binding)
+            with _cache_lock:
+                if cache.catalog_token is catalog_token[0] and cache.versions.get(principal) == behavior_token:
+                    saved_key = (*options_key, final_tmdb_token)
+                    cache.results[saved_key] = (time.monotonic(), result)
+                    cache.results.move_to_end(saved_key)
+                    while len(cache.results) > MAX_BOARD_CACHE:
+                        cache.results.popitem(last=False)
+                future.set_result(result)
+            return _clone_dto(result)
+        except BaseException as error:
+            future.set_exception(error)
+            raise
+        finally:
+            with _cache_lock:
+                cache.inflight.pop(key, None)
