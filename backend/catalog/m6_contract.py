@@ -12,7 +12,7 @@ import re
 import sqlite3
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from sqlalchemy import Boolean, Integer, BigInteger, SmallInteger, Numeric, String, JSON, Date, DateTime, CheckConstraint, UniqueConstraint, ForeignKeyConstraint
+from sqlalchemy import Boolean, Integer, BigInteger, SmallInteger, Numeric, String, JSON, Date, DateTime, CheckConstraint, UniqueConstraint
 from sqlalchemy.schema import CreateTable, CreateIndex
 from sqlalchemy.dialects import mysql
 

@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import select, text
 from .models import CatalogBase
-from .recommendation_data import _load_candidates, valid_number
+from .recommendation_data import _load_candidates
 from . import board_snapshots
 from .admin_importer import digest
 

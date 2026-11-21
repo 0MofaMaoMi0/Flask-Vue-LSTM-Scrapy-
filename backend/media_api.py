@@ -4,7 +4,6 @@ Only allow-listed image hosts are fetched; responses are size/type checked and
 cached by URL hash. No user credentials or cookies are forwarded.
 """
 import hashlib
-import os
 import urllib.parse
 import urllib.request
 from pathlib import Path

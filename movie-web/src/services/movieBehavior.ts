@@ -54,7 +54,6 @@ export function behaviorState(movieId:number){
 export function behaviorReady(){return movieBehavior.owner>0&&movieBehavior.loaded&&!movieBehavior.error}
 export function behaviorPending(movieId:number){return pending.has(lockedKey(movieBehavior.owner,movieId))}
 export function behaviorUnsynced(movieId:number){return unsynced.has(lockedKey(movieBehavior.owner,movieId))}
-export function behaviorErrorMessage(){return movieBehavior.error}
 export function consumeInternalBehaviorEvent(){return internalEvent}
 export function behaviorEpoch(){return ownerEpoch}
 

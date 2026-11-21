@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
+import {nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 import {init, use, type EChartsType} from 'echarts/core'
 import {ScatterChart} from 'echarts/charts'
 import {AriaComponent, GridComponent, TooltipComponent} from 'echarts/components'

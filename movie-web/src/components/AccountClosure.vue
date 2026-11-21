@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import {ref,onBeforeUnmount} from 'vue'
 import {useAuthStore} from '../stores/auth'
-const props=defineProps<{idPrefix:string}>(),auth=useAuthStore()
+defineProps<{idPrefix:string}>()
+const auth=useAuthStore()
 const open=ref(false),password=ref(''),confirmation=ref(''),understand=ref(false),busy=ref(false),error=ref('')
 onBeforeUnmount(()=>{password.value='';confirmation.value=''})
 async function closeAccount(){

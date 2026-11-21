@@ -1,5 +1,5 @@
 """Encrypted account-level provider credentials in the isolated M7 auxiliary DB."""
-import json,os,secrets,stat,threading
+import json,os,secrets,stat
 from datetime import datetime
 from pathlib import Path
 from contextlib import contextmanager

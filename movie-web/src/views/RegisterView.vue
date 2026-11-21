@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import {reactive,ref,onBeforeUnmount} from 'vue'
 import {request} from '../api/auth'
-const username=ref(''),password=ref(''),confirm=ref(''),remember=ref(false)
+const username=ref(''),password=ref(''),confirm=ref('')
 const visible=reactive({password:false,confirm:false}),busy=ref(false),error=ref(''),message=ref('')
 const controller=new AbortController()
 onBeforeUnmount(()=>{controller.abort();password.value='';confirm.value=''})
-try { username.value=localStorage.getItem('movieinsight-username')||'';remember.value=!!username.value } catch {}
+try { username.value=localStorage.getItem('movieinsight-username')||'' } catch {}
 async function submit(){
  if(busy.value)return
  error.value='';message.value=''
@@ -59,8 +59,6 @@ async function submit(){
 .field input:focus{background:#121317;border-color:#c8a46a;outline:2px solid rgba(200,164,106,.28);outline-offset:1px}
 .password-wrap input{padding-right:64px}
 .showpass{right:5px;top:5px;height:36px;color:#a9a294;border-radius:6px}
-.form-options{font-size:12px;color:#a9a294;margin:0}
-.check input{accent-color:#c8a46a}
 button.submit{height:48px;border-radius:8px;background:#c8a46a;border:1px solid #c8a46a;color:#171410;font-size:13px;font-weight:500;letter-spacing:.12em;box-shadow:none;transition:background-color .18s ease,border-color .18s ease,transform .18s ease}
 button.submit:hover,button.submit:focus-visible{background:#d6b57e;border-color:#d6b57e;color:#171410;transform:translateY(-1px);box-shadow:none}
 button.submit:active{transform:translateY(0)}

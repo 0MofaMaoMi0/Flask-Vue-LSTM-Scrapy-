@@ -1,7 +1,6 @@
 """V2 read-only Agent tools, grounded library IDs and labelled discovery."""
-import json,os,urllib.request,urllib.parse
 from .tools import validate_filters,facts
-from .conditions import merge_for_tool,hard_conditions
+from .conditions import merge_for_tool
 class AgentTools:
     def __init__(self,reader,user,initial=(),conditions=None):self.reader=reader;self.user=user;self.calls=0;self.conditions=conditions or {};self.model_hints=[];self.observed={m['movie_id']:self.dto(m) for m in initial}
     def dto(self,m):return dict(facts(m),overview=str(m.get('overview') or '')[:1200],local_reasons=m.get('local_reasons',[]),tmdb_popularity=m.get('tmdb_popularity'),popularity_observed_at=m.get('popularity_observed_at'),**{k:m[k] for k in ('tmdb_id','tmdb_rating','vote_count','revenue','revenue_as_of','feature_source','feature_as_of','tmdb_details','tmdb_status','score','components','reason_codes','evidence','recommendation_version') if k in m})

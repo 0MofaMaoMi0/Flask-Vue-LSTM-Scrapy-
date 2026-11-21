@@ -12,7 +12,6 @@ const LIGHT_GLOBE_THEMES = Object.freeze({
   noir: Object.freeze({id:'noir',label:'冷灰蓝',background:'#F7F4EE',atmosphere:'#5B728E',stroke:'#526B90',side:'rgba(82,107,144,.25)',empty:'#DCE3EC',low:['#CFDCEB','#9EB6D2','#6D8EB5','#446588'],hover:'#2F4C70',selected:'#1F1B16',label:'#1F1B16',pulse:['#5B82B7','#8BA7D9','#00000000']}),
   aurora: Object.freeze({id:'aurora',label:'星雾紫',background:'#F7F4EE',atmosphere:'#8D62A6',stroke:'#7E5A9E',side:'rgba(126,90,158,.25)',empty:'#E4DCEB',low:['#DDD0E8','#BD9ED6','#9970BA','#724994'],hover:'#543270',selected:'#1F1B16',label:'#1F1B16',pulse:['#8D62A6','#B58AD1','#00000000']})
 });
-export const GLOBE_EFFECTS=Object.freeze({subtle:'克制',balanced:'平衡',vivid:'强调'});
 export function pickTheme(id){
   const isLight=typeof document!=='undefined'&&document.documentElement?.dataset?.theme==='light';
   const map=isLight?LIGHT_GLOBE_THEMES:GLOBE_THEMES;
@@ -36,36 +35,6 @@ export function altitude({selected=false,hovered=false,effort='balanced'}={}){
   const n=effort==='subtle'?.78:effort==='vivid'?1.23:1;
   return selected?.116*n:hovered?.085*n:.025*n;
 }
-export function spotlightData(stats,metric,features,selectedIso3='',limit=4){
-  const featureMap=new Map(features.map(f=>[f.properties.iso3,f]));
-  const eligible=stats.countries.filter(x=>Number.isFinite(x[metric])&&x[metric]>0&&featureMap.has(x.iso3))
-    .sort((a,b)=>b[metric]-a[metric]||a.iso3.localeCompare(b.iso3));
-  const chosen=[];
-  const selected=stats.countries.find(x=>x.iso3===selectedIso3);
-  // Selected country has priority; surrounding small countries must not create overlapping labels.
-  if(selected&&featureMap.has(selectedIso3))chosen.push(selected);
-  for(const row of eligible){
-    if(chosen.some(x=>x.iso3===row.iso3))continue;
-    if(chosen.length>=(limit+(chosen.length&&chosen[0].iso3===selectedIso3?1:0)))break;
-    const point=featureMap.get(row.iso3).properties;
-    if(chosen.some(prev=>{
-      const p=featureMap.get(prev.iso3).properties;
-      const dx=(point.lng-p.lng)*Math.cos((point.lat+p.lat)/2*Math.PI/180);
-      return Math.hypot(point.lat-p.lat,dx)<14;
-    }))continue;
-    chosen.push(row);
-  }
-  return chosen.map(row=>{
-    const point=featureMap.get(row.iso3).properties;
-    const selected= row.iso3===selectedIso3;
-    const value=metric==='average_rating' ? row.average_rating?.toFixed(1) : row[metric];
-    const suffix=metric==='average_rating'?'分':'部';
-    return {iso3:row.iso3, lat:point.lat,lng:point.lng,selected,
-      shortName:row.iso3, fullName:countryName(row.iso3,point.name),
-      countLabel:`${value ?? '—'}${suffix}`,
-      text:`${row.iso3} ${value ?? '—'}`};
-  });
-}
 /** Explicit checkbox-driven labels. No automatic top-N, hover, or selected label. */
 export function manualLabelData(stats, metric, features, checkedIso3 = [], selectedIso3 = '') {
   const featureMap = new Map(features.map(f => [f.properties.iso3, f]));
@@ -84,7 +53,6 @@ export function manualLabelData(stats, metric, features, checkedIso3 = [], selec
         countLabel:`${value}${metric === 'average_rating' ? '分' : '部'}`};
     });
 }
-export function clampCameraAltitude(value){return Math.min(2.3,Math.max(1.52,Number(value)||1.85));}
 
 /** Target globe diameter ~88% of available viewport, without cropping in either axis. */
 export function fitGlobeAltitude(width,height,fovDegrees=50,fill=.88){

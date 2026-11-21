@@ -22,20 +22,17 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .capture import (
-    API_ROOT,
     CaptureError,
     CaptureInputError,
     CaptureSecurityError,
     MAX_BODY_BYTES,
     _read_token,
     _validate_job_id,
-    make_urllib_fetch,
 )
 
 TRENDING_SCHEMA = 'tmdb-supplement-trending-v1'

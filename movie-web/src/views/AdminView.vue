@@ -229,7 +229,6 @@ const activeFilterChips = computed(() => {
 .admin-tabs button.on{background:var(--mi-surface);border-color:var(--mi-border-strong);color:var(--mi-text);box-shadow:var(--mi-shadow-sm)}
 .admin-state{padding:56px 10px;text-align:center;color:var(--mi-text-muted)}
 .admin-state .ghost{margin-top:12px}
-.admin-state.error{color:var(--mi-negative)}
 .ctx-bar{flex-shrink:0;display:flex;flex-wrap:wrap;align-items:center;gap:7px;margin:-6px 0 14px;padding:8px 10px;border:1px solid var(--mi-border);border-radius:9px;background:var(--mi-surface-warm)}
 .ctx-label{font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:var(--mi-text-subtle);margin-right:2px}
 .ctx-chip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--mi-badge-border);background:var(--mi-badge-bg);color:var(--mi-badge-text);border-radius:999px;padding:2px 9px;font-size:11px;cursor:default;font:inherit}
@@ -242,33 +241,10 @@ button.ctx-chip:hover{border-color:var(--mi-accent);color:var(--mi-text)}
 .panel{border:1px solid var(--mi-border);border-radius:14px;background:var(--mi-surface);padding:20px 22px;box-shadow:var(--mi-shadow-sm)}
 .panel h2{font-family:var(--serif);font-size:18px;font-weight:500;margin:0 0 14px;color:var(--mi-text)}
 .panel h2 small{margin-left:8px;color:var(--mi-text-muted);font-size:11.5px;font-weight:400}
-.kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:0 0 18px}
-.kpis div{border:1px solid var(--mi-border);border-radius:10px;padding:14px 16px;background:var(--mi-surface-raised)}
-.kpis span{display:block;color:var(--mi-text-muted);font-size:11px;margin-bottom:6px}
-.kpis strong{font-size:24px;font-weight:500;letter-spacing:-.01em;font-variant-numeric:tabular-nums;color:var(--mi-text)}
-.sub{font-size:13px;margin:22px 0 10px;font-weight:500;color:var(--mi-text)}
-.sub small{color:var(--mi-text-muted);font-size:11px;font-weight:400;margin-left:6px}
-.metric-line{font-size:13px;color:var(--mi-text-soft);margin:0}
-.metric-line span{color:var(--mi-text-muted);font-size:12px;margin-left:8px}
-.split{display:grid;grid-template-columns:1fr 1fr;gap:20px}
-.rows div{display:flex;justify-content:space-between;gap:18px;padding:10px 0;border-bottom:1px solid var(--mi-border-subtle);font-size:12.5px}
-.rows span{color:var(--mi-text-muted)}.rows b{color:var(--mi-text-ivory);font-weight:500}
-.note{color:var(--mi-text-subtle);font-size:11.5px;line-height:1.8;margin:12px 0 0}
-.empty{color:var(--mi-text-secondary);font-size:13px;margin:0 0 6px}
-.tablewrap{overflow:auto;border:1px solid var(--mi-border);border-radius:10px}
-table{width:100%;border-collapse:collapse;font-size:12.5px;min-width:640px;font-variant-numeric:tabular-nums}
-th{position:sticky;top:0;background:var(--mi-surface-raised);text-align:left;color:var(--mi-text-muted);font-weight:500;font-size:11px;padding:10px 12px;border-bottom:1px solid var(--mi-border);white-space:nowrap}
-td{padding:9px 12px;border-bottom:1px solid var(--mi-border-subtle);color:var(--mi-text-soft);vertical-align:top}
-tr:last-child td{border-bottom:0}
-tr:hover td{background:var(--mi-chip-hover)}
-code{font-family:ui-monospace,Consolas,monospace;font-size:11px;color:var(--mi-accent-text);background:var(--mi-accent-soft);padding:1px 5px;border-radius:4px}
 .admin-shell :focus-visible{outline:2px solid var(--mi-accent);outline-offset:3px}
 :deep(.cinema-dashboard){--panel:var(--mi-surface);--ink:var(--mi-text);--soft:var(--mi-text-secondary)}
 :deep(.cinema-dashboard .screen-panel){background:var(--mi-surface);border-color:var(--mi-border)}
-:deep(.cinema-dashboard .summary-strip){border-color:var(--mi-border)}
-:deep(.cinema-dashboard .summary-strip article){border-color:var(--mi-border)}
 :deep(.cinema-dashboard .periods){background:var(--mi-surface-raised);border-color:var(--mi-border)}
 :deep(.cinema-dashboard .periods button[aria-pressed=true]){background:var(--mi-surface);color:var(--mi-text);box-shadow:var(--mi-shadow-sm)}
-@media(max-width:1000px){.split{grid-template-columns:1fr}}
 @media(max-width:700px){.admin-page{padding:18px 14px 24px}.admin-head h1{font-size:26px}.admin-head{align-items:flex-start}.panel{padding:16px}.admin-tabs{gap:2px}.admin-tabs button{padding:6px 9px;font-size:12px}}
 </style>

@@ -5,7 +5,7 @@ from datetime import datetime,timezone
 from sqlalchemy import select,insert,update,text,create_engine
 from app import create_app
 from app.m6_database import verify_m6_connection,validate_m6_url
-from .m6_contract import authority,digest
+from .m6_contract import authority
 from .m6_offline import read_snapshot,preflight,rows_hash
 
 

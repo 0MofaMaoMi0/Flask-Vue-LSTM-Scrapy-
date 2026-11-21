@@ -37,10 +37,7 @@
 .adm-chip { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--mi-accent-border); background: var(--mi-accent-soft); color: var(--mi-accent-text); border-radius: 999px; padding: 3px 9px; font-size: 11px; }
 .adm-chip button { border: 0; background: transparent; color: var(--mi-accent-text); cursor: pointer; font: inherit; line-height: 1; padding: 0; }
 .adm-badge { display: inline-flex; align-items: center; border: 1px solid var(--mi-badge-border); background: var(--mi-badge-bg); color: var(--mi-badge-text); border-radius: 999px; padding: 2px 8px; font-size: 11px; white-space: nowrap; }
-.adm-badge.gold { border-color: var(--mi-accent-border); background: var(--mi-accent-soft); color: var(--mi-accent-text); }
 .adm-badge.muted { border-color: var(--mi-border); background: transparent; color: var(--mi-text-muted); }
-.adm-grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
-.adm-grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .adm-tablewrap { overflow: auto; border: 1px solid var(--mi-border); border-radius: 10px; max-width: 100%; }
 .adm-panel table { width: 100%; border-collapse: collapse; font-size: 12.5px; min-width: 560px; font-variant-numeric: tabular-nums; }
 .adm-panel th { position: sticky; top: 0; background: var(--mi-surface-raised); text-align: left; color: var(--mi-text-muted); font-weight: 500; font-size: 11px; padding: 9px 11px; border-bottom: 1px solid var(--mi-border); white-space: nowrap; }
@@ -77,19 +74,16 @@
 .adm-heat-4 { background: var(--mi-heat-4); }
 .adm-inline { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 11.5px; color: var(--mi-text-soft); }
 .adm-inline span b { color: var(--mi-text); font-weight: 500; margin-left: 4px; }
-.adm-scroll { max-height: 320px; overflow: auto; }
-.adm-divider { height: 1px; background: var(--mi-border-subtle); margin: 16px 0; }
-.adm-flag { font-size: 10px; letter-spacing: .06em; color: var(--mi-text-muted); border: 1px solid var(--mi-border); border-radius: 4px; padding: 1px 5px; margin-left: 6px; }
 .adm-warnbox { border: 1px solid var(--mi-accent-border); background: var(--mi-warning-soft); color: var(--mi-warning); border-radius: 8px; padding: 9px 12px; font-size: 11.5px; line-height: 1.7; margin: 0 0 12px; }
 .adm-errobox { border: 1px solid var(--mi-negative-border); background: var(--mi-negative-soft); color: var(--mi-negative); border-radius: 8px; padding: 9px 12px; font-size: 11.5px; line-height: 1.7; margin: 0 0 12px; }
 .adm-two-col { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .adm-three-col { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; }
 .adm-panel :is(button, input, select, a, summary):focus-visible,
 .adm-tablewrap :focus-visible { outline: 2px solid var(--mi-accent); outline-offset: 2px; }
-.adm-tablewrap, .adm-scroll, .quick-body { scrollbar-width: thin; scrollbar-color: var(--mi-scroll-thumb) var(--mi-scroll-track); }
-.adm-tablewrap::-webkit-scrollbar, .adm-scroll::-webkit-scrollbar, .quick-body::-webkit-scrollbar { width: 9px; height: 9px; }
-.adm-tablewrap::-webkit-scrollbar-thumb, .adm-scroll::-webkit-scrollbar-thumb, .quick-body::-webkit-scrollbar-thumb { background: var(--mi-scroll-thumb); border-radius: 5px; border: 2px solid var(--mi-scroll-track); }
-.adm-tablewrap::-webkit-scrollbar-track, .adm-scroll::-webkit-scrollbar-track, .quick-body::-webkit-scrollbar-track { background: var(--mi-scroll-track); }
+.adm-tablewrap, .quick-body { scrollbar-width: thin; scrollbar-color: var(--mi-scroll-thumb) var(--mi-scroll-track); }
+.adm-tablewrap::-webkit-scrollbar, .quick-body::-webkit-scrollbar { width: 9px; height: 9px; }
+.adm-tablewrap::-webkit-scrollbar-thumb, .quick-body::-webkit-scrollbar-thumb { background: var(--mi-scroll-thumb); border-radius: 5px; border: 2px solid var(--mi-scroll-track); }
+.adm-tablewrap::-webkit-scrollbar-track, .quick-body::-webkit-scrollbar-track { background: var(--mi-scroll-track); }
 .adm-panel ::selection, .quick-drawer ::selection { background: var(--mi-selection-bg); color: var(--mi-selection-text); }
 @media (max-width: 1100px) { .adm-two-col, .adm-three-col { grid-template-columns: minmax(0, 1fr); } }
 @media (max-width: 720px) { .adm-panel { padding: 15px; } .adm-panel > h2 { font-size: 16px; } .adm-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

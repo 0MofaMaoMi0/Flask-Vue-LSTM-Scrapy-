@@ -19,13 +19,11 @@ from catalog.tmdb_supplement import board_ingest as _board_ingest
 from catalog.tmdb_supplement import capture as _capture
 from catalog.tmdb_supplement import ingest as _ingest
 from catalog.tmdb_supplement import trending as _trending
-from catalog.tmdb_supplement import writer as _writer
 
 from .contracts import (
     HUB_CONTRACT,
     RULE_VERSION,
     SUPPORTED_SOURCES,
-    HubError,
     HubInputError,
     HubRejected,
     HubSecurityError,

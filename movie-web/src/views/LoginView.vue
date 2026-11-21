@@ -4,7 +4,7 @@ import {useRouter} from 'vue-router'
 import {AuthError,getAuthThrottle,request} from '../api/auth'
 import {useAuthStore} from '../stores/auth'
 const router=useRouter(), auth=useAuthStore()
-const username=ref(''),password=ref(''),confirm=ref(''),remember=ref(false)
+const username=ref(''),password=ref(''),remember=ref(false)
 const visible=reactive({password:false,confirm:false}),busy=ref(false),error=ref(''),message=ref('')
 const cooldownUntil=ref(0),now=ref(Date.now())
 const isCooling=computed(()=>cooldownUntil.value>now.value)
@@ -29,7 +29,7 @@ onMounted(()=>{
  if(until>Date.now())startCooldown(until)
  else error.value='操作过于频繁，请稍后手动重试。'
 })
-onBeforeUnmount(()=>{controller.abort();clearCooldownTimer();password.value='';confirm.value=''})
+onBeforeUnmount(()=>{controller.abort();clearCooldownTimer();password.value=''})
 try { username.value=localStorage.getItem('movieinsight-username')||'';remember.value=!!username.value } catch {}
 async function submit(){
  if(busy.value||isCooling.value)return

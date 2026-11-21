@@ -34,9 +34,6 @@ TOPICS = (
     "credits",
     "metrics",
 )
-LIST_TOPICS = frozenset(
-    ("countries", "companies", "spoken_languages", "keywords", "releases", "credits")
-)
 _ISO2 = re.compile(r"^[A-Z]{2}$")
 _ISO_LANG = re.compile(r"^[a-z]{2,3}$")
 _HEX64 = re.compile(r"^[0-9a-fA-F]{64}$")
