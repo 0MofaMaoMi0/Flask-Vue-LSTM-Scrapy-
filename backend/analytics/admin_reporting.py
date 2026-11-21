@@ -1,6 +1,6 @@
 """Administrator read models. No provider requests, credentials or DML."""
 from datetime import datetime, timezone
-import json, re, uuid
+import re, uuid
 from sqlalchemy import select,func,and_,case
 from admin_dashboard import _token_value,_true_json
 from catalog.models import CatalogBase

@@ -43,7 +43,7 @@
 │  ├─ recommendation_eval/          # 推荐算法离线评估框架与测试
 │  ├─ ops/                          # 隔离环境运维与调度工具
 │  ├─ admin_api.py / media_api.py   # 驾驶舱接口与白名单图片代理缓存
-│  ├─ run.py / manage.py            # 本地开发启动入口
+│  ├─ run.py                        # 本地开发启动入口
 │  └─ requirements.txt              # 后端 Python 依赖
 ├─ movie-web/                       # Vue 3 + Vite 正式前端
 │  ├─ src/

@@ -1,5 +1,5 @@
 """Bounded read-only aggregates. No raw event, prompt, key, or request response is returned."""
-from collections import Counter,defaultdict
+from collections import Counter
 from sqlalchemy import select,func,case,distinct
 from catalog.models import CatalogBase
 from .registry import metric

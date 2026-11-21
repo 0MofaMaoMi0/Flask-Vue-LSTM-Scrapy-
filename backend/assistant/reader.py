@@ -1,7 +1,6 @@
 """Bounded read-only M6 adapter; SQL values are bound parameters."""
 from sqlalchemy import select
 from catalog.models import CatalogBase
-from catalog.recommendation import recommend
 from catalog.recommendation_pipeline import rank_movies
 from .conditions import matches,genre_groups,FILTER_KEYS
 class CatalogReader:

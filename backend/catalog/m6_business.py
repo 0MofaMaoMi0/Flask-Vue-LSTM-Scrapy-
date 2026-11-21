@@ -2,15 +2,14 @@
 from datetime import datetime
 import json
 import re
-from pathlib import Path
-from flask import Blueprint, current_app, request, jsonify
-from sqlalchemy import select, insert, update, func
+from flask import Blueprint, request, jsonify
+from sqlalchemy import select, insert, func
 from sqlalchemy.dialects.mysql import insert as mysql_insert
 from app.auth import session_row, csrf_ok
 from app.models import User
 from app.m6_activity import activity_tables
 from .models import CatalogBase
-from .recommendation import validate_event, transition, recommend, Conflict
+from .recommendation import validate_event, transition, Conflict
 
 
 class MySQLBehaviorRepository:

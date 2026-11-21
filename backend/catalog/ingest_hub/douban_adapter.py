@@ -10,7 +10,6 @@ import re
 import unicodedata
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from pathlib import Path
 
 from .contracts import (
     HUB_CONTRACT,

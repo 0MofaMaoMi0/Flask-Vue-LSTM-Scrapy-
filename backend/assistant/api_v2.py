@@ -1,5 +1,5 @@
 """V2 BYOK API. No platform key or global paid-approval gate."""
-import json,re,time,hashlib,secrets
+import json,re,time,hashlib
 from pathlib import Path
 from flask import Blueprint,request,jsonify,Response,stream_with_context,g
 from app.auth import session_row,csrf_ok,is_admin

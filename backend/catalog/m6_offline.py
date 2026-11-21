@@ -6,14 +6,13 @@ in-memory simulations only. execute_live is permanently denied in this build.
 import ast
 import copy
 import hashlib
-import json
 import pathlib
 import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from .m6_contract import ROOT, authority, verify_bundle, digest, validate_rows, full_row, _json_object
+from .m6_contract import ROOT, verify_bundle, digest, validate_rows, full_row, _json_object
 
 MAPPING_VERSION = 'M6-D-M6-02-v1'
 

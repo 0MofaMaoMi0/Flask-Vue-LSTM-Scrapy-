@@ -2,7 +2,6 @@
 from datetime import date,datetime
 from decimal import Decimal
 from itertools import islice
-from urllib.parse import quote
 from flask import Blueprint,request,jsonify
 from sqlalchemy.sql.selectable import Select
 from . import read_queries as queries

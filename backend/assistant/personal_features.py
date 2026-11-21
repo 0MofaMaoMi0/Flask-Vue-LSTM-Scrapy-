@@ -2,7 +2,7 @@
 import base64,binascii,hashlib,re,struct,zlib
 from datetime import datetime
 from contextlib import contextmanager
-from sqlalchemy import MetaData,Table,Column,BigInteger,Integer,String,LargeBinary,DateTime,select,insert,update,delete
+from sqlalchemy import MetaData,Table,Column,BigInteger,Integer,String,LargeBinary,DateTime,select,insert,update
 from app.models import User
 from sqlalchemy.dialects.mysql import MEDIUMBLOB
 

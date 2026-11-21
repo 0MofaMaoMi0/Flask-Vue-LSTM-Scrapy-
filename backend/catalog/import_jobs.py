@@ -3,7 +3,7 @@ import json,os,secrets,uuid,threading,time
 from contextlib import contextmanager
 from datetime import datetime,timezone,timedelta
 from pathlib import Path
-from .admin_importer import canonical,digest,ImportRejected
+from .admin_importer import digest,ImportRejected
 
 MAX_JOBS=2000
 TERMINAL={'SUCCEEDED','FAILED','NEEDS_REVIEW','CANCELLED','EXPIRED'}

@@ -2,15 +2,13 @@
 
 Writes live in the activity schema; the frozen catalog schema is untouched.
 """
-import json
 import math
-import re
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 
-from flask import Blueprint, current_app, request, jsonify, g
+from flask import Blueprint, request, jsonify
 from sqlalchemy import (MetaData, Table, Column, BigInteger, Integer, String, DateTime,
-                        and_, distinct, select, insert, func, delete)
+                        and_, distinct, select, insert, func)
 from sqlalchemy.exc import IntegrityError
 from app.auth import session_row, csrf_ok
 from app.models import User

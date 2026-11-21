@@ -18,7 +18,6 @@ No table here stores movie facts twice: payloads stay in
 import json
 
 from sqlalchemy import bindparam, inspect, text
-from sqlalchemy.exc import OperationalError
 
 BASE_TOPIC = "base"
 COUNTRIES_TOPIC = "countries"

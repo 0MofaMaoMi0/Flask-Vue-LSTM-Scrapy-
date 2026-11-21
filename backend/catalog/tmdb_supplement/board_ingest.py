@@ -19,7 +19,6 @@ from .ingest import (
     IngestInputError,
     IngestRejected,
     _as_mapping,
-    _canonical,
     _clock,
     _finish_batch,
     _insert_batch,

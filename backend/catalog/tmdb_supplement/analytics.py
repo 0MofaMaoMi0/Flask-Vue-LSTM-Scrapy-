@@ -139,10 +139,6 @@ QUALITY_CATEGORIES = STATUSES + ('UNMAPPED',)
 MAX_QUALITY_TOP = 50
 MAX_QUALITY_PROBLEM_LIMIT = 100
 MAX_QUALITY_PROBLEM_OFFSET = 100000
-SEVERITY_TOPICS = (
-    'base', 'countries', 'companies', 'spoken_languages', 'keywords',
-    'releases', 'credits', 'metrics', 'poster', 'overview',
-)
 
 # Runtime buckets are half-open on the lower bound: 0–59, 60–89, ... 180+.
 _RUNTIME_BUCKETS = (
