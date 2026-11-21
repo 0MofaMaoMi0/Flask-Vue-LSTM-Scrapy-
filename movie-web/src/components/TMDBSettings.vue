@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import {ref,onMounted,onBeforeUnmount} from 'vue'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
-const props=defineProps<{idPrefix:string}>()
+defineProps<{idPrefix:string}>()
 const token=ref(''),consent=ref(false),busy=ref(false),error=ref(''),notice=ref(''),status=ref<any>({configured:false}),results=ref<any[]>([])
 const label:Record<string,string>={DISCONNECTED:'未连接 · 使用缓存',UNVERIFIED:'已启用 · 待检测',VERIFIED:'连接正常',KEY_REJECTED:'令牌不可用',DISABLED:'已保存 · 连接已停用'}
 let selfTmdbBroadcast=false

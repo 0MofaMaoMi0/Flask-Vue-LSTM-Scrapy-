@@ -15,8 +15,6 @@ export type AdminTab = typeof ADMIN_TABS[number]
 export const COUNTRY_VIEWS = ['quick', 'deep', 'compare'] as const
 export type CountryView = typeof COUNTRY_VIEWS[number]
 
-export const ANALYTICS_DECADES = ['1950', '1960', '1970', '1980', '1990', '2000', '2010', '2020'] as const
-
 export interface AdminQuery {
   tab: AdminTab
   view: CountryView
@@ -120,11 +118,6 @@ export function serializeAdminQuery(input: Partial<AdminQuery>): Record<string, 
 
 export function sameQuery(a: AdminQuery, b: AdminQuery): boolean {
   return JSON.stringify(serializeAdminQuery(a)) === JSON.stringify(serializeAdminQuery(b))
-}
-
-/** Reset drill-down context but keep the current tab and time window. */
-export function resetDrilldown(query: AdminQuery): AdminQuery {
-  return { ...defaultQuery(), tab: query.tab, days: query.days }
 }
 
 export function toggleCompare(list: string[], code: string): string[] {

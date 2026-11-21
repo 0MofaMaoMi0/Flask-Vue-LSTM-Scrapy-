@@ -14,7 +14,6 @@
  */
 
 export type Days = 7 | 30 | 90
-export const DAY_OPTIONS: readonly Days[] = [7, 30, 90]
 export const DEFAULT_DAYS: Days = 30
 
 export type EventKind = 'favorite' | 'want' | 'watched' | 'rating' | 'not_interested'
@@ -342,10 +341,6 @@ const STATUS_META: Record<string, StatusMeta> = {
 export function statusMeta(status: string | null | undefined): StatusMeta {
   const key = String(status ?? '').trim().toLowerCase()
   return STATUS_META[key] || { label: key || '未知', tone: 'muted' }
-}
-
-export function toneClass(tone: Tone): string {
-  return 'tone-' + tone
 }
 
 /* ----------------------------------------------------------------- prefs */

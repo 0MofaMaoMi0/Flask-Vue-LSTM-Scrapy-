@@ -131,7 +131,6 @@ export async function adminGet<T>(path: string, signal?: AbortSignal): Promise<T
   })
 }
 
-export interface CountRow { name: string; count: number }
 export interface GenreRow { genre: string; genre_id: number | null; count: number }
 export interface DecadeRow { decade: number | null; name: string; count: number }
 export interface RatingSummary {

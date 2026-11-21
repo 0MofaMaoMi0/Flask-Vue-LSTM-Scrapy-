@@ -97,7 +97,6 @@ function dedicatedBackdrop(m:any):string|undefined{
 }
 function backdrop(m:any){return dedicatedBackdrop(m)||poster(m)}
 
-const counts=computed(()=>{const c={seen:0,want:0,fav:0};for(const s of Object.values(behavior.value||{}) as any[]){if(s?.watched)c.seen++;if(s?.want)c.want++;if(s?.favorite)c.fav++}return c})
 function mark(movie:any){const id=localId(movie);if(id===null)return '';const s=behavior.value[String(id)];if(!s)return '';if(s.watched)return '已看';if(s.want)return '想看';if(s.favorite)return '已收藏';return ''}
 function genres(movie:any){return (movie?.genres||[]).map((g:any)=>typeof g==='string'?g:g.name_zh).join(' / ')}
 function finite(value:unknown){

@@ -118,9 +118,6 @@ function page(delta: number) {
   offset.value = next
   load()
 }
-const missingTopics = (movie: DetailMovie) => Object.entries(movie.topic_status)
-  .filter(([, status]) => status !== 'PRESENT' && status !== 'EMPTY')
-  .map(([topic]) => topic)
 const MISSING_LABELS: Record<string, string> = {
   countries: '国家', keywords: '关键词', companies: '公司', credits: '演职员',
   poster: '海报', overview: '简介', releases: '上映', spoken_languages: '语言',

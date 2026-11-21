@@ -201,7 +201,6 @@ onBeforeUnmount(()=>{disposed=true;++serial;controller?.abort();window.removeEve
 .stars{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
 .star{border:1px solid var(--line-strong);border-radius:7px;padding:7px 9px;color:var(--muted);background:transparent;font-size:18px;line-height:1}
 .star.active{background:var(--mi-accent-soft);color:var(--accent);border-color:var(--mi-accent-border)}
-.rate{margin-top:15px;color:var(--muted);font-size:12px}
 .rating-form{display:flex;flex-wrap:wrap;gap:12px;align-items:end;margin-top:18px}
 .rating-form label{font-size:11px;color:var(--muted);display:flex;flex-direction:column;gap:8px}
 .rating-form select{border:1px solid var(--line);border-radius:7px;background:var(--ink);color:var(--paper);padding:9px}

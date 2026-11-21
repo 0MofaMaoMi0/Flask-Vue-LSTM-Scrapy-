@@ -169,7 +169,6 @@ onBeforeUnmount(()=>{apiKey.value='';testController?.abort();window.removeEventL
 .gs-cta-muted{background:transparent;border-color:var(--mi-border);color:var(--mi-text-soft)}
 .gs-pill{color:var(--mi-accent-text);background:var(--mi-accent-soft);border-color:var(--mi-accent-border)}
 .gs-notice{background:var(--mi-surface-raised);border-color:var(--mi-border);color:var(--mi-text-soft)}
-.gs-inline-link{color:var(--mi-accent)}
 .gs-card a{color:var(--mi-accent);text-underline-offset:3px}
 .gs-setting-row h3{color:var(--mi-text)}
 .crop-dialog{background:var(--mi-surface);border-color:var(--mi-border-strong);border-radius:16px;color:var(--mi-text)}

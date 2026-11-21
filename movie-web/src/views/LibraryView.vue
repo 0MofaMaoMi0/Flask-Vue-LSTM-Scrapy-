@@ -8,12 +8,10 @@ import MyMoviesView from './MyMoviesView.vue'
 import {movieArtwork} from '../services/movieArtwork'
 const route=useRoute(),router=useRouter(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
 const items=ref<any[]>([]),genres=ref<any[]>([]),behavior=ref<Record<string,any>>({}),busy=ref(false),error=ref(''),notice=ref(''),failures=ref<Record<string,boolean>>({}),pending=ref<Record<string,boolean>>({})
-const keyword=ref(''),genre=ref(''),yearFrom=ref(''),yearTo=ref(''),sort=ref('updated'),mode=ref('grid'),state=ref(''),hasMore=ref(false),loadingMore=ref(false),moreError=ref(''),drawer=ref(false),closeButton=ref<HTMLButtonElement>(),filterButton=ref<HTMLButtonElement>(),sentinel=ref<HTMLElement>()
-const draftFrom=ref(''),draftTo=ref(''),draftGenre=ref(''),draftState=ref(''),pageSize=24,AUTO_SCROLL_CAP=120,MAX_DOM_ITEMS=240,hasLoaded=ref(false)
-const quickGenres=computed(()=>['科幻','剧情','犯罪','悬疑','冒险'].map(name=>genres.value.find(g=>g.name_zh===name)).filter(Boolean))
+const keyword=ref(''),genre=ref(''),yearFrom=ref(''),yearTo=ref(''),sort=ref('updated'),mode=ref('grid'),state=ref(''),hasMore=ref(false),loadingMore=ref(false),moreError=ref(''),sentinel=ref<HTMLElement>()
+const pageSize=24,AUTO_SCROLL_CAP=120,MAX_DOM_ITEMS=240,hasLoaded=ref(false)
 const visible=computed(()=>items.value.filter(m=>!state.value||behavior.value[String(m.movie_id)]?.[state.value]))
 const {gridRef,gridStyle}=usePosterGrid(()=>visible.value.length)
-const count=computed(()=>[genre.value,yearFrom.value,yearTo.value,state.value].filter(Boolean).length)
 let controller:AbortController|undefined,moreController:AbortController|undefined,behaviorController:AbortController|undefined,serial=0,loadedSig='',selfBehaviorEvent=false,observer:IntersectionObserver|undefined
 async function api(path:string,signal?:AbortSignal){
  const timeout=AbortSignal.timeout(20000)
@@ -64,11 +62,6 @@ function sync(){const q=route.query;keyword.value=String(q.q||'');genre.value=St
 watch(()=>route.fullPath,sync,{immediate:true})
 function apply(){const query:Record<string,string>={};for(const [k,v] of Object.entries({q:keyword.value.trim(),genre:genre.value,year_from:yearFrom.value,year_to:yearTo.value,sort:sort.value,view:mode.value,state:state.value}))if(v)query[k]=v;router.push({path:'/movies',query})}
 function reset(){keyword.value='';genre.value='';yearFrom.value='';yearTo.value='';state.value='';sort.value='updated';apply()}
-function selectGenre(id:string){genre.value=id;apply()}
-async function openFilters(){draftFrom.value=yearFrom.value;draftTo.value=yearTo.value;draftGenre.value=genre.value;draftState.value=state.value;drawer.value=true;await nextTick();closeButton.value?.focus()}
-function closeFilters(){drawer.value=false;filterButton.value?.focus()}
-function filter(){yearFrom.value=draftFrom.value;yearTo.value=draftTo.value;genre.value=draftGenre.value;state.value=draftState.value;closeFilters();apply()}
-function focusTrap(e:KeyboardEvent){if(e.key==='Escape'){closeFilters();return}if(e.key!=='Tab')return;const nodes=Array.from((e.currentTarget as HTMLElement).querySelectorAll<HTMLElement>('button,input,select'));const first=nodes[0],last=nodes[nodes.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus()}}
 function posterOf(m:any){return m.poster||movieArtwork[String(m.movie_id)]?.poster||''}
 function posterError(e:Event,m:any){const img=e.target as HTMLImageElement;if(m.poster_fallback&&img.getAttribute('src')!==m.poster_fallback){img.src=m.poster_fallback}else{img.style.visibility='hidden'}}
 function detail(id:number){sessionStorage.setItem('mi2_library_scroll',String(scrollY));router.push({path:'/movies',query:{...route.query,from:'library'},hash:'#movie/'+id})}
@@ -110,7 +103,7 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 <p v-else-if="visible.length&&!hasMore&&items.length>=MAX_DOM_ITEMS" class="loadmore end" role="status">当前单页已展示前 {{items.length}} 部影片，请结合搜索或筛选条件精确定位</p>
 <p v-else-if="visible.length&&!hasMore" class="loadmore end" role="status">已加载全部 {{items.length}} 部影片</p>
 <p class="notefoot">电影资料来自已授权静态 TMDB 副本。This product uses the TMDB API but is not endorsed or certified by TMDB. <a href="https://www.themoviedb.org/" target="_blank" rel="noopener">TMDB</a></p><p role="status" aria-live="polite">{{notice}}</p>
-</main><div v-if="drawer" class="backdrop show" @click.self="closeFilters"><aside class="drawer" role="dialog" aria-modal="true" aria-labelledby="filterTitle" @keydown="focusTrap"><div class="drawer-head"><h2 id="filterTitle">筛选电影</h2><button ref="closeButton" class="close" aria-label="关闭筛选" @click="closeFilters">×</button></div><div class="group"><div class="group-title">上映年份</div><label>起始年份<input v-model="draftFrom" type="number" min="1800" max="2199"/></label><label>结束年份<input v-model="draftTo" type="number" min="1800" max="2199"/></label></div><div class="group"><label class="group-title">电影类型<select v-model="draftGenre"><option value="">全部类型</option><option v-for="g in genres" :key="g.genre_id" :value="String(g.genre_id)">{{g.name_zh}}</option></select></label></div><div class="group"><label class="group-title">我的状态（当前结果页）<select v-model="draftState"><option value="">全部</option><option value="favorite">收藏</option><option value="want">想看</option><option value="watched">已看</option></select></label></div><div class="drawer-actions"><button @click="draftFrom='';draftTo='';draftGenre='';draftState=''">重置</button><button class="apply" @click="filter">查看结果</button></div></aside></div></div>
+</main></div>
 </template>
 <style scoped>
 :global(body:has(.library-shell)){margin:0;background:var(--mi-bg);color:var(--mi-text)}
@@ -126,25 +119,8 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 .viewtoggle button{font-size:12px;padding:9px 14px;border:1px solid var(--border);border-radius:8px;color:var(--muted);background:transparent;transition:background-color .16s,border-color .16s,color .16s}
 .viewtoggle button:hover{color:var(--paper);border-color:var(--border-strong)}
 .viewtoggle button[aria-pressed="true"]{color:var(--paper);border-color:var(--border-strong);background:var(--mi-chip-active)}
-.searchbar{display:flex;gap:16px;align-items:center;margin-bottom:14px}
-.searchwrap{display:flex;align-items:center;gap:13px;width:min(650px,100%);height:48px;background:var(--ink-soft);border:1px solid var(--border);border-radius:10px;padding:5px 5px 5px 15px}
-.searchwrap:focus-within{border-color:var(--border-strong)}
-.searchwrap svg{flex:none;color:var(--muted)}
-.searchwrap input{border:0;outline:0;min-width:0;flex:1;background:transparent;color:var(--paper);font-size:13px}
-.searchwrap input::placeholder{color:var(--mi-text-subtle)}
-.searchwrap button{height:37px;border:1px solid var(--paper);border-radius:7px;background:transparent;color:var(--paper);font-weight:500;padding:0 20px;font-size:12px;transition:background-color .16s,border-color .16s}
-.searchwrap button:hover{background:var(--mi-chip-hover)}
-.chips{display:flex;align-items:center;flex-wrap:wrap;gap:7px}
-.chip{border:1px solid var(--border);border-radius:8px;background:transparent;color:var(--muted);padding:8px 12px;font-size:12px;transition:background-color .16s,border-color .16s,color .16s}
-.chip:hover{color:var(--paper);border-color:var(--border-strong)}
-.chip[aria-pressed="true"]{background:var(--mi-chip-active);border-color:var(--border-strong);color:var(--paper)}
-.right-tools{display:flex;gap:9px;align-items:center;margin-left:auto}
 .filterbtn{background:transparent;border:1px solid var(--border-strong);color:var(--paper);border-radius:8px;font-size:12px;padding:9px 13px;white-space:nowrap}
 .filterbtn span{font-size:11px;color:var(--muted);margin-left:5px;font-variant-numeric:tabular-nums}
-.sortby{background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--paper);font-size:12px;height:38px;padding:0 12px;min-width:152px}
-.sortby option{background:var(--ink-soft);color:var(--paper)}
-.resetbtn{background:none;border:0;color:var(--muted);font-size:12px;padding:8px 4px;white-space:nowrap}
-.resetbtn:hover{color:var(--paper)}
 .active-tags{display:flex;gap:7px;flex-wrap:wrap;margin:0 0 10px}
 .active-tags:empty{display:none}
 .tag{border-radius:999px;border:1px solid var(--border);background:transparent;color:var(--paper-dim);font-size:11px;padding:5px 10px}
@@ -164,7 +140,6 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 .film-name button{border:0;background:none;padding:0;color:var(--paper);text-align:left;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .film-meta{color:var(--muted);font-size:11px;line-height:1.6;margin-top:5px}
 .film-source{color:var(--muted);font-size:10px;margin-top:7px;font-variant-numeric:tabular-nums}
-.film-source.demo{color:var(--muted)}
 .list-desc{display:none;color:var(--muted);font-size:12px;line-height:1.75;margin-top:9px}
 .list-actions{display:none;gap:8px;margin-top:15px}
 .list-actions button{border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--paper);padding:9px 13px;font-size:12px}
@@ -189,22 +164,6 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 .notefoot a{color:var(--paper-dim)}
 .status{padding:70px 20px;text-align:center;color:var(--muted)}
 .status .filterbtn{margin-top:16px}
-.backdrop{display:none;position:fixed;inset:0;background:var(--mi-backdrop);z-index:60;backdrop-filter:blur(4px)}
-.backdrop.show{display:block}
-.drawer{position:absolute;right:0;top:0;bottom:0;width:min(400px,95vw);overflow-y:auto;background:var(--ink-soft);border-left:1px solid var(--border);box-shadow:var(--mi-shadow-lg);padding:26px}
-.drawer-head{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:28px}
-.drawer-head h2{margin:0;font-family:var(--serif);font-size:26px;font-weight:500}
-.close{width:37px;height:37px;border-radius:50%;background:transparent;color:var(--paper);border:1px solid var(--border-strong);font-size:21px}
-.group{margin:0 0 25px}
-.group-title{color:var(--paper-dim);font-size:12px;font-weight:500;margin-bottom:11px}
-.drawer label{display:flex;flex-direction:column;gap:9px;margin:12px 0;font-size:12px;color:var(--muted)}
-.drawer input,.drawer select{width:100%;background:var(--ink);color:var(--paper);border:1px solid var(--border);border-radius:8px;padding:11px}
-.options{display:flex;flex-wrap:wrap;gap:8px}
-.options button{background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);padding:10px 12px;font-size:12px}
-.options button[aria-pressed="true"]{border-color:var(--border-strong);background:var(--mi-chip-active);color:var(--paper)}
-.drawer-actions{display:flex;gap:10px;border-top:1px solid var(--border);padding-top:18px}
-.drawer-actions button{flex:1;border-radius:8px;padding:12px;border:1px solid var(--border);background:transparent;color:var(--paper)}
-.drawer-actions .apply{border-color:var(--mi-primary-btn-bg);background:var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text)}
 .scroll-sentinel{height:1px;margin-top:6px}
 .loadmore{display:flex;align-items:center;justify-content:center;gap:12px;margin:26px 0 4px;min-height:20px;color:var(--muted);font-size:12px;line-height:1.6;font-variant-numeric:tabular-nums}
 .loadmore button{border:1px solid var(--border);background:transparent;color:var(--paper);border-radius:8px;padding:7px 14px;font-size:12px}
@@ -212,26 +171,13 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 .loadmore.err{color:var(--paper-dim)}
 .loadmore.end{letter-spacing:.01em}
 @media(max-width:1120px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:24px 14px}}
-@media(max-width:760px){.page{padding:26px 16px 56px}.viewtoggle{align-self:flex-start}.searchbar{align-items:flex-start;flex-direction:column;gap:9px}.searchwrap{height:46px}.right-tools{width:100%;margin-left:0}.sortby{flex:1;min-width:0}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 12px}.film-name{font-size:13px}.listmode .film{gap:12px;padding:10px}.listmode .film-poster{width:88px}.drawer{padding:22px 18px}.notefoot{margin-top:30px}}
-@media(prefers-reduced-motion:reduce){.film-poster,.viewtoggle button,.chip,.searchwrap button{transition:none}.film-poster:hover,.film-poster:focus-within{transform:none;box-shadow:0 5px 17px #0003}}
+@media(max-width:760px){.page{padding:26px 16px 56px}.viewtoggle{align-self:flex-start}.grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:24px 12px}.film-name{font-size:13px}.listmode .film{gap:12px;padding:10px}.listmode .film-poster{width:88px}.notefoot{margin-top:30px}}
+@media(prefers-reduced-motion:reduce){.film-poster,.viewtoggle button{transition:none}.film-poster:hover,.film-poster:focus-within{transform:none;box-shadow:0 5px 17px #0003}}
 
 /* 排版重构：把三行分散的控制件收成一条贴顶索引栏，内容上移；卡片按目录编号与等宽数字对齐 */
 .page{max-width:none;padding:32px clamp(20px,3vw,48px) 64px}
 .rail{position:sticky;top:0;z-index:30;display:flex;align-items:center;gap:16px;padding:12px 0 14px;background:var(--ink);border-bottom:1px solid var(--border);margin-bottom:0}
-.searchbar{flex:0 1 300px;margin:0;display:block}
-.searchwrap{height:40px;padding:4px 4px 4px 12px;gap:10px;border-radius:8px;width:100%}
-.searchwrap input{font-size:13px}
-.searchwrap button{height:32px;padding:0 16px;border-radius:6px;font-size:12px}
-.chips{flex:1 1 auto;min-width:0;flex-wrap:nowrap;overflow-x:auto;gap:4px;padding:2px 0;scrollbar-width:none}
-.chips::-webkit-scrollbar{display:none}
-.chip{border-color:transparent;border-radius:6px;padding:8px 12px;white-space:nowrap;font-size:12px}
-.chip:hover{background:var(--mi-chip-hover);border-color:transparent}
-.chip[aria-pressed="true"]{background:var(--mi-chip-active);border-color:var(--border-strong)}
-.right-tools{gap:8px;margin-left:auto;flex:none}
-.filterbtn,.sortby{height:36px;border-radius:8px;font-size:12px}
-.filterbtn{padding:0 12px}
-.sortby{min-width:132px;padding:0 10px}
-.resetbtn{padding:8px 2px}
+.filterbtn{height:36px;border-radius:8px;font-size:12px;padding:0 12px}
 .viewtoggle{gap:0;border:1px solid var(--border);border-radius:8px;overflow:hidden;margin-left:4px}
 .viewtoggle button{border:0;border-radius:0;padding:8px 12px;font-size:11.5px;background:transparent}
 .viewtoggle button+button{border-left:1px solid var(--border)}
@@ -244,7 +190,7 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 .film-source{margin-top:6px;font-size:11px}
 .loadmore{margin:30px 0 0}
 .notefoot{margin-top:32px}
-@media(max-width:1120px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:28px 16px}.rail{gap:12px}.searchbar{flex-basis:260px}}
+@media(max-width:1120px){.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:28px 16px}.rail{gap:12px}}
 /* 去掉页头两块后：内容从顶部起排，标题只保留给读屏与文档结构 */
 .page{padding-top:24px}
 .visually-hidden{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
@@ -252,11 +198,6 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 @media(max-width:760px){
  .page{padding:20px 16px 48px}
  .rail{position:static;flex-direction:column;align-items:stretch;gap:10px;padding:12px 0 14px}
- .searchbar{flex:1 1 auto}
- .searchwrap{height:42px}
- .chips{flex:none;width:100%;padding-bottom:2px}
- .right-tools{width:100%;margin-left:0;flex-wrap:wrap}
- .sortby{flex:1;min-width:0}
  .viewtoggle{margin-left:0}
  .grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:26px 12px;margin-top:18px}
  .film-info{padding-top:11px}
@@ -266,16 +207,10 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 /* Adapt to the space remaining after the sidebar, including live resizes. */
 @container movie-library (max-width:900px){
  .rail{flex-wrap:wrap;position:static}
- .searchbar{flex:1 1 240px;min-width:0}
- .chips{order:3;flex:1 0 100%;width:100%}
- .right-tools{max-width:100%;flex-wrap:wrap;margin-left:0}
 }
 @container movie-library (max-width:540px){
  .rail{flex-direction:column;align-items:stretch}
- .searchbar{flex:0 0 auto}
- .chips{order:0;flex:0 0 auto}
  .grid:not(.listmode){grid-template-columns:repeat(2,minmax(0,1fr));gap:26px 12px}
- .right-tools{width:100%}
  .film-info{min-width:0}
 }
 @container movie-library (max-width:230px){.grid:not(.listmode){grid-template-columns:minmax(0,1fr)}}
@@ -283,17 +218,9 @@ onBeforeUnmount(()=>{++serial;controller?.abort();moreController?.abort();behavi
 
 /* 与推荐页筛选栏统一外观：34px 控件、6px 圆角、同节奏间距与发丝线 */
 .rail{padding:10px 0 14px;gap:10px}
-.searchwrap{height:34px;padding:2px 2px 2px 10px;border-radius:6px}
-.searchwrap svg{width:16px;height:16px}
-.searchwrap input{font-size:12px}
-.searchwrap button{height:28px;padding:0 12px;border-radius:4px;font-size:11.5px}
-.chip{height:34px;padding:0 10px;font-size:12px}
-.filterbtn,.sortby{height:34px;border-radius:6px;font-size:12px}
-.sortby{min-width:124px;padding:0 8px}
+.filterbtn{height:34px;border-radius:6px;font-size:12px}
 .viewtoggle{border-radius:6px}
 .viewtoggle button{height:34px;padding:0 10px;font-size:11.5px;display:grid;place-items:center}
-.right-tools{gap:6px}.sortby{background:var(--ink-soft);border-color:var(--border)}
-.sortby:focus{border-color:var(--border-strong);outline:none}
 
 /* 与推荐页一致的筛选交互：字段表单 + 应用筛选 */
 .rail{display:block;padding:10px 0 12px}

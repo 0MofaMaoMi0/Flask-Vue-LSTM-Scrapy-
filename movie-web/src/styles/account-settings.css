@@ -38,7 +38,6 @@
 .gs-setting-row select{flex:none;max-width:190px;min-width:140px}
 .gs-pill{color:var(--mi-accent-text);background:var(--mi-accent-soft);border:1px solid var(--mi-accent-border);border-radius:999px;font-size:11px;padding:7px 11px;white-space:nowrap}
 .gs-notice{background:var(--mi-surface-raised);border:1px solid var(--mi-border);border-radius:13px;padding:13px 15px;font-size:12px;line-height:1.8;color:var(--mi-text-soft)}
-.gs-inline-link{color:var(--mi-accent);text-decoration:underline;background:none;border:0;cursor:pointer}
 .gs-save-status{min-height:20px;margin-top:9px;color:var(--mi-positive);font-size:12px}
 .crop-overlay{position:fixed;inset:0;z-index:90;background:var(--mi-backdrop);display:grid;place-items:center;padding:14px;overflow:auto}
 .crop-dialog{width:min(620px,100%);background:var(--mi-surface);border:1px solid var(--mi-border-strong);border-radius:22px;box-shadow:var(--mi-shadow-lg);padding:24px;color:var(--mi-text)}
@@ -48,7 +47,6 @@
 .crop-content{display:flex;gap:28px;align-items:center;justify-content:center;flex-wrap:wrap}
 .crop-work{display:flex;flex-direction:column;align-items:center;gap:11px}
 .crop-viewport{width:240px;height:240px;border-radius:20px;overflow:hidden;background:var(--mi-surface-raised);cursor:grab;touch-action:none;border:1px solid var(--mi-border-strong);box-shadow:none;position:relative}
-.crop-viewport.dragging{cursor:grabbing}
 .crop-viewport canvas{width:100%;height:100%;display:block;pointer-events:none}
 .crop-viewport:after{content:'';position:absolute;inset:0;border:2px solid var(--mi-accent-border);border-radius:19px;pointer-events:none}
 .crop-preview-block{min-width:150px;display:flex;flex-direction:column;align-items:center;gap:10px;color:var(--mi-text-secondary);font-size:12px}
