@@ -1,6 +1,4 @@
 <script setup lang="ts">
-
-
 import {ref,onMounted,onBeforeUnmount,onDeactivated,nextTick,computed,watch} from 'vue'
 import {useAuthStore} from '../stores/auth'
 import {useRoute,useRouter} from 'vue-router'
@@ -12,6 +10,19 @@ import {behaviorLockReason,behaviorReady,behaviorState,consumeInternalBehaviorEv
 import {personalRequest} from '../services/personalFeatures'
 import {movieArtwork} from '../services/movieArtwork'
 import {assistantMovieTarget} from '../services/movieNavigation'
+
+type TurnState='streaming'|'done'|'interrupted'|'error'
+type HistoryTurn={
+ id?:string
+ question:string
+ answer:string
+ result?:any
+ feedback?:string|null
+ state?:TurnState
+ errorText?:string
+ request_id?:string
+}
+
 const props=defineProps<{surface:'explore'|'floating'}>()
 const workspaceOwner=aiWorkspace.owner
 let disposed=false
@@ -19,25 +30,379 @@ function live(){return !disposed&&aiWorkspace.owner===workspaceOwner}
 const thread=ref<HTMLElement>(),router=useRouter()
 const message=ref(''),busy=ref(false),error=ref(''),notice=ref(''),result=ref<any>(null),conversation=ref<string|null>(null),status=ref<any>({configured:false,enabled:false}),draft=ref('')
 const composerInput=ref<HTMLTextAreaElement>(),expanded=ref(false)
+const isNearBottom=ref(true)
+let lastScrollTop=0,programmaticScrollUntil=0
+
 function resizeComposer(){const el=composerInput.value;if(!el)return;el.style.setProperty('height','auto','important');const natural=el.scrollHeight,cap=162;const h=expanded.value?Math.max(48,Math.min(natural,cap)):30;el.style.setProperty('height',h+'px','important');el.style.setProperty('overflow-y',expanded.value&&natural>cap?'auto':'hidden','important')}
 function autoGrow(){const el=composerInput.value;if(!el)return;el.style.setProperty('height','auto','important');el.style.setProperty('min-height','0px','important');const natural=el.scrollHeight;el.style.removeProperty('min-height');const must=el.value.length>0&&(el.value.includes('\n')||natural>34);if(must!==expanded.value){expanded.value=must;nextTick(resizeComposer)}else resizeComposer()}
+function focusComposer(){nextTick(()=>{autoGrow();composerInput.value?.focus()})}
+function fillComposer(text:string,nextNotice?:string){
+ message.value=text
+ shortcutsOpen.value=false
+ if(nextNotice!==undefined)notice.value=nextNotice
+ focusComposer()
+}
 watch(message,()=>nextTick(autoGrow))
-const history=ref<{question:string,answer:string,result?:any,feedback?:string|null}[]>([])
-let controller:AbortController|null=null,feedbackController:AbortController|null=null,pending:any=null
-async function refreshStatus(){try{const data=await jsonRequest('status');if(live())status.value=data}catch(e){if(live())error.value=(e as Error).message}};function scrollThreadToBottom(smooth=true){nextTick(()=>{const el=thread.value;if(!el)return;const useSmooth=smooth&&!isMotionReduced();if(typeof el.scrollTo==='function')el.scrollTo({top:el.scrollHeight,behavior:useSmooth?'smooth':'auto'});else el.scrollTop=el.scrollHeight})}
-function consume(event:string,data:any){
 
- if(event==='draft'){draft.value=data.text||'';scrollThreadToBottom(false);return}
+const history=ref<HistoryTurn[]>([])
+let controller:AbortController|null=null,feedbackController:AbortController|null=null,pending:any=null,activeTurn:HistoryTurn|null=null
+type StreamDonePayload={turn:HistoryTurn,doneResult:any,fullAnswer:string,conversationId:string|null}
+let streamTargetText='',streamCodepointOffsets:number[]=[0],streamDisplayedCount=0,streamCarry=0,streamLastTs=0,streamRafId=0,streamBurstRate=90,streamDoneStartTs=0,streamLastScrollHeight=0,statusRefreshedForSend=false
+let streamTargetTurn:HistoryTurn|null=null,streamDonePayload:StreamDonePayload|null=null
+const isActivelyTyping=ref(false)
+
+function buildCodepointOffsets(text:string){
+ const offsets=[0]
+ let pos=0
+ for(const ch of text){pos+=ch.length;offsets.push(pos)}
+ return offsets
+}
+function stopStreamRaf(){
+ if(streamRafId&&typeof cancelAnimationFrame==='function')cancelAnimationFrame(streamRafId)
+ streamRafId=0
+ streamLastTs=0
+}
+function resetStreamBuffer(){
+ stopStreamRaf()
+ streamTargetText=''
+ streamCodepointOffsets=[0]
+ streamDisplayedCount=0
+ streamCarry=0
+ streamBurstRate=90
+ streamDoneStartTs=0
+ streamTargetTurn=null
+ streamDonePayload=null
+ isActivelyTyping.value=false
+}
+function syncCatchupScroll(){
+ nextTick(()=>{
+  if(!isNearBottom.value)return
+  const el=thread.value
+  if(!el)return
+  if(el.scrollHeight!==streamLastScrollHeight){
+   streamLastScrollHeight=el.scrollHeight
+   el.scrollTop=el.scrollHeight
+   lastScrollTop=el.scrollTop
+  }
+ })
+}
+function updateStreamTarget(text:string,turn:HistoryTurn){
+ streamTargetTurn=turn
+ if(text===streamTargetText)return
+ if(streamTargetText&&text.startsWith(streamTargetText)){
+  const suffix=text.slice(streamTargetText.length)
+  let pos=streamCodepointOffsets[streamCodepointOffsets.length-1]||0
+  for(const ch of suffix){pos+=ch.length;streamCodepointOffsets.push(pos)}
+  streamTargetText=text
+ }else{
+  streamTargetText=text
+  streamCodepointOffsets=buildCodepointOffsets(text)
+  const targetLen=streamCodepointOffsets.length-1
+  streamDisplayedCount=Math.min(streamDisplayedCount,targetLen)
+  const clamped=text.slice(0,streamCodepointOffsets[streamDisplayedCount]||0)
+  turn.answer=clamped
+  draft.value=clamped
+ }
+}
+function finalizeDoneTurn(){
+ const payload=streamDonePayload
+ if(!payload){resetStreamBuffer();return}
+ stopStreamRaf()
+ isActivelyTyping.value=false
+ streamDonePayload=null
+ const{turn,doneResult,fullAnswer,conversationId}=payload
+ turn.answer=fullAnswer
+ turn.result=doneResult
+ turn.state='done'
+ turn.errorText=''
+ if(doneResult?.request_id)turn.request_id=doneResult.request_id
+ result.value=doneResult
+ if(conversationId)conversation.value=conversationId
+ history.value=history.value.slice(-12)
+ activeTurn=null
+ draft.value=''
+ resetStreamBuffer()
+ busy.value=false
+ if(!statusRefreshedForSend){statusRefreshedForSend=true;void refreshStatus()}
+ if(isNearBottom.value)scrollThreadToBottom(true)
+}
+function flushOrStopStreamCatchup(mode:'flush'|'stop'){
+ if(mode==='flush'&&streamDonePayload){
+  finalizeDoneTurn()
+  return
+ }
+ resetStreamBuffer()
+}
+function stepStreamCatchup(ts:number){
+ streamRafId=0
+ if(!live()||!streamTargetTurn){resetStreamBuffer();return}
+ const dtMs=streamLastTs>0?Math.max(0,Math.min(ts-streamLastTs,50)):16.67
+ streamLastTs=ts
+ const targetLen=streamCodepointOffsets.length-1
+ const rem=targetLen-streamDisplayedCount
+ if(rem<=0){
+  isActivelyTyping.value=false
+  if(streamDonePayload)finalizeDoneTurn()
+  return
+ }
+ let step=0
+ if(streamDonePayload){
+  if(streamDoneStartTs<=0)streamDoneStartTs=ts
+  if(ts-streamDoneStartTs>=245){
+   step=rem
+  }else{
+   const rate=Math.max(streamBurstRate,90)
+   streamCarry+=(rate*dtMs)/1000
+   step=Math.floor(streamCarry)
+   if(step<1&&dtMs>=12){step=1;streamCarry=Math.max(0,streamCarry-1)}
+   else streamCarry-=step
+   step=Math.min(rem,step)
+  }
+ }else{
+  const rate=48+rem*4.5
+  streamCarry+=(rate*dtMs)/1000
+  step=Math.floor(streamCarry)
+  if(step<1&&dtMs>=12){step=1;streamCarry=Math.max(0,streamCarry-1)}
+  else streamCarry-=step
+  step=Math.min(rem,step)
+ }
+ if(step>0){
+  streamDisplayedCount+=step
+  const rendered=streamTargetText.slice(0,streamCodepointOffsets[streamDisplayedCount]||0)
+  streamTargetTurn.answer=rendered
+  draft.value=rendered
+  isActivelyTyping.value=true
+  if(isNearBottom.value)syncCatchupScroll()
+ }
+ if(streamDisplayedCount>=targetLen){
+  isActivelyTyping.value=false
+  if(streamDonePayload)finalizeDoneTurn()
+  return
+ }
+ streamRafId=requestAnimationFrame(stepStreamCatchup)
+}
+function startStreamRaf(){
+ if(streamRafId||typeof requestAnimationFrame!=='function')return
+ streamLastTs=0
+ streamRafId=requestAnimationFrame(stepStreamCatchup)
+}
+
+function makeTurnId(seed?:string){
+ if(seed)return seed
+ if(typeof crypto!=='undefined'&&typeof crypto.randomUUID==='function')return crypto.randomUUID()
+ return 'turn-'+Date.now()+'-'+Math.random().toString(36).slice(2,8)
+}
+function normalizeTurn(raw:any,index=0):HistoryTurn{
+ const reqId=typeof raw?.request_id==='string'&&raw.request_id
+  ?raw.request_id
+  :typeof raw?.result?.request_id==='string'&&raw.result.request_id
+   ?raw.result.request_id
+   :undefined
+ const id=typeof raw?.id==='string'&&raw.id?raw.id:makeTurnId(reqId||`legacy-${index}-${Date.now()}`)
+ let state:TurnState='done'
+ if(raw?.state==='streaming'||raw?.state==='interrupted')state='interrupted'
+ else if(raw?.state==='error')state='error'
+ else if(raw?.state==='done')state='done'
+ const errorText=typeof raw?.errorText==='string'
+  ?raw.errorText
+  :state==='interrupted'
+   ?'生成已中断，未自动重试。可点击重发或填回编辑。'
+   :''
+ return {
+  id,
+  question:typeof raw?.question==='string'?raw.question:'',
+  answer:typeof raw?.answer==='string'?raw.answer:'',
+  result:raw?.result??null,
+  feedback:raw?.feedback??null,
+  state,
+  errorText,
+  ...(reqId?{request_id:reqId}:{})
+ }
+}
+function normalizeHistory(list:any):HistoryTurn[]{
+ return Array.isArray(list)?list.map((item,idx)=>normalizeTurn(item,idx)):[]
+}
+function resolveLiveTurn(target?:HistoryTurn|null):HistoryTurn|null{
+ if(target){
+  const found=history.value.find(t=>t===target||(target.id&&t.id===target.id))
+  if(found)return found
+ }
+ if(activeTurn){
+  const found=history.value.find(t=>t===activeTurn||(activeTurn?.id&&t.id===activeTurn.id))
+  if(found)return found
+ }
+ const reqId=pending?.request_id
+ if(reqId){
+  const byReq=history.value.find(t=>t.request_id===reqId||t.id===reqId)
+  if(byReq)return byReq
+ }
+ return null
+}
+function updateNearBottom(){
+ const el=thread.value
+ if(!el){isNearBottom.value=true;return}
+ const gap=el.scrollHeight-el.scrollTop-el.clientHeight
+ isNearBottom.value=gap<=96
+ lastScrollTop=el.scrollTop
+}
+function onThreadScroll(){
+ const el=thread.value
+ if(!el)return
+ const gap=el.scrollHeight-el.scrollTop-el.clientHeight
+ if(gap<=96){
+  isNearBottom.value=true
+  programmaticScrollUntil=0
+  lastScrollTop=el.scrollTop
+  return
+ }
+ if(el.scrollTop<lastScrollTop-4){
+  programmaticScrollUntil=0
+  isNearBottom.value=false
+  lastScrollTop=el.scrollTop
+  return
+ }
+ if(Date.now()>programmaticScrollUntil)isNearBottom.value=false
+ lastScrollTop=el.scrollTop
+}
+async function refreshStatus(){try{const data=await jsonRequest('status');if(live())status.value=data}catch(e){if(live())error.value=(e as Error).message}}
+function scrollThreadToBottom(smooth=true){
+ isNearBottom.value=true
+ nextTick(()=>{
+  const el=thread.value
+  if(!el)return
+  const useSmooth=smooth&&!isMotionReduced()
+  programmaticScrollUntil=useSmooth?Date.now()+480:0
+  if(typeof el.scrollTo==='function')el.scrollTo({top:el.scrollHeight,behavior:useSmooth?'smooth':'auto'})
+  else el.scrollTop=el.scrollHeight
+  lastScrollTop=el.scrollTop
+ })
+}
+function turnFaultText(turn:HistoryTurn){
+ if(turn.errorText)return turn.errorText
+ if(turn.result?.answer)return turn.result.answer
+ return turn.state==='interrupted'
+  ?'已中断生成，未自动重试可能计费的调用。'
+  :'请求未完成，未自动重试。可点击重发或填回编辑。'
+}
+function consume(event:string,data:any){
+ const turn=resolveLiveTurn()
+ if(event==='draft'){
+  const text=data.text||''
+  if(!turn){draft.value=text;return}
+  if(isMotionReduced()||typeof requestAnimationFrame!=='function'){
+   stopStreamRaf()
+   isActivelyTyping.value=false
+   updateStreamTarget(text,turn)
+   streamDisplayedCount=Math.max(0,streamCodepointOffsets.length-1)
+   turn.answer=text
+   draft.value=text
+   if(isNearBottom.value)scrollThreadToBottom(false)
+   return
+  }
+  updateStreamTarget(text,turn)
+  const targetLen=streamCodepointOffsets.length-1
+  if(streamDisplayedCount<targetLen)startStreamRaf()
+  return
+ }
  if(event==='result'){
-  if(data.state==='DONE'){data.request_id=data.request_id||pending?.request_id;result.value=data;conversation.value=data.conversation_id||conversation.value;history.value.push({question:pending?.message||'AI 深度解释',answer:data.answer,result:data});history.value=history.value.slice(-12);message.value='';pending=null}
-  else{result.value={...data,source:'INTERRUPTED',answer:data.state==='CANCELLED'?'已取消显示。已发送的模型请求仍可能计费。':'请求未完成，未自动重试可能计费的调用。'};error.value=assistantConflictMessage(data.error_code||'REQUEST_UNAVAILABLE',data.state)}
-  draft.value='';scrollThreadToBottom(true)
+  const resolvedReqId=data.request_id||pending?.request_id||turn?.request_id
+  if(data.state==='DONE'){
+   const fullAnswer=typeof data.answer==='string'?data.answer:''
+   const pendingQuestion=pending?.message
+   pending=null
+   const doneResult={...data,request_id:resolvedReqId}
+   result.value=doneResult
+   conversation.value=data.conversation_id||conversation.value
+   if(!turn||isMotionReduced()||typeof requestAnimationFrame!=='function'){
+    stopStreamRaf()
+    isActivelyTyping.value=false
+    streamDonePayload=null
+    if(turn){
+     turn.answer=fullAnswer
+     turn.result=doneResult
+     turn.state='done'
+     turn.errorText=''
+     if(resolvedReqId)turn.request_id=resolvedReqId
+    }else{
+     history.value.push({
+      id:makeTurnId(resolvedReqId),
+      question:pendingQuestion||'AI 深度解释',
+      answer:fullAnswer,
+      result:doneResult,
+      state:'done',
+      errorText:'',
+      ...(resolvedReqId?{request_id:resolvedReqId}:{})
+     })
+    }
+    history.value=history.value.slice(-12)
+    activeTurn=null
+    draft.value=''
+    resetStreamBuffer()
+    busy.value=false
+    if(!statusRefreshedForSend){statusRefreshedForSend=true;void refreshStatus()}
+    if(isNearBottom.value)scrollThreadToBottom(true)
+    return
+   }
+   updateStreamTarget(fullAnswer,turn)
+   const targetLen=streamCodepointOffsets.length-1
+   const rem=targetLen-streamDisplayedCount
+   if(rem<=0){
+    stopStreamRaf()
+    isActivelyTyping.value=false
+    streamDonePayload=null
+    turn.answer=fullAnswer
+    turn.result=doneResult
+    turn.state='done'
+    turn.errorText=''
+    if(resolvedReqId)turn.request_id=resolvedReqId
+    history.value=history.value.slice(-12)
+    activeTurn=null
+    draft.value=''
+    resetStreamBuffer()
+    busy.value=false
+    if(!statusRefreshedForSend){statusRefreshedForSend=true;void refreshStatus()}
+    if(isNearBottom.value)scrollThreadToBottom(true)
+    return
+   }
+   streamBurstRate=Math.max(90,Math.ceil(rem/0.22))
+   streamDoneStartTs=0
+   streamDonePayload={
+    turn,
+    doneResult,
+    fullAnswer,
+    conversationId:data.conversation_id||null
+   }
+   startStreamRaf()
+   return
+  }else{
+   flushOrStopStreamCatchup('stop')
+   const interruptedAnswer=data.state==='CANCELLED'?'已取消显示。已发送的模型请求仍可能计费。':'请求未完成，未自动重试可能计费的调用。'
+   const errMsg=assistantConflictMessage(data.error_code||'REQUEST_UNAVAILABLE',data.state)
+   const interruptedResult={...data,request_id:resolvedReqId,source:'INTERRUPTED',answer:interruptedAnswer}
+   result.value=interruptedResult
+   if(turn){
+    turn.state=data.state==='CANCELLED'?'interrupted':'error'
+    turn.result=interruptedResult
+    turn.errorText=errMsg
+    if(resolvedReqId)turn.request_id=resolvedReqId
+   }else{
+    error.value=errMsg
+   }
+   activeTurn=null
+  }
+  draft.value=''
+  if(isNearBottom.value)scrollThreadToBottom(true)
  }
 }
 class ReplyError extends Error{constructor(message:string){super(message);this.name='ReplyError'}}
-async function send(path:string,body:any){
+async function send(path:string,body:any,targetTurn?:HistoryTurn){
  if(busy.value)return
- busy.value=true;error.value='';notice.value='';draft.value='';scrollThreadToBottom(true);const sendingController=new AbortController();controller=sendingController;pending={...body,path}
+ resetStreamBuffer()
+ statusRefreshedForSend=false
+ streamLastScrollHeight=thread.value?.scrollHeight??0
+ busy.value=true;error.value='';notice.value='';draft.value=''
+ const sendingController=new AbortController();controller=sendingController;pending={...body,path}
+ activeTurn=targetTurn??resolveLiveTurn()
  const current=()=>live()&&controller===sendingController
  try{
   const r=await request(path,'POST',{...body,stream:true},sendingController.signal)
@@ -49,26 +414,197 @@ async function send(path:string,body:any){
    while((boundary=buffer.indexOf('\n\n'))>=0){const frame=buffer.slice(0,boundary);buffer=buffer.slice(boundary+2);dispatchFrame(frame)}
    if(done){if(buffer.trim())dispatchFrame(buffer);break}
   }
- }catch(e){if(current()&&(e as Error).name!=='AbortError')error.value=e instanceof ReplyError?e.message:'连接中断，未自动重发。可重试原请求以读取结果，不会静默再次调用。'}finally{if(current()){controller=null;busy.value=false;await refreshStatus()}}
+  if(current()){
+   if(!streamDonePayload){
+    const unfinished=resolveLiveTurn(targetTurn)
+    if(unfinished&&unfinished.state==='streaming'){
+     flushOrStopStreamCatchup('stop')
+     const endMsg='连接已结束但未收到完整结果，未自动重试。可手动重发。'
+     unfinished.state='interrupted'
+     unfinished.errorText=endMsg
+     unfinished.result={source:'INTERRUPTED',request_id:body.request_id,answer:endMsg}
+     result.value=unfinished.result
+     if(isNearBottom.value)scrollThreadToBottom(true)
+    }
+    activeTurn=null
+   }
+  }
+ }catch(e){
+  if(!current())return
+  if(streamDonePayload)return
+  flushOrStopStreamCatchup('stop')
+  const liveTurn=resolveLiveTurn(targetTurn)
+  if((e as Error).name==='AbortError'){
+   if(liveTurn&&liveTurn.state==='streaming'){
+    const abortMsg=error.value||'已取消生成，未自动重发此请求。'
+    if(error.value)error.value=''
+    liveTurn.state='interrupted'
+    liveTurn.errorText=abortMsg
+    liveTurn.result=liveTurn.result||{source:'INTERRUPTED',request_id:body.request_id,answer:abortMsg}
+    result.value=liveTurn.result
+    if(isNearBottom.value)scrollThreadToBottom(true)
+   }
+  }else{
+   const errMsg=e instanceof ReplyError?e.message:'连接中断，未自动重发。可重试原请求以读取结果，不会静默再次调用。'
+   const errResult={source:'INTERRUPTED',request_id:body.request_id,answer:errMsg}
+   result.value=errResult
+   if(liveTurn){
+    liveTurn.state='error'
+    liveTurn.errorText=errMsg
+    liveTurn.result=errResult
+   }else{
+    error.value=errMsg
+   }
+   if(isNearBottom.value)scrollThreadToBottom(true)
+  }
+  activeTurn=null
+ }finally{
+  if(current()){
+   controller=null
+   if(!streamDonePayload){
+    busy.value=false
+    draft.value=''
+    if(!statusRefreshedForSend){statusRefreshedForSend=true;await refreshStatus()}
+   }
+  }
+ }
 }
 async function submit(){
- if(!message.value.trim()||busy.value)return
- const text=message.value.trim();const same=pending?.path==='query'&&pending.message===text&&pending.conversation_id===conversation.value
- await send('query',{message:text,conversation_id:conversation.value,request_id:same?pending.request_id:crypto.randomUUID()})
-}
+ const text=message.value.trim()
+ if(!text||busy.value)return
+ const same=pending?.path==='query'&&pending.message===text&&pending.conversation_id===conversation.value
+ const requestId=same?pending.request_id:makeTurnId()
+ const body={message:text,conversation_id:conversation.value,request_id:requestId}
+ message.value=''
+ shortcutsOpen.value=false
+ nextTick(autoGrow)
 
+ const tail=history.value[history.value.length-1]
+ const retryingTail=Boolean(tail&&(tail.state==='interrupted'||tail.state==='error')&&tail.question.trim()===text)
+ let targetTurn:HistoryTurn
+ if(retryingTail&&tail){
+  tail.id=tail.id||requestId
+  tail.question=text
+  tail.answer=''
+  tail.result=null
+  tail.state='streaming'
+  tail.errorText=''
+  tail.request_id=requestId
+  targetTurn=tail
+ }else{
+  history.value.push({id:requestId,question:text,answer:'',result:null,state:'streaming',errorText:'',request_id:requestId})
+  targetTurn=history.value[history.value.length-1]!
+ }
+ scrollThreadToBottom(true)
+ await send('query',body,targetTurn)
+}
+async function retryTurn(turn:HistoryTurn){
+ if(busy.value)return
+ const text=(turn.question||'').trim()
+ if(!text)return
+ const same=pending?.path==='query'&&pending.message===text&&pending.conversation_id===conversation.value
+ const requestId=same?pending.request_id:makeTurnId()
+ const body={message:text,conversation_id:conversation.value,request_id:requestId}
+ shortcutsOpen.value=false
+ turn.id=turn.id||requestId
+ turn.question=text
+ turn.answer=''
+ turn.result=null
+ turn.state='streaming'
+ turn.errorText=''
+ turn.request_id=requestId
+ const liveTurn=resolveLiveTurn(turn)||turn
+ if(liveTurn===history.value[history.value.length-1])scrollThreadToBottom(true)
+ await send('query',body,liveTurn)
+}
+function onComposerEnter(e:KeyboardEvent){
+ if(e.isComposing)return
+ e.preventDefault()
+ if(!busy.value)void submit()
+}
 async function cancel(){
+ if(streamDonePayload){
+  flushOrStopStreamCatchup('flush')
+  return
+ }
  if(!pending)return
- try{const id=pending.request_id;const data=await jsonRequest('cancel','POST',{request_id:id});if(!data.cancel_requested&&data.state==='DONE'){const completed=await jsonRequest('requests/'+id);consume('result',{...completed,state:'DONE'});notice.value='请求已经完成，未执行取消。'}else{result.value={source:'INTERRUPTED',answer:'已请求取消。已发送的调用可能计费，最终用量可能暂时未知。',cost:data.cost};notice.value='不会自动重发此请求。'}}catch(e){error.value=(e as Error).message}finally{controller?.abort();draft.value=''}
+ const currentTurn=resolveLiveTurn()
+ try{
+  const id=pending.request_id
+  const data=await jsonRequest('cancel','POST',{request_id:id})
+  if(!data.cancel_requested&&data.state==='DONE'){
+   const completed=await jsonRequest('requests/'+id)
+   consume('result',{...completed,state:'DONE'})
+   notice.value='请求已经完成，未执行取消。'
+  }else{
+   flushOrStopStreamCatchup('stop')
+   const cancelMsg='已请求取消。已发送的调用可能计费，最终用量可能暂时未知。'
+   const cancelResult={source:'INTERRUPTED',request_id:id,answer:cancelMsg,cost:data.cost}
+   result.value=cancelResult
+   if(currentTurn){
+    currentTurn.state='interrupted'
+    currentTurn.result=cancelResult
+    currentTurn.errorText=cancelMsg
+    currentTurn.request_id=id
+   }
+   activeTurn=null
+   notice.value='不会自动重发此请求。'
+   if(isNearBottom.value)scrollThreadToBottom(true)
+  }
+ }catch(e){error.value=(e as Error).message}
+ finally{
+  if(!streamDonePayload){
+   controller?.abort()
+   draft.value=''
+  }
+ }
 }
 function reset(){newSession()}
-function clearSensitive(){profileOpen.value=false}
+function clearSensitive(){profileOpen.value=false;shortcutsOpen.value=false}
 defineExpose({clearSensitive,busy});let stopHeadOrb:(()=>void)|undefined,stopEmptyOrb:(()=>void)|undefined
 onDeactivated(clearSensitive)
 function sharedStatus(){refreshStatus()}
-function closeTransient(e:Event){const el=e.target as HTMLElement;if(!el?.closest?.('.side-list'))sessionMenu.value='';if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value=''}}
+function closeTransient(e:Event){
+ if(e.type==='pointerdown'){
+  const el=e.target as HTMLElement|null
+  if(!el?.closest?.('.side-list'))sessionMenu.value=''
+  if(!el?.closest?.('.composer-wrap'))shortcutsOpen.value=false
+  if(!el?.closest?.('.profile-panel')&&!el?.closest?.('[data-source-id="profileEntry"]'))profileOpen.value=false
+  return
+ }
+ if((e as KeyboardEvent).key==='Escape'){sessionMenu.value='';editingId.value='';shortcutsOpen.value=false;profileOpen.value=false}
+}
 onMounted(()=>{refreshStatus();syncBehavior();window.addEventListener('mi2-behavior-changed',sharedBehavior);window.addEventListener('mi2-model-status',sharedStatus);window.addEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.addEventListener('focus',sharedStatus);document.addEventListener('pointerdown',closeTransient);document.addEventListener('keydown',closeTransient);stopHeadOrb=registerOrbMotion(()=>headOrbEl.value,{range:1.4,blink:true,busy});stopEmptyOrb=registerOrbMotion(()=>emptyOrbEl.value,{range:2.8,blink:true,busy})})
-onBeforeUnmount(()=>{stopHeadOrb?.();stopEmptyOrb?.();saveSession();disposed=true;controller?.abort();feedbackController?.abort();feedbackController=null;window.removeEventListener('mi2-behavior-changed',sharedBehavior);window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)})
+onBeforeUnmount(()=>{
+ stopHeadOrb?.();stopEmptyOrb?.();
+ if(streamDonePayload)flushOrStopStreamCatchup('flush')
+ else flushOrStopStreamCatchup('stop')
+ for(const t of history.value){
+  if(t.state==='streaming'){
+   t.state='interrupted'
+   if(!t.errorText)t.errorText='窗口已关闭或切换，生成中断，未自动重试。'
+  }
+ }
+ saveSession();disposed=true;controller?.abort();feedbackController?.abort();feedbackController=null;
+ window.removeEventListener('mi2-behavior-changed',sharedBehavior);window.removeEventListener('mi2-model-status',sharedStatus);window.removeEventListener(CLEAR_ASSISTANT_DISPLAY,clearRequestedDisplay);window.removeEventListener('focus',sharedStatus);document.removeEventListener('pointerdown',closeTransient);document.removeEventListener('keydown',closeTransient)
+})
+watch(()=>aiWorkspace.reduced,(reduced)=>{
+ if(!reduced)return
+ if(streamDonePayload){
+  flushOrStopStreamCatchup('flush')
+  return
+ }
+ if(streamTargetTurn&&streamTargetTurn.state==='streaming'){
+  stopStreamRaf()
+  isActivelyTyping.value=false
+  if(streamTargetText){
+   streamTargetTurn.answer=streamTargetText
+   draft.value=streamTargetText
+   streamDisplayedCount=Math.max(0,streamCodepointOffsets.length-1)
+   if(isNearBottom.value)scrollThreadToBottom(false)
+  }
+ }
+})
 
 function movieUrl(id:number){return assistantMovieTarget(id,props.surface,settingsRoute.fullPath)}
 async function copyAnswer(text:string){try{await navigator.clipboard.writeText(text);notice.value='已复制回答'}catch{error.value='无法访问剪贴板，请手动复制。'}}
@@ -76,23 +612,24 @@ async function copyAnswer(text:string){try{await navigator.clipboard.writeText(t
 
 const emit=defineEmits<{(e:'close'):void,(e:'toggle-full'):void}>()
 const auth=useAuthStore(),rootElement=ref<HTMLElement>(),headOrbEl=ref<HTMLElement>(),emptyOrbEl=ref<HTMLElement>(),sidebarOpen=ref(true),dialogMode=computed(()=>aiWorkspace.dialogMode),profileOpen=ref(false),shortcutsOpen=ref(false),sessionSearch=ref(''),sessionMenu=ref(''),sharedOpen=ref(false),editingId=ref(''),editTitle=ref('')
+const showScrollLatest=computed(()=>history.value.length>0&&!isNearBottom.value&&!shortcutsOpen.value)
 const uid=(id:string)=>props.surface+'-'+id
-type SavedSession={id:string,title:string,history:any[],conversation:string|null,message:string,result:any,pending:any}
+type SavedSession={id:string,title:string,history:HistoryTurn[],conversation:string|null,message:string,result:any,pending:any}
 const sessions=ref<SavedSession[]>([]),activeSession=ref('')
 const filteredSessions=computed(()=>sessions.value.filter(s=>s.title.toLowerCase().includes(sessionSearch.value.toLowerCase())))
-const otherSessions=computed(()=>aiWorkspace.archives[props.surface==='explore'?'floating':'explore'].filter(s=>s.history.length))
+const otherSessions=computed(()=>aiWorkspace.archives[props.surface==='explore'?'floating':'explore'].filter(s=>s.history?.length))
 const clone=<T,>(value:T):T=>JSON.parse(JSON.stringify(value))
-function saveSession(){if(!live())return;const s=sessions.value.find(x=>x.id===activeSession.value);if(!s)return;s.history=clone(history.value);s.conversation=conversation.value;s.message=message.value;s.result=clone(result.value);s.pending=pending?clone(pending):null;if(s.history.length&&s.title==='新对话')s.title=s.history[0].question.slice(0,24);aiWorkspace.archives[props.surface]=clone(sessions.value);aiWorkspace.activeSessions[props.surface]=s.id}
-function newSession(){if(busy.value)return;feedbackController?.abort();feedbackController=null;saveSession();const s:SavedSession={id:crypto.randomUUID(),title:'新对话',history:[],conversation:null,message:'',result:null,pending:null};sessions.value.unshift(s);activeSession.value=s.id;history.value=[];conversation.value=null;message.value='';result.value=null;pending=null;draft.value='';error.value='';notice.value='';sessionMenu.value='';saveSession()}
-function chooseSession(id:string){if(busy.value)return;saveSession();const s=sessions.value.find(x=>x.id===id);if(!s)return;activeSession.value=id;history.value=clone(s.history);hydrateFeedback();conversation.value=s.conversation;message.value=s.message;result.value=clone(s.result);pending=s.pending?clone(s.pending):null;draft.value='';error.value='';notice.value='';sessionMenu.value=''}
+function saveSession(){if(!live())return;const s=sessions.value.find(x=>x.id===activeSession.value);if(!s)return;s.history=clone(history.value);s.conversation=conversation.value;s.message=message.value;s.result=clone(result.value);s.pending=pending?clone(pending):null;if(s.history.length&&s.title==='新对话')s.title=s.history[0]?.question?.trim()?.slice(0,24)||'新对话';aiWorkspace.archives[props.surface]=clone(sessions.value);aiWorkspace.activeSessions[props.surface]=s.id}
+function newSession(){if(busy.value)return;flushOrStopStreamCatchup('flush');feedbackController?.abort();feedbackController=null;saveSession();const s:SavedSession={id:makeTurnId(),title:'新对话',history:[],conversation:null,message:'',result:null,pending:null};sessions.value.unshift(s);activeSession.value=s.id;history.value=[];conversation.value=null;message.value='';result.value=null;pending=null;draft.value='';error.value='';notice.value='';sessionMenu.value='';shortcutsOpen.value=false;saveSession();nextTick(()=>{autoGrow();isNearBottom.value=true})}
+function chooseSession(id:string){if(busy.value)return;flushOrStopStreamCatchup('flush');saveSession();const s=sessions.value.find(x=>x.id===id);if(!s)return;activeSession.value=id;history.value=normalizeHistory(clone(s.history));hydrateFeedback();conversation.value=s.conversation;message.value=s.message;result.value=clone(s.result);pending=s.pending?clone(s.pending):null;draft.value='';error.value='';notice.value='';sessionMenu.value='';shortcutsOpen.value=false;nextTick(()=>{autoGrow();updateNearBottom()})}
 const menuPos=ref({top:0,left:0})
 function toggleMenu(id:string,e:MouseEvent){if(sessionMenu.value===id){sessionMenu.value='';return}const r=(e.currentTarget as HTMLElement).getBoundingClientRect(),w=132,h=76,gap=4;let top=r.bottom+gap;if(top+h>window.innerHeight-8)top=Math.max(8,r.top-h-gap);let left=Math.min(r.right-w,window.innerWidth-w-8);menuPos.value={top,left};sessionMenu.value=id}
 async function startRename(s:SavedSession){sessionMenu.value='';editingId.value=s.id;editTitle.value=s.title;await nextTick();const el=rootElement.value?.querySelector<HTMLInputElement>('[data-edit="'+s.id+'"]');el?.focus();el?.select()}
 function commitRename(s:SavedSession){const title=editTitle.value.trim();if(title&&title!==s.title){s.title=title.slice(0,80);saveSession()}editingId.value=''}
 function cancelRename(){editingId.value=''}
-function deleteSession(id:string){if(busy.value)return;sessions.value=sessions.value.filter(s=>s.id!==id);if(activeSession.value===id){activeSession.value='';newSession()}saveSession();notice.value='已移除此窗口的显示记录，未删除服务端数据。'}
-function clearSessions(){if(busy.value)return;sessions.value=[];activeSession.value='';newSession();notice.value='已清空此窗口显示记录，未删除服务端数据。'}
-function importSession(other:SavedSession){if(busy.value)return;newSession();const s=sessions.value[0]!;s.title='导入 · '+other.title;s.history=clone(other.history);history.value=clone(s.history);hydrateFeedback();conversation.value=null;pending=null;saveSession();sharedOpen.value=false;notice.value='已复制记录；后续提问使用独立的新模型上下文，不修改另一窗口。'}
+function deleteSession(id:string){if(busy.value)return;flushOrStopStreamCatchup('flush');sessions.value=sessions.value.filter(s=>s.id!==id);if(activeSession.value===id){activeSession.value='';newSession()}saveSession();notice.value='已移除此窗口的显示记录，未删除服务端数据。'}
+function clearSessions(){if(busy.value)return;flushOrStopStreamCatchup('flush');sessions.value=[];activeSession.value='';newSession();notice.value='已清空此窗口显示记录，未删除服务端数据。'}
+function importSession(other:SavedSession){if(busy.value)return;newSession();const s=sessions.value[0]!;s.title='导入 · '+other.title;const imported=normalizeHistory(clone(other.history));s.history=imported;history.value=clone(imported);hydrateFeedback();conversation.value=null;pending=null;saveSession();sharedOpen.value=false;notice.value='已复制记录；后续提问使用独立的新模型上下文，不修改另一窗口。';nextTick(updateNearBottom)}
 watch([history,conversation,message,result],saveSession,{deep:true})
 const settingsRoute=useRoute()
 async function openSettings(tab='ai'){
@@ -108,9 +645,9 @@ function clearRequestedDisplay(e:Event){
  clearSessions()
 }
 const feedbackBusy=ref<Record<string,boolean>>({})
-function hydrateFeedback(){feedbackController?.abort();const fc=new AbortController();feedbackController=fc;for(const turn of history.value){const rid=turn.result?.request_id;if(rid)personalRequest('assistant-feedback?request_id='+encodeURIComponent(rid),undefined,fc.signal).then(r=>{if(live()&&feedbackController===fc&&!fc.signal.aborted)turn.feedback=r.reaction}).catch(()=>{})}}
+function hydrateFeedback(){feedbackController?.abort();const fc=new AbortController();feedbackController=fc;for(const turn of history.value){if(turn.state&&turn.state!=='done')continue;const rid=turn.result?.request_id;if(rid)personalRequest('assistant-feedback?request_id='+encodeURIComponent(rid),undefined,fc.signal).then(r=>{if(live()&&feedbackController===fc&&!fc.signal.aborted)turn.feedback=r.reaction}).catch(()=>{})}}
 async function feedback(turn:any,value:string){const rid=turn.result?.request_id;if(!rid||feedbackBusy.value[rid])return;feedbackBusy.value[rid]=true;try{const r=await personalRequest('assistant-feedback',{request_id:turn.result.request_id,reaction:turn.feedback===value?null:value});turn.feedback=r.reaction;notice.value='反馈已保存到当前账户，不会改动电影评分或清单。'}catch(e){notice.value=(e as Error).message}finally{delete feedbackBusy.value[rid]}}
-function followup(title:string){message.value='我想进一步了解《'+title+'》，适合什么心情观看？'}
+function followup(title:string){fillComposer('我想进一步了解《'+title+'》，适合什么心情观看？')}
 async function toggleMovieBehavior(mid:number,kind:BehaviorKind){if(busy.value)return;const owner=aiWorkspace.owner;notice.value='';error.value='';const r=await toggleBehavior(Number(mid),kind);if(!live()||owner!==aiWorkspace.owner)return;if(r.ok)notice.value=r.message;else error.value=r.message}
 function movieState(m:any){return behaviorState(Number(m.movie_id))}
 function behaviorLocked(m:any){return busy.value||!!behaviorLockReason(Number(m.movie_id))}
@@ -120,7 +657,7 @@ function sharedBehavior(){if(consumeInternalBehaviorEvent())return;const owner=a
 function sourceLabel(r:any){return r?.source==='LLM'?'AI 生成回答':r?.source==='CACHE'?'AI 缓存回答':r?.source==='MOCK'?'模拟测试':'本地检索 / 降级'}
 function modelLink(url:string){return /^https:\/\/www\.themoviedb\.org\/movie\/\d+(?:[/?#-]|$)/.test(url)}
 onMounted(()=>{
- sessions.value=clone(aiWorkspace.archives[props.surface])
+ sessions.value=clone(aiWorkspace.archives[props.surface]).map((s:SavedSession)=>({...s,history:normalizeHistory(s.history)}))
  const selected=aiWorkspace.activeSessions[props.surface]
  const s=sessions.value.find(x=>x.id===selected)||sessions.value[0]
  if(s)chooseSession(s.id)
@@ -139,22 +676,39 @@ onMounted(()=>{
 </div>
 <div class="profile-detail">评分、收藏与想看由当前登录账户独立保存。</div>
 <button @click="openSettings('account')" class="profile-edit-link" :id="uid('openAccountSettings')" data-source-id="openAccountSettings" type="button">编辑头像与个人资料</button><div class="profile-note">头像按账户保存；账户名称由身份系统管理。</div>
-</section><div class="side-account"><button @click="profileOpen=!profileOpen" aria-label="打开个人信息" class="account-identity" :id="uid('profileEntry')" data-source-id="profileEntry" title="个人信息" type="button"><span aria-hidden="true" class="account-avatar avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" v-if="aiWorkspace.avatar"/></span><span class="account-name">{{auth.user?.username}}</span></button><button @click="openSettings('account')" aria-label="打开全局设置" class="account-settings" :id="uid('accountSettingsEntry')" data-source-id="accountSettingsEntry" title="全局设置" type="button"><svg aria-hidden="true" fill="none" height="20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" viewBox="0 0 24 24" width="20"><circle cx="12" cy="12" r="3.2"></circle><path d="M19.4 13.3a7.5 7.5 0 0 0 0-2.6l2-1.5-2-3.4-2.4.9a7.6 7.6 0 0 0-2.2-1.3L14.4 3H9.6l-.4 2.4A7.6 7.6 0 0 0 7 6.7l-2.4-.9-2 3.4 2 1.5a7.5 7.5 0 0 0 0 2.6l-2 1.5 2 3.4 2.4-.9a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4.8l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4.9 2-3.4-2-1.5Z"></path></svg></button></div></div></aside><main class="chat-main"><div aria-live="polite" aria-relevant="additions" class="thread" :id="uid('thread')" data-source-id="thread" ref="thread"><div class="thread-inner" :id="uid('threadInner')" data-source-id="threadInner"><div v-if="!history.length&&!busy" class="empty-state"><div class="empty-orb"><span ref="emptyOrbEl" class="orb-skin" data-orb=""><img src="/m9/assistant-orb.png" alt="" draggable="false"/><i class="eye left"></i><i class="eye right"></i></span></div><h2>今晚，我们聊什么电影？</h2><p>说出你的心情、偏好或最近喜欢的电影。也可以直接向我提问。</p><div class="empty-suggestions"><button class="followup" @click="message='今晚看什么电影？'">帮我选今晚的电影</button><button class="followup" @click="message='想看烧脑一点的科幻电影'">想看烧脑科幻</button><button class="followup" @click="message='推荐一部温暖、有希望的电影'">想看温暖的故事</button></div></div>
+</section><div class="side-account"><button @click="profileOpen=!profileOpen" aria-label="打开个人信息" class="account-identity" :id="uid('profileEntry')" data-source-id="profileEntry" title="个人信息" type="button"><span aria-hidden="true" class="account-avatar avatar-slot is-empty"><svg aria-hidden="true" class="avatar-placeholder" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.55" v-if="!aiWorkspace.avatar" viewBox="0 0 24 24"><circle cx="12" cy="8.2" r="3.45"></circle><path d="M5.5 19.1c.6-3.45 2.88-5.1 6.5-5.1s5.9 1.65 6.5 5.1"></path></svg><img :src="aiWorkspace.avatar" alt="" class="user-avatar-img" v-if="aiWorkspace.avatar"/></span><span class="account-name">{{auth.user?.username}}</span></button><button @click="openSettings('account')" aria-label="打开全局设置" class="account-settings" :id="uid('accountSettingsEntry')" data-source-id="accountSettingsEntry" title="全局设置" type="button"><svg aria-hidden="true" fill="none" height="20" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.7" viewBox="0 0 24 24" width="20"><circle cx="12" cy="12" r="3.2"></circle><path d="M19.4 13.3a7.5 7.5 0 0 0 0-2.6l2-1.5-2-3.4-2.4.9a7.6 7.6 0 0 0-2.2-1.3L14.4 3H9.6l-.4 2.4A7.6 7.6 0 0 0 7 6.7l-2.4-.9-2 3.4 2 1.5a7.5 7.5 0 0 0 0 2.6l-2 1.5 2 3.4 2.4-.9a7.6 7.6 0 0 0 2.2 1.3l.4 2.4h4.8l.4-2.4a7.6 7.6 0 0 0 2.2-1.3l2.4.9 2-3.4-2-1.5Z"></path></svg></button></div></div></aside><main class="chat-main"><div aria-live="polite" aria-relevant="additions" class="thread" :id="uid('thread')" data-source-id="thread" ref="thread" @scroll="onThreadScroll"><div class="thread-inner" :id="uid('threadInner')" data-source-id="threadInner"><div v-if="!history.length" class="empty-state"><div class="empty-orb"><span ref="emptyOrbEl" class="orb-skin" data-orb=""><img src="/m9/assistant-orb.png" alt="" draggable="false"/><i class="eye left"></i><i class="eye right"></i></span></div><h2>今晚，我们聊什么电影？</h2><p>说出你的心情、偏好或最近喜欢的电影。也可以直接向我提问。</p><div class="empty-suggestions"><button class="followup" type="button" @click="fillComposer('今晚看什么电影？')">帮我选今晚的电影</button><button class="followup" type="button" @click="fillComposer('想看烧脑一点的科幻电影')">想看烧脑科幻</button><button class="followup" type="button" @click="fillComposer('推荐一部温暖、有希望的电影')">想看温暖的故事</button></div></div>
 <div v-if="history.length" class="date-line">当前会话</div>
-<template v-for="(turn,i) in history" :key="i"><div class="msg user"><div class="bubble">{{turn.question}}</div><div class="mi17-user-actions"><button class="response-action" @click="copyAnswer(turn.question)">复制</button><button class="response-action" aria-label="重新提问" :disabled="busy" @click="message=turn.question">编辑</button></div></div><div class="msg assistant"><div class="avatar"><span class="orb-skin mini"><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name"><span>MovieInsight AI</span><small>{{sourceLabel(turn.result)}}</small></div><div class="reply"><p class="reply-body">{{turn.answer}}</p></div>
-<template v-if="turn.result?.items?.length"><div class="trust-note">库内电影 · 真实目录 ID</div><div class="cards-head"><strong>电影选择 · {{turn.result.items.length}} 部</strong><span v-if="behaviorReady()">横向浏览 · 可追问</span><span v-else class="behavior-warn" role="status">行为状态不可用，收藏与想看已暂停</span></div><div class="cards-rail"><article v-for="m in turn.result.items" :key="m.movie_id" class="movie-card"><router-link :to="movieUrl(m.movie_id)" class="poster" :aria-label="'查看'+m.title+'详情'"><img v-if="m.poster||movieArtwork[String(m.movie_id)]?.poster" class="poster-uploaded" :src="m.poster||movieArtwork[String(m.movie_id)]?.poster" :alt="m.title+'海报'" loading="lazy"/><div v-else class="poster-title">{{m.title}}</div></router-link><div class="movie-info"><div class="movie-title">{{m.title}}</div><div class="movie-meta">{{m.release_year||'年份未知'}} · {{m.genres?.join(' / ')}}</div><span class="verified">库内影片</span><p class="why">{{m.reasons?.join('；')}}</p><div class="movie-actions"><router-link class="mini-btn" :to="movieUrl(m.movie_id)">详情</router-link><button class="mini-btn" :class="{'is-active':movieState(m).want}" :aria-pressed="movieState(m).want" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'want')" @click="toggleMovieBehavior(m.movie_id,'want')">{{movieState(m).want?'撤销想看':'想看'}}</button><button class="mini-btn" :class="{'is-active':movieState(m).favorite}" :aria-pressed="movieState(m).favorite" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'favorite')" @click="toggleMovieBehavior(m.movie_id,'favorite')">{{movieState(m).favorite?'取消收藏':'收藏'}}</button><button class="mini-btn" @click="followup(m.title)">追问</button></div></div></article></div></template>
+<template v-for="(turn,i) in history" :key="turn.id||turn.result?.request_id||i"><div class="msg user"><div class="bubble">{{turn.question}}</div><div class="mi17-user-actions"><button class="response-action" type="button" @click="copyAnswer(turn.question)">复制</button><button class="response-action" type="button" aria-label="重新提问" :disabled="busy||turn.state==='streaming'" @click="fillComposer(turn.question)">编辑</button></div></div><div class="msg assistant" :class="'turn-'+(turn.state||'done')"><div class="avatar"><span class="orb-skin mini" :class="{'is-thinking':turn.state==='streaming'}" data-orb=""><img src="/m9/assistant-orb.png" alt="" draggable="false"/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name" :class="{'is-thinking':turn.state==='streaming'}"><span>MovieInsight AI</span><small v-if="turn.state==='streaming'">{{turn.answer?'正在生成回答':'正在理解与查询'}}</small><small v-else-if="turn.state==='interrupted'">已中断</small><small v-else-if="turn.state==='error'">请求未完成</small><small v-else>{{sourceLabel(turn.result)}}</small></div>
+<template v-if="turn.state==='streaming'">
+<div class="thinking-cue" aria-live="polite"><i class="thinking-dot" aria-hidden="true"></i><span>{{turn.answer?'正在生成回答':'正在理解与查询'}}</span></div>
+<div v-if="turn.answer" class="reply"><p class="reply-body is-writing" :class="{'is-actively-typing':isActivelyTyping}">{{turn.answer}}</p></div>
+<div v-else class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></div>
+<small class="reply-status">生成草稿尚未完成事实核验。</small>
+</template>
+<template v-else-if="turn.state==='interrupted'||turn.state==='error'">
+<div v-if="turn.answer" class="reply"><p class="reply-body">{{turn.answer}}</p></div>
+<div class="turn-fault" :class="'is-'+turn.state" :role="turn.state==='error'?'alert':'status'">
+<p class="turn-fault-text">{{turnFaultText(turn)}}</p>
+<p v-if="turn.result?.answer&&turn.result.answer!==turnFaultText(turn)" class="turn-fault-note">{{turn.result.answer}}</p>
+<div class="turn-fault-actions"><button class="turn-fault-btn is-primary" type="button" :disabled="busy" @click="retryTurn(turn)"><svg class="ico"><use :href="'#'+uid('i-refresh')"/></svg><span>重发</span></button><button class="turn-fault-btn" type="button" :disabled="busy" @click="fillComposer(turn.question)"><span>填回编辑</span></button></div>
+</div>
+</template>
+<template v-else>
+<div class="reply"><p class="reply-body">{{turn.answer}}</p></div>
+<template v-if="turn.result?.items?.length"><div class="trust-note">库内电影 · 真实目录 ID</div><div class="cards-head"><strong>电影选择 · {{turn.result.items.length}} 部</strong><span v-if="behaviorReady()">横向浏览 · 可追问</span><span v-else class="behavior-warn" role="status">行为状态不可用，收藏与想看已暂停</span></div><div class="cards-rail"><article v-for="(m,cardIndex) in turn.result.items" :key="m.movie_id" class="movie-card" :style="{'--mi-card-i':Math.min(Number(cardIndex),3)}"><router-link :to="movieUrl(m.movie_id)" class="poster" :aria-label="'查看'+m.title+'详情'"><img v-if="m.poster||movieArtwork[String(m.movie_id)]?.poster" class="poster-uploaded" :src="m.poster||movieArtwork[String(m.movie_id)]?.poster" :alt="m.title+'海报'" loading="lazy"/><div v-else class="poster-title">{{m.title}}</div></router-link><div class="movie-info"><div class="movie-title">{{m.title}}</div><div class="movie-meta">{{m.release_year||'年份未知'}} · {{m.genres?.join(' / ')}}</div><span class="verified">库内影片</span><p class="why">{{m.reasons?.join('；')}}</p><div class="movie-actions"><router-link class="mini-btn" :to="movieUrl(m.movie_id)">详情</router-link><button class="mini-btn" :class="{'is-active':movieState(m).want}" :aria-pressed="movieState(m).want" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'want')" @click="toggleMovieBehavior(m.movie_id,'want')">{{movieState(m).want?'撤销想看':'想看'}}</button><button class="mini-btn" :class="{'is-active':movieState(m).favorite}" :aria-pressed="movieState(m).favorite" :disabled="behaviorLocked(m)" :title="behaviorHint(m,'favorite')" @click="toggleMovieBehavior(m.movie_id,'favorite')">{{movieState(m).favorite?'取消收藏':'收藏'}}</button><button class="mini-btn" @click="followup(m.title)">追问</button></div></div></article></div></template>
 <div v-if="turn.result?.discoveries?.length" class="no-result"><strong>库外电影发现 · 尚未入库</strong><article v-for="m in turn.result.discoveries" :key="m.title"><p>{{m.title}} · {{m.year||'年份未确认'}}</p><p>{{m.reason}}</p><small>{{m.verification==='TMDB_TITLE_YEAR_MATCH'?'TMDB 标题与年份匹配，仍未入库':m.verification==='TMDB_OFFICIAL_LIST_SNAPSHOT'?'TMDB 官方榜单快照核验，仍未入库':'未经 TMDB 核实的模型建议'}}</small><a v-if="m.tmdb_url&&modelLink(m.tmdb_url)" :href="m.tmdb_url" target="_blank" rel="noopener noreferrer">查看 TMDB</a></article></div>
-<div class="followups"><button class="followup" @click="message='那更偏烧脑一点呢？'">更偏烧脑一点</button><button class="followup" @click="message='有没有更温暖、更有希望的？'">想要温暖一点</button><button class="followup" @click="message='当前库里还有哪些电影？'">库里还有什么</button></div>
-<div class="response-actions"><div class="response-actions-buttons"><button class="response-action" aria-label="复制这条回复" @click="copyAnswer(turn.answer)"><svg class="ico"><use :href="'#'+uid('i-copy')"/></svg><span>复制</span></button><button class="response-action" aria-label="重新提问" :disabled="busy" @click="message=turn.question;notice='已填入原问题；确认发送可能产生新的模型费用。'"><svg class="ico"><use :href="'#'+uid('i-refresh')"/></svg><span>重新提问</span></button><button class="response-action" aria-label="有帮助" :aria-pressed="turn.feedback==='up'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'up')"><svg class="ico"><use :href="'#'+uid('i-thumb-up')"/></svg><span>有帮助</span></button><button class="response-action" aria-label="需改进" :aria-pressed="turn.feedback==='down'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'down')"><svg class="ico"><use :href="'#'+uid('i-thumb-down')"/></svg><span>需改进</span></button></div></div>
-<p v-if="turn.result?.cost" class="reply-status">模型调用 {{turn.result.cost.provider_calls??'未知'}} 次 · 输入 {{turn.result.cost.input_tokens??'未知'}} / 输出 {{turn.result.cost.output_tokens??'未知'}} Token · 金额 {{turn.result.cost.amount===0?'0':'未知'}}</p><p v-for="limit in turn.result?.limitations" :key="limit" class="reply-status">{{limit}}</p></div></div></template>
-<div v-if="busy" class="msg assistant"><div class="avatar"><span class="orb-skin mini is-thinking" data-orb=""><img src="/m9/assistant-orb.png" alt=""/><i class="eye left"></i><i class="eye right"></i></span></div><div class="assistant-body"><div class="assistant-name is-thinking">MovieInsight AI <small>{{draft?'正在生成回答':'正在理解与查询'}}</small></div><div class="thinking-cue" aria-live="polite"><i class="thinking-dot" aria-hidden="true"></i><span>{{draft?'正在生成回答':'正在理解与查询'}}</span></div><p v-if="draft" class="reply-body is-writing">{{draft}}</p><div class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></div><small class="reply-status">生成草稿尚未完成事实核验。</small></div></div>
-<p v-if="result?.source==='INTERRUPTED'" class="reply-status" role="status">{{result.answer}}</p><p v-if="error" class="reply-status" role="alert">{{error}}</p><p v-if="notice" class="reply-status" role="status">{{notice}}</p>
-</div></div><div class="composer-zone"><div class="composer-wrap"><div :hidden="!shortcutsOpen" class="composer-shortcuts" :id="uid('composerShortcuts')" data-source-id="composerShortcuts"><div class="shortcut-label">快捷提问</div><button @click="message='今晚看什么电影？'" data-shortcut="今晚看什么电影？" type="button">今晚看什么</button><button @click="message='想看烧脑一点的科幻电影'" data-shortcut="想看烧脑一点的科幻电影" type="button">烧脑科幻</button><button @click="message='推荐一部温暖、有希望的电影'" data-shortcut="推荐一部温暖、有希望的电影" type="button">温暖剧情</button></div><form @submit.prevent="submit" :class="{'mi14-expanded':expanded}" class="compose compose-r5 mi14-compose" :id="uid('composerForm')" data-source-id="composerForm">
+<div class="followups"><button class="followup" type="button" @click="fillComposer('那更偏烧脑一点呢？')">更偏烧脑一点</button><button class="followup" type="button" @click="fillComposer('有没有更温暖、更有希望的？')">想要温暖一点</button><button class="followup" type="button" @click="fillComposer('当前库里还有哪些电影？')">库里还有什么</button></div>
+<div class="response-actions"><div class="response-actions-buttons"><button class="response-action" type="button" aria-label="复制这条回复" @click="copyAnswer(turn.answer)"><svg class="ico"><use :href="'#'+uid('i-copy')"/></svg><span>复制</span></button><button class="response-action" type="button" aria-label="重新提问" :disabled="busy" @click="fillComposer(turn.question,'已填入原问题；确认发送可能产生新的模型费用。')"><svg class="ico"><use :href="'#'+uid('i-refresh')"/></svg><span>重新提问</span></button><button class="response-action" type="button" aria-label="有帮助" :aria-pressed="turn.feedback==='up'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'up')"><svg class="ico"><use :href="'#'+uid('i-thumb-up')"/></svg><span>有帮助</span></button><button class="response-action" type="button" aria-label="需改进" :aria-pressed="turn.feedback==='down'" :disabled="feedbackBusy[turn.result?.request_id]||!turn.result?.request_id" @click="feedback(turn,'down')"><svg class="ico"><use :href="'#'+uid('i-thumb-down')"/></svg><span>需改进</span></button></div></div>
+<p v-if="turn.result?.cost" class="reply-status">模型调用 {{turn.result.cost.provider_calls??'未知'}} 次 · 输入 {{turn.result.cost.input_tokens??'未知'}} / 输出 {{turn.result.cost.output_tokens??'未知'}} Token · 金额 {{turn.result.cost.amount===0?'0':'未知'}}</p><p v-for="limit in turn.result?.limitations" :key="limit" class="reply-status">{{limit}}</p>
+</template>
+</div></div></template>
+<p v-if="result?.source==='INTERRUPTED'&&!history.some(t=>t.state==='interrupted'||t.state==='error')" class="reply-status" role="status">{{result.answer}}</p><p v-if="error" class="reply-status" role="alert">{{error}}</p><p v-if="notice" class="reply-status" role="status">{{notice}}</p>
+</div></div><div class="composer-zone"><div class="composer-wrap"><div class="scroll-latest-anchor"><Transition name="mi-scroll-pill"><button v-if="showScrollLatest" :id="uid('scrollLatestBtn')" data-source-id="scrollLatestBtn" class="scroll-latest-pill" type="button" aria-label="回到底部查看最新消息" @click="scrollThreadToBottom(true)"><span aria-hidden="true" class="scroll-latest-arrow">↓</span><span>回到最新</span></button></Transition></div><div :hidden="!shortcutsOpen" class="composer-shortcuts" :id="uid('composerShortcuts')" data-source-id="composerShortcuts"><div class="shortcut-label">快捷提问</div><button @click="fillComposer('今晚看什么电影？')" data-shortcut="今晚看什么电影？" type="button">今晚看什么</button><button @click="fillComposer('想看烧脑一点的科幻电影')" data-shortcut="想看烧脑一点的科幻电影" type="button">烧脑科幻</button><button @click="fillComposer('推荐一部温暖、有希望的电影')" data-shortcut="推荐一部温暖、有希望的电影" type="button">温暖剧情</button></div><form @submit.prevent="submit" :class="{'mi14-expanded':expanded}" class="compose compose-r5 mi14-compose" :id="uid('composerForm')" data-source-id="composerForm">
 <label class="sr-only" :for="uid('messageInput')">输入关于电影的问题</label>
-<textarea :disabled="busy" @keydown.enter.exact.prevent="submit" @input="autoGrow" ref="composerInput" :id="uid('messageInput')" data-source-id="messageInput" maxlength="2000" placeholder="问问 MovieInsight…" rows="1" spellcheck="false" v-model="message"></textarea>
+<textarea @keydown.enter.exact="onComposerEnter" @input="autoGrow" ref="composerInput" :id="uid('messageInput')" data-source-id="messageInput" maxlength="2000" placeholder="问问 MovieInsight…" rows="1" spellcheck="false" v-model="message"></textarea>
 <div class="mi14-controls">
-<button @click="shortcutsOpen=!shortcutsOpen" aria-label="快捷提问" class="compose-icon lead" :id="uid('attachBtn')" data-source-id="attachBtn" title="快捷提问" type="button"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg></button>
-<div class="compose-actions"><button @click="openSettings('ai')" aria-label="查看全局 AI 模型设置" class="mode-chip" :id="uid('modeChip')" data-source-id="modeChip" title="查看全局 AI 模型设置" type="button"><span class="mode-name">{{status.cloud_available?status.model:"MovieInsight 自动"}}</span><span class="mode-name-mobile">自动模式</span><svg class="ico tiny"><use :href="'#'+uid('i-chevron-down')"></use></svg></button><button :aria-label="busy?'取消生成':'发送消息'" :disabled="!busy&&!message.trim()" :type="busy?'button':'submit'" @click="busy&&cancel()" class="send send-r5" :id="uid('sendBtn')" data-source-id="sendBtn" title="发送消息" ><svg class="ico"><use :href="'#'+uid(busy?'i-close':'i-arrow-up')"></use></svg></button></div>
+<button @click="shortcutsOpen=!shortcutsOpen" aria-label="快捷提问" :aria-expanded="shortcutsOpen" class="compose-icon lead" :id="uid('attachBtn')" data-source-id="attachBtn" title="快捷提问" type="button"><svg class="ico"><use :href="'#'+uid('i-plus')"></use></svg></button>
+<div class="compose-actions"><button @click="openSettings('ai')" aria-label="查看全局 AI 模型设置" class="mode-chip" :id="uid('modeChip')" data-source-id="modeChip" title="查看全局 AI 模型设置" type="button"><span class="mode-name">{{status.cloud_available?status.model:"MovieInsight 自动"}}</span><span class="mode-name-mobile">自动模式</span><svg class="ico tiny"><use :href="'#'+uid('i-chevron-down')"></use></svg></button><button :aria-label="busy?'取消生成':'发送消息'" :title="busy?'取消生成':'发送消息'" :disabled="!busy&&!message.trim()" :type="busy?'button':'submit'" @click="busy&&cancel()" class="send send-r5" :class="{'is-busy':busy,'is-ready':!busy&&!!message.trim()}" :id="uid('sendBtn')" data-source-id="sendBtn"><svg class="ico"><use :href="'#'+uid(busy?'i-close':'i-arrow-up')"></use></svg></button></div>
 </div></form><div class="compose-footer"><span :id="uid('composerStatus')" data-source-id="composerStatus">{{busy?"正在处理…":status.cloud_available?"使用你的服务商账户 · 可能计费":"本地检索 · 不调用模型"}}</span><span class="key">Enter 发送 · Shift + Enter 换行</span></div></div></div>
 
 
@@ -478,7 +1032,7 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
   color:#f5f2fa!important;font-size:15px!important;
   line-height:1.55!important;resize:none!important;
   outline:0!important;overflow-y:hidden;
-  scrollbar-width:thin;scrollbar-color:#6b6374 transparent;
+  scrollbar-width:thin;transition:height .14s cubic-bezier(.22,1,.36,1);scrollbar-color:#6b6374 transparent;
 }
 form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messageInput"]::placeholder{color:#a6a1ab!important;opacity:1}
 .mi14-controls{
@@ -548,7 +1102,7 @@ form[data-source-id="composerForm"].mi14-compose {
   min-height:58px!important;
   padding:8px 14px!important;
   border-radius:999px!important;
-  transition:border-radius .18s ease,background-color .18s ease,border-color .18s ease!important;
+  transition:border-radius .2s cubic-bezier(.22,1,.36,1),min-height .18s cubic-bezier(.22,1,.36,1),background-color .18s ease,border-color .18s ease,box-shadow .18s ease!important;
 }
 form[data-source-id="composerForm"].mi14-compose.mi14-expanded {
   grid-template-rows:auto 40px!important;
@@ -569,7 +1123,7 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
   padding:1px 3px!important;
   line-height:24px!important;
   font-size:14px!important;
-  scrollbar-width:thin;
+  scrollbar-width:thin;transition:height .14s cubic-bezier(.22,1,.36,1);
 }
 form[data-source-id="composerForm"].mi14-compose.mi14-expanded textarea[data-source-id="messageInput"]{
   align-self:stretch!important;
@@ -868,8 +1422,8 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
 .window-head{background:transparent}
 .composer-zone{background:linear-gradient(180deg,#0c0d0fe6 0%,#0c0d0f 45%)!important}
 .send,.send-r5,.mi14-controls button[data-source-id="sendBtn"]{background:#f1ece2!important;color:#0c0d0f!important}
-.send:hover:not(:disabled),.send-r5:hover,.mi14-controls button[data-source-id="sendBtn"]:hover{background:#fff!important}
-.send:disabled,.send-r5:disabled{background:#26272d!important;color:#8b8d95!important}
+.send:hover:not(:disabled),.send-r5:hover:not(:disabled),.mi14-controls button[data-source-id="sendBtn"]:hover:not(:disabled){background:#fff!important}
+.send:disabled,.send-r5:disabled,.mi14-controls button[data-source-id="sendBtn"]:disabled{background:#26272d!important;color:#8b8d95!important}
 :where(button,input,select,textarea,[role="button"]):focus-visible{outline-color:#ffffff66!important}
 .side-action:hover,.side-action:focus-visible{background:#ffffff0f!important;border-color:#ffffff24!important}
 .side-more:hover,.side-more:focus-visible{background:#ffffff12!important;color:#fff!important}
@@ -942,8 +1496,10 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
 :root[data-theme="light"] .prototype-ai .compose textarea,:root[data-theme="light"] .prototype-ai .compose-r5 textarea,:root[data-theme="light"] .prototype-ai .mi14-compose textarea{color:var(--mi-text)!important;background:transparent!important}
 :root[data-theme="light"] .prototype-ai .compose textarea::placeholder,:root[data-theme="light"] .prototype-ai .compose-r5 textarea::placeholder,:root[data-theme="light"] .prototype-ai .mi14-compose textarea::placeholder{color:var(--mi-text-subtle)!important}
 :root[data-theme="light"] .prototype-ai .send,:root[data-theme="light"] .prototype-ai .send-r5,:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]{background:var(--mi-primary-btn-bg)!important;color:var(--mi-primary-btn-text)!important}
-:root[data-theme="light"] .prototype-ai .send:hover:not(:disabled),:root[data-theme="light"] .prototype-ai .send-r5:hover,:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]:hover{background:var(--mi-primary-btn-hover)!important}
-:root[data-theme="light"] .prototype-ai .send:disabled,:root[data-theme="light"] .prototype-ai .send-r5:disabled{background:var(--mi-surface-raised)!important;color:var(--mi-text-muted)!important}
+:root[data-theme="light"] .prototype-ai .send:hover:not(:disabled),:root[data-theme="light"] .prototype-ai .send-r5:hover:not(:disabled),:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]:hover:not(:disabled){background:var(--mi-primary-btn-hover)!important}
+:root[data-theme="light"] .prototype-ai .send:disabled,:root[data-theme="light"] .prototype-ai .send-r5:disabled,:root[data-theme="light"] .prototype-ai .mi14-controls button[data-source-id="sendBtn"]:disabled{background:var(--mi-surface-raised)!important;color:var(--mi-text-muted)!important}
+:root[data-theme="light"] .prototype-ai .compose-icon,:root[data-theme="light"] .prototype-ai .mi14-controls .compose-icon.lead{color:var(--mi-text)!important}
+:root[data-theme="light"] .prototype-ai .compose-icon:hover,:root[data-theme="light"] .prototype-ai .mi14-controls .compose-icon.lead:hover{background:var(--mi-surface-hover)!important;color:var(--mi-text)!important}
 :root[data-theme="light"] .prototype-ai .account-settings,:root[data-theme="light"] .prototype-ai .profile-edit-link{color:var(--mi-accent-text)!important}
 :root[data-theme="light"] .prototype-ai :where(button,input,select,textarea,[role="button"]):focus-visible{outline-color:var(--mi-accent)!important}
 
@@ -1024,27 +1580,66 @@ form[data-source-id="composerForm"].mi14-compose textarea[data-source-id="messag
 :root[data-theme="dark"] .prototype-ai .typing-dots i{background:#b8a1fb}
 .prototype-ai .typing-dots i:nth-child(2){animation-delay:.16s}
 .prototype-ai .typing-dots i:nth-child(3){animation-delay:.32s}
-.prototype-ai .reply-body.is-writing::after{content:"";display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-.14em;background:var(--mi-accent);animation:miStreamCaret .85s steps(1) infinite}
+.prototype-ai .reply-body.is-writing::after{content:"";display:inline-block;width:2px;height:1em;margin-left:3px;vertical-align:-.14em;border-radius:1px;background:var(--mi-accent);animation:miStreamCaret 1.15s ease-in-out infinite}
+.prototype-ai .reply-body.is-writing.is-actively-typing::after{animation:none;opacity:.88}
 @keyframes miOrbIdleFloat{0%,100%{transform:translate3d(0,0,0)}50%{transform:translate3d(0,-3px,0)}}
 @keyframes miOrbThinkRing{0%,100%{opacity:.35;transform:scale(.96)}50%{opacity:.9;transform:scale(1.12)}}
 @keyframes miThinkPulse{0%,100%{opacity:.4;transform:scale(.82)}50%{opacity:1;transform:scale(1.1)}}
 @keyframes miTypingWave{0%,60%,100%{opacity:.35;transform:translate3d(0,0,0) scale(.88)}30%{opacity:1;transform:translate3d(0,-4px,0) scale(1.12)}}
-@keyframes miStreamCaret{50%{opacity:0}}
-:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::before,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
-@media (prefers-reduced-motion:reduce){.prototype-ai *,.prototype-ai *::before,.prototype-ai *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
-.thinking-cue{display:none;align-items:center;gap:8px;margin-bottom:8px;font-size:12px;font-weight:500;letter-spacing:.01em;color:var(--mi-text,#ffffff)}
-.window[data-dialog-mode="gemini"] .thinking-cue{display:inline-flex}
-.thinking-cue .thinking-dot{width:8px;height:8px;border-radius:50%;flex:none;background:radial-gradient(circle at 35% 35%,#e7dcff,#9c7aff 70%);box-shadow:0 0 10px rgba(167,139,250,.55);animation:miThinkPulse 1.5s ease-in-out infinite}
-:root[data-theme="light"] .thinking-cue .thinking-dot{background:radial-gradient(circle at 35% 35%,#e2bc87,#8c6226 72%);box-shadow:0 0 8px rgba(140,98,38,.36)}
-:root[data-theme="light"] .orb-skin.mini.is-thinking::after{box-shadow:0 0 0 0 rgba(140,98,38,.32)}
-:root[data-theme="light"] .assistant-name.is-thinking small::before{background:#8c6226}
+@keyframes miStreamCaret{0%,100%{opacity:.92}50%{opacity:.28}}
 @keyframes miMsgEnter{from{opacity:0;transform:translate3d(0,6px,0)}to{opacity:1;transform:translate3d(0,0,0)}}
+@keyframes miCardReveal{from{opacity:0;transform:translate3d(0,8px,0) scale(.985)}to{opacity:1;transform:translate3d(0,0,0) scale(1)}}
+@keyframes miPopoverEnter{from{opacity:0;transform:translate3d(0,6px,0) scale(.985)}to{opacity:1;transform:translate3d(0,0,0) scale(1)}}
+.prototype-ai .thinking-cue{display:none;align-items:center;gap:8px;min-height:20px;line-height:20px;margin-bottom:8px;font-size:12px;font-weight:500;letter-spacing:.01em;color:var(--mi-text,#ffffff)}
+.prototype-ai .window[data-dialog-mode="gemini"] .thinking-cue{display:inline-flex}
+.prototype-ai .thinking-cue .thinking-dot{width:8px;height:8px;border-radius:50%;flex:none;background:radial-gradient(circle at 35% 35%,#e7dcff,#9c7aff 70%);box-shadow:0 0 10px rgba(167,139,250,.55);animation:miThinkPulse 1.5s ease-in-out infinite}
+:root[data-theme="light"] .prototype-ai .thinking-cue .thinking-dot{background:radial-gradient(circle at 35% 35%,#e2bc87,#8c6226 72%);box-shadow:0 0 8px rgba(140,98,38,.36)}
+:root[data-theme="light"] .prototype-ai .orb-skin.mini.is-thinking::after{border-color:var(--mi-accent);box-shadow:0 0 0 2px var(--mi-accent-soft)}
+:root[data-theme="light"] .prototype-ai .assistant-name.is-thinking small::before{background:#8c6226}
 .prototype-ai .thread .msg{animation:miMsgEnter .18s cubic-bezier(.22,1,.36,1) both}
 .prototype-ai .empty-state{animation:miMsgEnter .24s cubic-bezier(.22,1,.36,1) both}
+.prototype-ai .cards-rail .movie-card{animation:miCardReveal .24s cubic-bezier(.22,1,.36,1) both;animation-delay:calc(var(--mi-card-i,0) * 45ms)}
+.prototype-ai .composer-shortcuts:not([hidden]),.prototype-ai .profile-panel:not([hidden]){transform-origin:bottom center;animation:miPopoverEnter .16s cubic-bezier(.22,1,.36,1) both}
+.prototype-ai .mi14-controls button[data-source-id="sendBtn"]{transition:transform .16s cubic-bezier(.22,1,.36,1),opacity .16s ease,background-color .16s ease}
+.prototype-ai .mi14-controls button[data-source-id="sendBtn"]:hover:not(:disabled){transform:scale(1.04)}
+.prototype-ai .mi14-controls button[data-source-id="sendBtn"]:active:not(:disabled){transform:scale(.93)}
 .prototype-ai .mode-chip,.prototype-ai .response-action,.prototype-ai .side-row,.prototype-ai .followup,.prototype-ai .icon-btn{transition:background-color .16s ease,border-color .16s ease,color .16s ease,transform .14s ease}
 .prototype-ai .followup:hover{transform:translateY(-1px)}
 .prototype-ai .followup:active{transform:translateY(0) scale(.985)}
-:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:active{transform:none!important}
-@media(prefers-reduced-motion:reduce){.prototype-ai .followup:hover,.prototype-ai .followup:active{transform:none!important}}
+.prototype-ai .turn-fault{margin-top:8px;padding:12px 14px;border-radius:14px;border:1px solid var(--mi-border,rgba(241,236,226,.14));background:rgba(255,255,255,.035);display:flex;flex-direction:column;gap:8px;max-width:640px}
+.prototype-ai .turn-fault.is-error{border-color:var(--mi-negative-border,rgba(232,122,122,.48));background:var(--mi-negative-soft,rgba(204,76,76,.12))}
+.prototype-ai .turn-fault.is-interrupted{border-color:var(--mi-accent-border,rgba(200,164,106,.45));background:var(--mi-warning-soft,rgba(200,164,106,.10))}
+.prototype-ai .turn-fault-text{margin:0;font-size:13.5px;line-height:1.65;color:var(--mi-text,#ffffff)}
+.prototype-ai .turn-fault-note{margin:0;font-size:12px;line-height:1.6;color:var(--mi-text-subtle,rgba(255,255,255,.68))}
+.prototype-ai .turn-fault-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-top:2px}
+.prototype-ai .turn-fault-btn{display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:5px 12px;border-radius:999px;border:1px solid var(--mi-border-strong,rgba(241,236,226,.24));background:rgba(255,255,255,.06);color:var(--mi-text,#ffffff);font-size:12.5px;font-weight:500;transition:background-color .16s ease,border-color .16s ease,transform .14s ease,opacity .16s ease}
+.prototype-ai .turn-fault-btn:hover:not(:disabled){background:rgba(255,255,255,.12);border-color:var(--mi-accent-border,rgba(200,164,106,.45));transform:translateY(-1px)}
+.prototype-ai .turn-fault-btn:active:not(:disabled){transform:translateY(0) scale(.98)}
+.prototype-ai .turn-fault-btn.is-primary{border-color:var(--mi-accent-border,rgba(200,164,106,.45));background:var(--mi-accent-soft,rgba(200,164,106,.12));color:var(--mi-accent-text,#DCC49B)}
+.prototype-ai .turn-fault-btn.is-primary:hover:not(:disabled){background:rgba(200,164,106,.22)}
+.prototype-ai .turn-fault-btn .ico{width:14px;height:14px}
+:root[data-theme="light"] .prototype-ai .turn-fault{background:var(--mi-surface);border-color:var(--mi-border-strong)}
+:root[data-theme="light"] .prototype-ai .turn-fault.is-error{background:var(--mi-negative-soft);border-color:var(--mi-negative-border)}
+:root[data-theme="light"] .prototype-ai .turn-fault.is-interrupted{background:var(--mi-warning-soft);border-color:var(--mi-accent-border)}
+:root[data-theme="light"] .prototype-ai .turn-fault-text{color:var(--mi-text)}
+:root[data-theme="light"] .prototype-ai .turn-fault-note{color:var(--mi-text-subtle)}
+:root[data-theme="light"] .prototype-ai .turn-fault-btn{background:var(--mi-surface);border-color:var(--mi-border-strong);color:var(--mi-text)}
+:root[data-theme="light"] .prototype-ai .turn-fault-btn:hover:not(:disabled){background:var(--mi-surface-hover);border-color:var(--mi-accent)}
+:root[data-theme="light"] .prototype-ai .turn-fault-btn.is-primary{background:var(--mi-accent-soft);border-color:var(--mi-accent-border);color:var(--mi-accent-text)}
+:root[data-theme="light"] .prototype-ai .turn-fault-btn.is-primary:hover:not(:disabled){background:rgba(140,98,38,.18)}
+.prototype-ai .scroll-latest-anchor{position:absolute;left:0;right:0;bottom:calc(100% + 12px);z-index:8;display:flex;justify-content:center;pointer-events:none}
+.prototype-ai .scroll-latest-pill{pointer-events:auto;display:inline-flex;align-items:center;gap:6px;min-height:32px;padding:6px 13px;border-radius:999px;border:1px solid var(--mi-border-strong,rgba(241,236,226,.22));background:rgba(20,21,25,.88);backdrop-filter:blur(10px);color:var(--mi-text,#ffffff);font-size:12px;font-weight:550;box-shadow:0 8px 24px rgba(0,0,0,.42);transition:opacity .18s ease,transform .18s cubic-bezier(.22,1,.36,1),background-color .16s ease,border-color .16s ease}
+.prototype-ai .scroll-latest-pill:hover{background:var(--mi-surface-hover,#202127);border-color:var(--mi-accent-border,rgba(200,164,106,.45));transform:translate3d(0,-1px,0)}
+.prototype-ai .scroll-latest-pill:active{transform:translate3d(0,0,0) scale(.97)}
+.prototype-ai .scroll-latest-arrow{font-size:13px;line-height:1;color:var(--mi-accent-text,#DCC49B)}
+:root[data-theme="light"] .prototype-ai .scroll-latest-pill{background:rgba(255,255,255,.92);border-color:var(--mi-border-strong);color:var(--mi-text);box-shadow:var(--mi-shadow-md)}
+:root[data-theme="light"] .prototype-ai .scroll-latest-pill:hover{background:var(--mi-surface-hover);border-color:var(--mi-accent)}
+:root[data-theme="light"] .prototype-ai .scroll-latest-arrow{color:var(--mi-accent-text)}
+.prototype-ai .mi-scroll-pill-enter-active,.prototype-ai .mi-scroll-pill-leave-active{transition:opacity .18s ease,transform .18s cubic-bezier(.22,1,.36,1)}
+.prototype-ai .mi-scroll-pill-enter-from,.prototype-ai .mi-scroll-pill-leave-to{opacity:0;transform:translate3d(0,8px,0) scale(.96)}
+:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::before,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+@media (prefers-reduced-motion:reduce){.prototype-ai *,.prototype-ai *::before,.prototype-ai *::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
+:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .followup:active,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .turn-fault-btn:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .turn-fault-btn:active,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .scroll-latest-pill:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) .scroll-latest-pill:active,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) button[data-source-id="sendBtn"]:hover,:is(.pref-reduced-motion .prototype-ai,.prototype-ai.pref-reduced-motion) button[data-source-id="sendBtn"]:active{transform:none!important}
+@media(prefers-reduced-motion:reduce){.prototype-ai .followup:hover,.prototype-ai .followup:active,.prototype-ai .turn-fault-btn:hover,.prototype-ai .turn-fault-btn:active,.prototype-ai .scroll-latest-pill:hover,.prototype-ai .scroll-latest-pill:active,.prototype-ai button[data-source-id="sendBtn"]:hover,.prototype-ai button[data-source-id="sendBtn"]:active{transform:none!important}}
 </style>
 <style scoped src="../styles/assistant-avatar.css"></style>
