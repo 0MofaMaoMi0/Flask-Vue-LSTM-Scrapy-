@@ -2,7 +2,7 @@
 from datetime import datetime, timezone
 from sqlalchemy import select, text
 from .models import CatalogBase
-from .recommendation_data import _load_candidates
+from .recommendation_data import load_candidates_readonly
 from . import board_snapshots
 from .admin_importer import digest
 
@@ -67,7 +67,7 @@ def verify_run(engine, run):
 
 
 def inventory(engine):
-    rows = _load_candidates(engine)
+    rows = load_candidates_readonly(engine)
     t = CatalogBase.metadata.tables
     with engine.connect() as c:
         identities = {}

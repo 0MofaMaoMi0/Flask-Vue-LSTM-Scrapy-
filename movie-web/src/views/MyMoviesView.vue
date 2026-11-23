@@ -8,18 +8,19 @@ import {personalRequest} from '../services/personalFeatures'
 import {MOVIE_COUNTRIES} from '../data/movieCountries'
 import {ISO2_TO_ISO3} from '../lib/globe/iso2to3.js'
 import {countryName,flagUrl,flagAlt} from '../lib/globe/countryDisplay.js'
+import {fetchJsonWithTimeout,HttpResponseError,buildGlobeCatalogStats,type GlobeSummaryResponse} from '../services/catalogResilience'
 import '../styles/globe.css'
 
 type Tab='globe'|'seen'|'favorite'|'want'|'insights'
 const router=useRouter(),route=useRoute()
 const expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
-const movies=ref<any[]>([]),behavior=ref<Record<string,any>>({}),busy=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({})
+const movies=ref<any[]>([]),behavior=ref<Record<string,any>>({}),globeSummary=ref<GlobeSummaryResponse|null>(null),globeError=ref(''),busy=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({})
 const countryMap=ref<Record<string,string[]>>({...MOVIE_COUNTRIES})
 function countriesOf(id:any){return countryMap.value[String(id)]||[]}
 const metric=ref('catalog_count'),selected=ref(''),globeSearch=ref(''),labels=ref<string[]>([]),autoRotate=ref(true),globeRef=ref<any>(null)
 const controller=new AbortController()
 let loadController:AbortController|undefined,loadSeq=0,selfBehaviorEvent=false
-const MAX_CATALOG_PAGES=10,LIST_STEP=48,listLimit=ref(LIST_STEP)
+const LIST_STEP=48,listLimit=ref(LIST_STEP)
 const viewLabel=computed(()=>({globe:'世界电影分布',seen:'观看记录',favorite:'收藏清单',want:'想看清单',insights:'观影数据'} as Record<Tab,string>)[tab.value])
 const tab=computed<Tab>(()=>{const v=String(route.query.view||'globe');return (['globe','seen','favorite','want','insights'] as string[]).includes(v)?v as Tab:'globe'})
 watch(tab,()=>{listLimit.value=LIST_STEP})
@@ -58,23 +59,14 @@ const trend=computed(()=>{
   return {rows,max:Math.max(1,...rows.map(r=>r.count))}
 })
 const filterOpen=ref(false),filterGenre=ref(''),onlyFavorite=ref(false),onlyChecked=ref(false)
-const catalogStats=computed(()=>{
-  const map=new Map<string,any>()
-  for(const m of movies.value){
-    const s=behavior.value[String(m.movie_id)]||{}
-    for(const iso of countriesOf(m.movie_id)){
-      let c=map.get(iso)
-      if(!c){c={iso3:iso,catalog_count:0,watched_count:0,favorite_count:0,ratings:[],movies:[],genreMap:new Map()};map.set(iso,c)}
-      c.catalog_count++
-      for(const g of m.genres||[])c.genreMap.set(g.name_zh,(c.genreMap.get(g.name_zh)||0)+1)
-      if(s.watched){c.watched_count++;c.movies.push({movie_id:m.movie_id,title:m.title,rating:typeof s.rating==='number'?s.rating:null});if(typeof s.rating==='number')c.ratings.push(s.rating)}
-      if(s.favorite)c.favorite_count++
-    }
-  }
-  const countries=[...map.values()].map((c:any)=>({...c,average_rating:c.ratings.length?Math.round(c.ratings.reduce((a:number,b:number)=>a+b,0)/c.ratings.length*100)/100:null,rating_sample_count:c.ratings.length,genres:[...c.genreMap.entries()].sort((a:any,b:any)=>b[1]-a[1])}))
-  return {total_unique_movies:movies.value.length,covered_country_count:countries.length,countries}
-})
-const genreOptions=computed(()=>{const map=new Map<string,number>();for(const m of movies.value)for(const g of m.genres||[])map.set(g.name_zh,(map.get(g.name_zh)||0)+1);return [...map.entries()].sort((a,b)=>b[1]-a[1]).slice(0,10).map(([n])=>n)})
+const catalogStats=computed(()=>buildGlobeCatalogStats({
+  globeSummary:globeSummary.value,
+  userMovies:movies.value,
+  behavior:behavior.value,
+  countryMap:countryMap.value,
+  iso2ToIso3:ISO2_TO_ISO3 as Record<string,string>,
+}))
+const genreOptions=computed<string[]>(()=>Array.isArray(globeSummary.value?.genre_options)?globeSummary.value!.genre_options:[])
 const ranks=computed(()=>catalogStats.value.countries.slice().sort((a:any,b:any)=>(b[metric.value]||0)-(a[metric.value]||0)))
 const visibleRanks=computed(()=>ranks.value.filter((c:any)=>{
   const q=globeSearch.value.toLowerCase()
@@ -86,7 +78,7 @@ const visibleRanks=computed(()=>ranks.value.filter((c:any)=>{
 }))
 const activeFilters=computed(()=>[filterGenre.value,onlyFavorite.value,onlyChecked.value].filter(Boolean).length)
 const selectedStat=computed(()=>catalogStats.value.countries.find((c:any)=>c.iso3===selected.value))
-const overviewGenres=computed(()=>{const map=new Map<string,number>();for(const m of movies.value)for(const g of m.genres||[])map.set(g.name_zh,(map.get(g.name_zh)||0)+1);return [...map.entries()].sort((a,b)=>b[1]-a[1]).slice(0,6) as [string,number][]})
+const overviewGenres=computed<[string,number][]>(()=>Array.isArray(globeSummary.value?.overview_genres)?globeSummary.value!.overview_genres:[])
 const overviewMax=computed(()=>Math.max(1,...overviewGenres.value.map(([,n])=>n)))
 const detailGenres=computed<[string,number][]>(()=>(selectedStat.value?.genres||[]).slice(0,6))
 const detailMax=computed(()=>Math.max(1,...detailGenres.value.map(([,n])=>n)))
@@ -149,65 +141,133 @@ async function saveEdit(){
 }
 function open(m:any){router.push({path:'/movies',query:{from:'behavior',view:tab.value},hash:'#movie/'+m.movie_id})}
 async function api(path:string,outerSignal?:AbortSignal){
-  const signals=[controller.signal,AbortSignal.timeout(20000)];if(outerSignal)signals.push(outerSignal)
-  const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:AbortSignal.any(signals)});let body:any=null;try{body=await r.json()}catch{body=null}
-  if(!r.ok)throw new Error(r.status===401?'登录已失效，请重新登录。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'个人片库缓存正在预热，请稍后重试。':'个人片库暂时不可用，请重试。')
-  if(!body||body.code!=='OK'||body.data==null)throw new Error('个人片库响应异常，请重试。')
-  return body.data
+  const linked=new AbortController()
+  const abortLinked=()=>linked.abort()
+  if(controller.signal.aborted||outerSignal?.aborted){
+    linked.abort()
+  }else{
+    controller.signal.addEventListener('abort',abortLinked,{once:true})
+    outerSignal?.addEventListener('abort',abortLinked,{once:true})
+  }
+  try{
+    const {response:r,body}=await fetchJsonWithTimeout('/api/catalog/'+path,{
+      credentials:'same-origin',
+      signal:linked.signal,
+      timeoutMs:20_000,
+      timeoutMessage:'个人片库读取超时，请稍后重试。',
+    })
+    if(!r.ok){
+      const msg=r.status===401?'登录已失效，请重新登录。':(r.status===503||body?.code==='DATA_UNAVAILABLE'||body?.code==='CACHE_WARMING')?'个人片库缓存正在预热，请稍后重试。':'个人片库暂时不可用，请重试。'
+      throw new HttpResponseError(msg,r.status,body?.code||'')
+    }
+    if(!body||body.code!=='OK'||body.data==null)throw new Error('个人片库响应异常，请重试。')
+    return body.data
+  }finally{
+    controller.signal.removeEventListener('abort',abortLinked)
+    outerSignal?.removeEventListener('abort',abortLinked)
+  }
+}
+async function fetchPersonalStateMovies(stateName:'watched'|'favorite'|'want',signal?:AbortSignal){
+  const pageLimit=100
+  const rows:any[]=[]
+  let offset=0
+  while(offset<=10000){
+    const page=await api(`movies?limit=${pageLimit}&sort=updated&state=${stateName}&offset=${offset}`,signal)
+    const items=Array.isArray(page?.items)?page.items:[]
+    rows.push(...items)
+    const usedLimit=Number(page?.limit)||pageLimit
+    if(items.length<usedLimit)break
+    offset+=usedLimit
+  }
+  return rows
 }
 async function load(){
   const ticket=++loadSeq;loadController?.abort();const current=new AbortController();loadController=current
   const signal=current.signal
-  busy.value=true;error.value=''
+  busy.value=true;error.value='';globeError.value=''
   try{
-    const [firstPage,state]=await Promise.all([api('movies?limit=100&sort=id&offset=0',signal),api('behavior',signal)])
+    const globeTask=api('globe-summary',signal)
+      .then(data=>({ok:true as const,data:data as GlobeSummaryResponse}))
+      .catch(err=>({ok:false as const,err}))
+    const countriesTask=api('production-countries',signal).catch(err=>{
+      if(err instanceof HttpResponseError&&err.status===401)throw err
+      return null
+    })
+    const notesTask=personalRequest('movie-notes',undefined,signal)
+      .then(data=>({ok:true as const,data}))
+      .catch(()=>({ok:false as const,data:null}))
+    const [state,watchedRows,favoriteRows,wantRows,globeRes,cc,notesRes]=await Promise.all([
+      api('behavior',signal),
+      fetchPersonalStateMovies('watched',signal),
+      fetchPersonalStateMovies('favorite',signal),
+      fetchPersonalStateMovies('want',signal),
+      globeTask,
+      countriesTask,
+      notesTask,
+    ])
     if(ticket!==loadSeq||signal.aborted)return
+    if(globeRes.ok){
+      globeSummary.value=globeRes.data
+      globeError.value=''
+    }else{
+      if(globeRes.err instanceof HttpResponseError&&globeRes.err.status===401)throw globeRes.err
+      globeSummary.value=null
+      globeError.value=globeRes.err instanceof HttpResponseError&&globeRes.err.status===404
+        ?'全库地球统计接口暂未就绪（404），请稍后重试。'
+        :(globeRes.err as Error)?.message||'全库地球统计暂时不可用，请重试。'
+    }
     const byId=new Map<number,any>()
     const addRows=(rows:any[])=>{for(const item of rows||[])if(item?.movie_id!=null&&!byId.has(item.movie_id))byId.set(item.movie_id,item)}
-    const firstItems=firstPage.items||[]
-    addRows(firstItems)
-    const pageLimit=Number(firstPage.limit)||100
-    let reachedEnd=firstItems.length<pageLimit
-    let pageIndex=1
-    while(!reachedEnd&&pageIndex<MAX_CATALOG_PAGES){
-      const batchOffsets:number[]=[]
-      for(let i=0;i<3&&pageIndex<MAX_CATALOG_PAGES;i++,pageIndex++)batchOffsets.push(pageIndex*pageLimit)
-      const pages=await Promise.all(batchOffsets.map(off=>api('movies?limit='+pageLimit+'&sort=id&offset='+off,signal)))
-      if(ticket!==loadSeq||signal.aborted)return
-      for(const p of pages){
-        const items=p.items||[]
-        addRows(items)
-        if(items.length<pageLimit)reachedEnd=true
-      }
-    }
-    if(!reachedEnd){
-      const statePages=await Promise.all([
-        api('movies?limit=100&sort=updated&state=watched',signal).catch(()=>({items:[]})),
-        api('movies?limit=100&sort=updated&state=favorite',signal).catch(()=>({items:[]})),
-        api('movies?limit=100&sort=updated&state=want',signal).catch(()=>({items:[]})),
-      ])
-      if(ticket!==loadSeq||signal.aborted)return
-      for(const sp of statePages)addRows(sp.items||[])
-    }
+    addRows(watchedRows)
+    addRows(favoriteRows)
+    addRows(wantRows)
     movies.value=[...byId.values()]
     behavior.value=state.state||{}
-    try{const notes=await personalRequest('movie-notes',undefined,signal);if(ticket===loadSeq&&!signal.aborted){movieNotes.value=notes.items;notesReady.value=true}}catch{if(ticket===loadSeq)notesReady.value=false}
-    try{
-      const cc=await api('production-countries',signal)
-      if(ticket!==loadSeq||signal.aborted)return
+    if(notesRes.ok&&notesRes.data){
+      movieNotes.value=notesRes.data.items
+      notesReady.value=true
+    }else{
+      notesReady.value=false
+    }
+    if(cc){
       const next:Record<string,string[]>={}
       for(const it of cc.items||[]){
-        const isos=(it.countries||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[c.iso2]).filter(Boolean)
+        const isos=(it.countries||[]).map((c:any)=>(ISO2_TO_ISO3 as Record<string,string>)[String(c.iso2||'').trim().toUpperCase()]).filter(Boolean)
         if(isos.length)next[String(it.movie_id)]=isos
       }
       if(Object.keys(next).length)countryMap.value=next
-    }catch{}
-  }catch(e){if(ticket===loadSeq&&!controller.signal.aborted&&!signal.aborted&&(e as Error).name!=='AbortError')error.value=(e as Error).message}
+    }
+  }catch(e){if(ticket===loadSeq&&!controller.signal.aborted&&!signal.aborted)error.value=(e as Error).message}
   finally{if(ticket===loadSeq)busy.value=false}
 }
 function closeFiltersOnOutside(e:PointerEvent){if(filterOpen.value&&!(e.target as HTMLElement)?.closest?.('.g-rank'))filterOpen.value=false}
 function closeFiltersOnEscape(e:KeyboardEvent){if(e.key!=='Escape')return;filterOpen.value=false;if(editOpen.value)closeEdit()}
-const refreshBehavior=()=>{if(selfBehaviorEvent)return;api('behavior').then(b=>behavior.value=b.state||{}).catch(()=>{if(!controller.signal.aborted)error.value='个人状态刷新失败，请重试。'})}
+const refreshBehavior=async()=>{
+  if(selfBehaviorEvent)return
+  try{
+    const b=await api('behavior')
+    if(controller.signal.aborted)return
+    const nextState=b.state||{}
+    behavior.value=nextState
+    const loadedIds=new Set(movies.value.map(m=>String(m.movie_id)))
+    const missingInteracted=Object.entries(nextState).some(([id,s]:[string,any])=>!loadedIds.has(id)&&(s?.watched||s?.favorite||s?.want))
+    if(missingInteracted){
+      const [watchedRows,favoriteRows,wantRows]=await Promise.all([
+        fetchPersonalStateMovies('watched'),
+        fetchPersonalStateMovies('favorite'),
+        fetchPersonalStateMovies('want'),
+      ])
+      if(controller.signal.aborted)return
+      const byId=new Map<number,any>()
+      for(const item of [...watchedRows,...favoriteRows,...wantRows]){
+        if(item?.movie_id!=null&&!byId.has(item.movie_id))byId.set(item.movie_id,item)
+      }
+      movies.value=[...byId.values()]
+    }
+  }catch{
+    if(!controller.signal.aborted)error.value='个人状态刷新失败，请重试。'
+  }
+}
 onMounted(()=>{load();window.addEventListener('mi2-behavior-changed',refreshBehavior);document.addEventListener('pointerdown',closeFiltersOnOutside);document.addEventListener('keydown',closeFiltersOnEscape)})
 onBeforeUnmount(()=>{++loadSeq;loadController?.abort();controller.abort();window.removeEventListener('mi2-behavior-changed',refreshBehavior);document.removeEventListener('pointerdown',closeFiltersOnOutside);document.removeEventListener('keydown',closeFiltersOnEscape)})
 </script>
@@ -293,7 +353,8 @@ onBeforeUnmount(()=>{++loadSeq;loadController?.abort();controller.abort();window
           <button type="button" @click="resetGlobe">重置视角</button>
           <button type="button" :disabled="!labels.length" @click="clearLabels">清空勾选</button>
         </div>
-        <p v-if="!movies.length" class="g-empty-stage">电影库暂无影片，地球没有可统计的数据</p>
+        <div v-if="globeError" class="g-empty-stage" role="alert"><p>{{globeError}}</p><button type="button" @click="load">重试</button></div>
+        <p v-else-if="!catalogStats.total_unique_movies" class="g-empty-stage">电影库暂无影片，地球没有可统计的数据</p>
       </div>
 
       <aside class="g-detail" aria-label="国家分析">
@@ -436,7 +497,9 @@ onBeforeUnmount(()=>{++loadSeq;loadController?.abort();controller.abort();window
 .g-actions button{height:32px;padding:0 11px;border-radius:7px;border:1px solid var(--line-strong);background:var(--mi-surface);backdrop-filter:blur(3px);color:var(--paper);font-size:11px;cursor:pointer;box-shadow:var(--mi-shadow-sm)}
 .g-actions button:hover{background:var(--mi-surface-hover)}
 .g-actions button:disabled{opacity:.4;cursor:default}
-.g-empty-stage{position:absolute;inset:0;display:grid;place-content:center;text-align:center;z-index:4;color:var(--muted);font-size:12px;background:var(--mi-bg)}
+.g-empty-stage{position:absolute;inset:0;display:grid;place-content:center;text-align:center;z-index:4;color:var(--muted);font-size:12px;background:var(--mi-bg);padding:20px}
+.g-empty-stage p{margin:0 0 12px}
+.g-empty-stage button{margin:0 auto;background:transparent;border:1px solid var(--line-strong);color:var(--paper);border-radius:7px;padding:8px 14px;cursor:pointer;font-size:12px}
 .g-detail h2{margin-bottom:14px}
 .g-country{display:flex;align-items:center;gap:10px;margin-bottom:14px}
 .g-country small{display:block;color:var(--muted);font-size:10px;margin-top:2px}

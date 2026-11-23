@@ -81,8 +81,12 @@ def create_app(overrides=None):
         from catalog.tmdb_supplement_api import install as install_tmdb_supplement
         install_tmdb_supplement(app)
         if not app.config.get('TESTING') and os.environ.get('MI2_SKIP_CACHE_WARMUP') != '1':
-            from catalog.tmdb_supplement_api import warm_async
-            warm_async(app)
+            if os.environ.get('MI2_WARM_PUBLIC_CATALOG_ON_START', '1') != '0':
+                from catalog.recommendation_data import warm_async as warm_public_catalog_async
+                warm_public_catalog_async(engine)
+            if os.environ.get('MI2_WARM_SUPPLEMENT_ON_START') == '1':
+                from catalog.tmdb_supplement_api import warm_async
+                warm_async(app)
     @app.get('/api/v1/health')
     def health(): return jsonify(code=0, message='ok', data={'status':'ok'})
     if app.config.get('M6_ISOLATED') is True:

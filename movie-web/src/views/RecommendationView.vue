@@ -7,25 +7,22 @@ import {accountSettingsTarget} from '../services/accountSettings'
 import {tmdbRequest,tmdbChanged,tmdbErrors} from '../services/tmdb'
 import {createFeedbackBoard,vFeedback} from '../services/recommendationFeedback'
 import {movieArtwork} from '../services/movieArtwork'
+import {getSwrBus,fetchJsonWithTimeout,createInFlightDeduper,REC_META_TTL_MS,readRecMetaStorage,writeRecMetaStorage,clearRecMetaStorage,type RecMetaCache} from '../services/catalogResilience'
 const REC_CACHE_MAX_ENTRIES=24
-const REC_CACHE_TTL_MS=120_000
-const REC_META_TTL_MS=300_000
-type SwrGlobalBus={behaviorEpoch:number;authEpoch:number;listening:boolean}
+const REC_CACHE_TTL_MS=300_000
+const REC_DEBOUNCE_MS=180
+const REC_REQUEST_TIMEOUT_MS=20_000
 type RecCacheEntry={userKey:string;authEpoch:number;epoch:number;updatedAt:number;data:any}
-type RecMetaCache={authEpoch:number;updatedAt:number;channels:any[];genres:any[];languages:{code:string;count:number}[]}
-const swrBus:SwrGlobalBus=((globalThis as any).__mi2SwrBus??={behaviorEpoch:1,authEpoch:1,listening:false})
-if(!swrBus.listening&&typeof window!=='undefined'){
- swrBus.listening=true
- const bumpBehavior=()=>{swrBus.behaviorEpoch++}
- window.addEventListener('mi2-behavior-changed',bumpBehavior)
- window.addEventListener('mi2-tmdb-status',bumpBehavior)
-}
+const swrBus=getSwrBus()
 const recCache:Map<string,RecCacheEntry>=((globalThis as any).__mi2RecSwrCache??=new Map<string,RecCacheEntry>())
+const recInFlight=createInFlightDeduper<any>()
 let recMetaCache:RecMetaCache|null=((globalThis as any).__mi2RecMetaCache??=null)
 function clearRecCaches(bumpAuth=false){
  recCache.clear()
+ recInFlight.clear()
  recMetaCache=null
  ;(globalThis as any).__mi2RecMetaCache=null
+ clearRecMetaStorage()
  if(bumpAuth)swrBus.authEpoch++
 }
 const route=useRoute(),router=useRouter(),auth=useAuthStore(),expanded=ref(localStorage.getItem('mi2_nav_expanded')==='true')
@@ -36,9 +33,26 @@ function getUserCacheKey():string{
 }
 function invalidateUserRecCache(userKey=getUserCacheKey()){
  swrBus.behaviorEpoch++
- for(const [k,entry] of recCache.entries()){
+ for(const [,entry] of recCache.entries()){
   if(entry.userKey===userKey)entry.epoch=0
  }
+ recInFlight.clear()
+}
+function readRecMeta(userKey:string):RecMetaCache|null{
+ if(recMetaCache&&recMetaCache.authEpoch===swrBus.authEpoch&&recMetaCache.userKey===userKey&&recMetaCache.channels.length>0){
+  return recMetaCache
+ }
+ const stored=readRecMetaStorage(userKey,swrBus.authEpoch)
+ if(stored){
+  recMetaCache=stored
+  ;(globalThis as any).__mi2RecMetaCache=stored
+ }
+ return stored
+}
+function writeRecMeta(entry:RecMetaCache){
+ recMetaCache=entry
+ ;(globalThis as any).__mi2RecMetaCache=entry
+ writeRecMetaStorage(entry)
 }
 function readRecCache(key:string):RecCacheEntry|undefined{
  const entry=recCache.get(key)
@@ -63,7 +77,7 @@ function writeRecCache(key:string,entry:RecCacheEntry){
 watch(()=>auth.user?(auth.user as any).id??(auth.user as any).username??'auth':null,(next,prev)=>{
  if(prev!==undefined&&next!==prev)clearRecCaches(true)
 })
-const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),error=ref(''),failed=ref<Record<string,boolean>>({}),boardRenderKey=ref(0)
+const channels=ref<any[]>([]),data=ref<any>(null),genres=ref<any[]>([]),loading=ref(true),revalidating=ref(false),error=ref(''),failed=ref<Record<string,boolean>>({}),boardRenderKey=ref(0)
 const languageNames:Record<string,string>={zh:'中文',cn:'中文',en:'英语',ja:'日语',ko:'韩语',fr:'法语',de:'德语',es:'西班牙语',it:'意大利语',ru:'俄语',hi:'印地语',th:'泰语',pt:'葡萄牙语',da:'丹麦语',sv:'瑞典语',nl:'荷兰语',pl:'波兰语',tr:'土耳其语',ar:'阿拉伯语',no:'挪威语',fi:'芬兰语',cs:'捷克语',hu:'匈牙利语',el:'希腊语',he:'希伯来语',fa:'波斯语',id:'印尼语',vi:'越南语',uk:'乌克兰语'}
 const languages=ref<{code:string,count:number}[]>([]),languageOptions=computed(()=>languages.value.length?languages.value.map(l=>({code:l.code,label:languageNames[l.code]||l.code.toUpperCase()})):[{code:'zh',label:'中文'},{code:'en',label:'英语'},{code:'ja',label:'日语'},{code:'ko',label:'韩语'},{code:'fr',label:'法语'},{code:'de',label:'德语'}])
 // 库内影片的海报资产多为 local_static 相对路径，后端 asset_url 不把它转成可访问地址，
@@ -79,15 +93,21 @@ const tmdbBusy=ref(false),tmdbNotice=ref('')
 const keyword=ref(''),genre=ref(''),language=ref(''),yearFrom=ref(''),yearTo=ref(''),runtime=ref(''),minVotes=ref(''),localOnly=ref(false),unwatched=ref(false)
 const channel=computed(()=>String(route.query.channel||'daily'))
 const selected=computed(()=>channels.value.find(c=>c.id===channel.value))
-let controller:AbortController|undefined,initController:AbortController|undefined,sequence=0,loadedChannel='',selfTmdbEvent=false
+let controller:AbortController|undefined,waitController:AbortController|undefined,initController:AbortController|undefined,loadDebounceTimer:ReturnType<typeof setTimeout>|undefined,activeInFlightKey='',sequence=0,loadedChannel='',selfTmdbEvent=false
 const feedback=shallowRef<ReturnType<typeof createFeedbackBoard>>()
+function clearDebounceTimer(){
+ if(loadDebounceTimer){clearTimeout(loadDebounceTimer);loadDebounceTimer=undefined}
+}
 async function get(path:string,signal?:AbortSignal){
- const timeout=AbortSignal.timeout(20000)
- const combined=signal?AbortSignal.any([signal,timeout]):timeout
- const r=await fetch('/api/catalog/'+path,{credentials:'same-origin',signal:combined});let body:any=null;try{body=await r.json()}catch{body=null}
+ const {response:r,body}=await fetchJsonWithTimeout('/api/catalog/'+path,{
+  credentials:'same-origin',
+  signal,
+  timeoutMs:REC_REQUEST_TIMEOUT_MS,
+  timeoutMessage:'推荐频道读取超时，请稍后重试。',
+ })
  if(!r.ok){
   if(r.status===401)clearRecCaches(true)
-  const err=new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':(r.status===503||body?.code==='DATA_UNAVAILABLE')?'推荐缓存正在预热或暂时不可用，请稍后重试。':'推荐频道暂时无法读取，请重试。')
+  const err=new Error(r.status===401?'登录已失效，请重新登录。':r.status===400?'筛选条件有误，请检查年份和范围。':(r.status===503||body?.code==='DATA_UNAVAILABLE'||body?.code==='CHANNEL_CACHE_UNAVAILABLE')?'推荐缓存正在预热或暂时不可用，请稍后重试。':'推荐频道暂时无法读取，请重试。')
   ;(err as any).status=r.status
   throw err
  }
@@ -100,55 +120,149 @@ function buildQueryParams():URLSearchParams{
  for(const key of ['keyword','genre','language','year_from','year_to','runtime_max','min_votes','scope','unwatched'])if(route.query[key])params.set(key,String(route.query[key]))
  return params
 }
-async function load(options?:{force?:boolean;silent?:boolean}|Event){
- const isEvent=typeof Event!=='undefined'&&options instanceof Event
- const opts:{force?:boolean;silent?:boolean}=options&&!(options instanceof Event)?options:{}
- const force=isEvent?true:opts.force===true
- const userKey=getUserCacheKey()
- if(force)invalidateUserRecCache(userKey)
+function applyBoardData(result:any,targetChannel:string,renderSeq:number){
+ feedback.value?.dispose()
+ data.value=result
+ loadedChannel=targetChannel
+ boardRenderKey.value=renderSeq
+ feedback.value=createFeedbackBoard({channel:targetChannel,period:result.period,context:'recommendations',items:result.items})
+}
+async function load(options?:{force?:boolean;silent?:boolean}){
+ const force=options?.force===true
  sync()
+ const userKey=getUserCacheKey()
  const params=buildQueryParams()
+ const targetChannel=channel.value
  const cacheKey=`${userKey}::${params.toString()}`
- const cached=readRecCache(cacheKey)
- if(cached&&cached.data){
-  const isSameData=data.value===cached.data&&loadedChannel===channel.value
-  if(!isSameData){
-   feedback.value?.dispose()
-   data.value=cached.data
-   loadedChannel=channel.value
-   boardRenderKey.value=++sequence
-   feedback.value=createFeedbackBoard({channel:channel.value,period:cached.data.period,context:'recommendations',items:cached.data.items})
-  }
-  loading.value=false
-  error.value=''
-  const isFresh=!force&&cached.epoch===swrBus.behaviorEpoch&&Date.now()-cached.updatedAt<REC_CACHE_TTL_MS&&cached.data?.status!=='UNAVAILABLE'
-  if(isFresh){
+ const inFlightKey=`${swrBus.authEpoch}::${swrBus.behaviorEpoch}::${cacheKey}`
+ if(force){
+  recCache.delete(cacheKey)
+  if(activeInFlightKey===inFlightKey){
    controller?.abort()
    controller=undefined
+   activeInFlightKey=''
+  }
+  recInFlight.delete(inFlightKey)
+ }
+ const cached=force?undefined:readRecCache(cacheKey)
+ if(cached&&cached.data){
+  const isSameData=data.value===cached.data&&loadedChannel===targetChannel
+  if(!isSameData)applyBoardData(cached.data,targetChannel,++sequence)
+  loading.value=false
+  error.value=''
+  const isFresh=cached.epoch===swrBus.behaviorEpoch&&Date.now()-cached.updatedAt<REC_CACHE_TTL_MS&&cached.data?.status!=='UNAVAILABLE'
+  if(isFresh){
+   if(activeInFlightKey!==inFlightKey){
+    controller?.abort()
+    controller=undefined
+    activeInFlightKey=''
+   }
+   revalidating.value=false
    return
   }
  }
- controller?.abort();const current=new AbortController();controller=current;const id=++sequence
+ waitController?.abort()
+ const wait=new AbortController()
+ waitController=wait
+ if(activeInFlightKey&&activeInFlightKey!==inFlightKey){
+  controller?.abort()
+  controller=undefined
+  activeInFlightKey=''
+ }
+ const id=++sequence
  const startEpoch=swrBus.behaviorEpoch
- const hasVisibleData=!!data.value&&(loadedChannel===channel.value||!!cached?.data||opts.silent===true)
- loading.value=!hasVisibleData;error.value=''
+ const hasVisibleData=!!data.value&&(loadedChannel===targetChannel||!!cached?.data||options?.silent===true)
+ loading.value=!hasVisibleData
+ revalidating.value=true
+ error.value=''
  if(!hasVisibleData){data.value=null;feedback.value?.dispose()}
  try{
-  const result=await get('recommendations?'+params,current.signal)
-  if(id===sequence&&!current.signal.aborted){
-   feedback.value?.dispose()
-   data.value=result;loadedChannel=channel.value
-   boardRenderKey.value=id
+  const result=await recInFlight.run(inFlightKey,()=>{
+   const req=new AbortController()
+   controller=req
+   activeInFlightKey=inFlightKey
+   return get('recommendations?'+params,req.signal).finally(()=>{
+    if(controller===req){controller=undefined;activeInFlightKey=''}
+   })
+  })
+  if(id===sequence&&!wait.signal.aborted){
+   applyBoardData(result,targetChannel,id)
    writeRecCache(cacheKey,{userKey,authEpoch:swrBus.authEpoch,epoch:startEpoch,updatedAt:Date.now(),data:result})
-   feedback.value=createFeedbackBoard({channel:channel.value,period:result.period,context:'recommendations',items:result.items})
   }
  }catch(e){
-  if(id===sequence&&!current.signal.aborted&&(e as Error).name!=='AbortError'){
+  if(id===sequence&&!wait.signal.aborted){
    if((e as any)?.status===401){data.value=null;feedback.value?.dispose();error.value=(e as Error).message}
-   else if(!hasVisibleData||isEvent)error.value=(e as Error).message
+   else if(!hasVisibleData||force)error.value=(e as Error).message
   }
  }
- finally{if(id===sequence)loading.value=false}
+ finally{
+  if(id===sequence){
+   loading.value=false
+   revalidating.value=false
+  }
+ }
+}
+function scheduleLoad(options?:{force?:boolean;silent?:boolean}){
+ clearDebounceTimer()
+ sync()
+ const userKey=getUserCacheKey()
+ const params=buildQueryParams()
+ const targetChannel=channel.value
+ const cacheKey=`${userKey}::${params.toString()}`
+ if(!options?.force){
+  const cached=readRecCache(cacheKey)
+  if(cached&&cached.data){
+   const isSameData=data.value===cached.data&&loadedChannel===targetChannel
+   if(!isSameData)applyBoardData(cached.data,targetChannel,++sequence)
+   loading.value=false
+   error.value=''
+   const isFresh=cached.epoch===swrBus.behaviorEpoch&&Date.now()-cached.updatedAt<REC_CACHE_TTL_MS&&cached.data?.status!=='UNAVAILABLE'
+   if(isFresh){
+    controller?.abort()
+    controller=undefined
+    activeInFlightKey=''
+    revalidating.value=false
+    return
+   }
+  }else if(loadedChannel!==targetChannel){
+   data.value=null
+   feedback.value?.dispose()
+   loading.value=true
+   error.value=''
+   controller?.abort()
+   controller=undefined
+   activeInFlightKey=''
+  }
+ }
+ loadDebounceTimer=setTimeout(()=>{
+  loadDebounceTimer=undefined
+  void load(options)
+ },REC_DEBOUNCE_MS)
+}
+async function ensureMeta(signal:AbortSignal){
+ const userKey=getUserCacheKey()
+ const cached=readRecMeta(userKey)
+ if(cached&&cached.channels.length>0){
+  channels.value=cached.channels;genres.value=cached.genres;languages.value=cached.languages
+ }
+ const metaFresh=!!cached&&Date.now()-cached.updatedAt<REC_META_TTL_MS&&cached.channels.length>0
+ if(metaFresh)return
+ try{
+  const [c,g,l]=await Promise.all([get('recommendation-channels',signal),get('genres',signal).catch(()=>({items:[]})),get('languages',signal).catch(()=>({items:[]}))])
+  if(signal.aborted)return
+  channels.value=c.items||[];genres.value=g.items||[];languages.value=l.items||[]
+  writeRecMeta({userKey,authEpoch:swrBus.authEpoch,updatedAt:Date.now(),channels:channels.value,genres:genres.value,languages:languages.value})
+ }catch(e){
+  if(!signal.aborted&&!data.value){error.value=(e as Error).message;loading.value=false}
+ }
+}
+function refreshCurrent(){
+ if(loading.value||revalidating.value)return
+ clearDebounceTimer()
+ if(!channels.value.length&&initController&&!initController.signal.aborted){
+  void ensureMeta(initController.signal)
+ }
+ void load({force:true,silent:!!data.value})
 }
 async function updateTMDB(){
  if(tmdbBusy.value||loading.value)return
@@ -158,37 +272,24 @@ async function updateTMDB(){
   if(!publicBoard&&!ids.length){tmdbNotice.value='当前片单没有可匹配 TMDB 的影片。';return}
   const r=await tmdbRequest('refresh','POST',publicBoard?{channel:channel.value}:{movie_ids:ids});const ok=r.results.filter((x:any)=>x.status==='OK').length
   tmdbNotice.value=r.all_updated?(publicBoard?'已取得可用官方榜单；短时间内复用最新缓存。':'已更新前 '+ok+' 部影片的公开资料；个人片单顺序保持稳定。'):'部分更新失败，保留已有缓存。'+r.results.filter((x:any)=>x.status!=='OK').map((x:any)=>tmdbErrors['TMDB_'+x.status]||'上游暂不可用').join(' ')
-  invalidateUserRecCache();await load({force:true,silent:!!data.value});selfTmdbEvent=true;try{tmdbChanged()}finally{selfTmdbEvent=false}
+  selfTmdbEvent=true;try{tmdbChanged()}finally{selfTmdbEvent=false}
+  await load({force:true,silent:!!data.value})
  }catch(e){tmdbNotice.value=(e as Error).message}finally{tmdbBusy.value=false}
 }
-function change(id:string){router.push({path:'/recommendations',query:{...route.query,channel:id}})}
-function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,language:language.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)void load({force:true,silent:!!data.value});else router.push(target)}
+function change(id:string){if(id!==channel.value)router.push({path:'/recommendations',query:{...route.query,channel:id}})}
+function filter(){const query:Record<string,string>={channel:channel.value};for(const [key,value] of Object.entries({keyword:keyword.value.trim(),genre:genre.value,language:language.value,year_from:yearFrom.value,year_to:yearTo.value,runtime_max:runtime.value,min_votes:minVotes.value,scope:localOnly.value?'local':'',unwatched:unwatched.value?'true':''}))if(value)query[key]=value;const target={path:'/recommendations',query};if(router.resolve(target).fullPath===route.fullPath)scheduleLoad({force:true,silent:!!data.value});else router.push(target)}
 function detail(movie:any){feedback.value?.click((data.value?.items?.indexOf(movie)??-1)+1);router.push({path:'/movies',query:{...route.query,from:'recommendations'},hash:'#movie/'+movie.movie_id})}
 function stamp(value?:string){if(!value)return '未提供';const d=new Date(value);return Number.isNaN(d.getTime())?'未提供':d.toLocaleString('zh-CN',{hour12:false})}
 function money(value:number){return new Intl.NumberFormat('zh-CN',{style:'currency',currency:'USD',maximumFractionDigits:0}).format(value)}
-const onBehavior=()=>{if(!selfTmdbEvent){invalidateUserRecCache();void load({force:true,silent:!!data.value})}}
+const onBehavior=()=>{if(!selfTmdbEvent){clearDebounceTimer();invalidateUserRecCache();void load({force:true,silent:!!data.value})}}
 onMounted(async()=>{
  window.addEventListener('mi2-behavior-changed',onBehavior);window.addEventListener('mi2-tmdb-status',onBehavior);initController?.abort();initController=new AbortController();const signal=initController.signal
- if(recMetaCache&&recMetaCache.authEpoch===swrBus.authEpoch&&recMetaCache.channels.length>0){
-  channels.value=recMetaCache.channels;genres.value=recMetaCache.genres;languages.value=recMetaCache.languages
- }
  const loadTask=load()
- const metaFresh=recMetaCache&&recMetaCache.authEpoch===swrBus.authEpoch&&Date.now()-recMetaCache.updatedAt<REC_META_TTL_MS&&recMetaCache.channels.length>0
- if(!metaFresh){
-  try{
-   const [c,g,l]=await Promise.all([get('recommendation-channels',signal),get('genres',signal).catch(()=>({items:[]})),get('languages',signal).catch(()=>({items:[]}))])
-   if(signal.aborted)return
-   channels.value=c.items||[];genres.value=g.items||[];languages.value=l.items||[]
-   recMetaCache={authEpoch:swrBus.authEpoch,updatedAt:Date.now(),channels:channels.value,genres:genres.value,languages:languages.value}
-   ;(globalThis as any).__mi2RecMetaCache=recMetaCache
-  }catch(e){
-   if(!signal.aborted&&(e as Error).name!=='AbortError'&&!data.value){error.value=(e as Error).message;loading.value=false}
-  }
- }
- await loadTask
+ const metaTask=ensureMeta(signal)
+ await Promise.all([metaTask,loadTask])
 })
-watch(()=>route.fullPath,()=>{void load()})
-onBeforeUnmount(()=>{++sequence;feedback.value?.dispose();initController?.abort();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
+watch(()=>route.fullPath,()=>{scheduleLoad()})
+onBeforeUnmount(()=>{++sequence;clearDebounceTimer();feedback.value?.dispose();waitController?.abort();initController?.abort();controller?.abort();window.removeEventListener('mi2-behavior-changed',onBehavior);window.removeEventListener('mi2-tmdb-status',onBehavior)})
 </script>
 <template>
  <div class="recommend-shell" :style="{'--nav-width':expanded?'280px':'52.5px'}"><AppSidebar @expanded-change="expanded=$event"/>
@@ -208,8 +309,8 @@ onBeforeUnmount(()=>{++sequence;feedback.value?.dispose();initController?.abort(
   <label class="check"><input type="checkbox" v-model="unwatched"/>排除已看</label><button class="apply" type="submit">应用筛选</button><router-link :to="{path:'/recommendations',query:{channel}}">重置</router-link>
  </form>
  <div v-if="loading&&!data" class="state" role="status">正在读取推荐与个人状态…</div>
- <div v-else-if="error&&!data" class="state" role="alert"><p>{{error}}</p><button @click="load">重试</button><router-link to="/login">重新登录</router-link></div>
- <template v-else-if="data"><p v-if="error" class="notice" role="alert">{{error}}（已保留上一份可用榜单） · <button type="button" style="background:none;border:0;text-decoration:underline;padding:0" @click="load">重试</button></p><div class="provenance"><span>{{selected?.public?'官方榜单采集':'库内资料更新'}}：{{stamp(data.source_as_of)}}</span><span v-if="data.period">片单周期：{{data.period}} · 北京时间</span><span>{{data.candidate_count||0}} 部符合条件 · 零模型调用</span><button @click="load">重新读取</button></div>
+ <div v-else-if="error&&!data" class="state" role="alert"><p>{{error}}</p><button type="button" :disabled="loading||revalidating" :aria-busy="loading||revalidating" @click="refreshCurrent">{{(loading||revalidating)?'正在读取…':'重试'}}</button><router-link to="/login">重新登录</router-link></div>
+ <template v-else-if="data"><p v-if="error" class="notice" role="alert">{{error}}（已保留上一份可用榜单） · <button type="button" :disabled="loading||revalidating" :aria-busy="loading||revalidating" style="background:none;border:0;text-decoration:underline;padding:0" @click="refreshCurrent">{{(loading||revalidating)?'正在读取…':'重试'}}</button></p><div class="provenance"><span>{{selected?.public?'官方榜单采集':'库内资料更新'}}：{{stamp(data.source_as_of)}}</span><span v-if="data.period">片单周期：{{data.period}} · 北京时间</span><span>{{data.candidate_count||0}} 部符合条件 · 零模型调用</span><button type="button" :disabled="loading||revalidating" :aria-busy="loading||revalidating" @click="refreshCurrent">{{(loading||revalidating)?'正在读取…':'重新读取'}}</button></div>
  <p v-if="data.status==='STALE'||data.status==='DEGRADED'||data.degraded" class="notice" role="status">当前为缓存榜单，请以采集时间为准。</p><p v-for="note in data.limitations" :key="note" class="notice">{{note}}</p>
  <div v-if="!data.items.length" class="state"><h3>{{data.status==='UNAVAILABLE'?'官方榜单尚未就绪':'暂无符合条件的电影'}}</h3><p>可以减少筛选条件；个人频道需要相应的收藏、评分或想看记录。</p><router-link to="/movies">浏览电影并完善偏好</router-link></div>
  <div v-else class="poster-grid"><article v-for="(movie,index) in data.items" :key="boardRenderKey+':'+movie.key" v-feedback="{board:feedback,position:Number(index)+1}" class="movie-card" :data-movie-id="movie.movie_id||''">
@@ -253,7 +354,8 @@ onBeforeUnmount(()=>{++sequence;feedback.value?.dispose();initController?.abort(
 .filters .check{flex-direction:row;align-items:center;min-height:40px;gap:8px;color:var(--paper-dim);white-space:nowrap}
 .filters input[type=checkbox]{accent-color:var(--accent);width:14px;height:14px;margin:0;flex:none}
 .filters .apply,.state button{padding:10px 14px;background:var(--mi-primary-btn-bg);color:var(--mi-primary-btn-text);border:1px solid var(--mi-primary-btn-bg);border-radius:7px;font-size:12px;font-weight:500;height:40px;white-space:nowrap}
-.filters .apply:hover,.state button:hover{background:var(--mi-primary-btn-hover);border-color:var(--mi-primary-btn-hover)}
+.filters .apply:hover,.state button:hover:not(:disabled){background:var(--mi-primary-btn-hover);border-color:var(--mi-primary-btn-hover)}
+.state button:disabled,.provenance button:disabled,.notice button:disabled{opacity:.45;cursor:not-allowed}
 .filters>a{font-size:12px;line-height:40px;color:var(--muted);text-decoration:none;white-space:nowrap}
 .filters>a:hover{color:var(--paper)}
 .provenance{display:flex;flex-wrap:wrap;gap:8px 20px;color:var(--muted);font-size:11px;line-height:1.7;align-items:center;margin:0 0 16px}

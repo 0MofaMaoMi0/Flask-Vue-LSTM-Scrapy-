@@ -172,7 +172,7 @@ def revenue_fallbacks(connection, movie_ids, mappings, tmdb_ids, *, candidates=R
         # on each fetched row below.  Dialects without JSON1 fall back to the
         # bounded newest-N scan.
         dialect = connection.dialect.name
-        payload_id = ("JSON_UNQUOTE(JSON_EXTRACT(s.metadata_json,'$.id'))"
+        payload_id = ("JSON_UNQUOTE(JSON_EXTRACT(s.metadata_json,'$.id')) COLLATE utf8mb4_bin"
                       if dialect == 'mysql' else
                       "CAST(JSON_EXTRACT(s.metadata_json,'$.id') AS TEXT)")
         revenue_type = ("JSON_TYPE(JSON_EXTRACT(s.metadata_json,'$.revenue'))"

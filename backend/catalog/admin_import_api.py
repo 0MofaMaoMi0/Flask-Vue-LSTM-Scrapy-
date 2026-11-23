@@ -45,7 +45,13 @@ def install(app):
         if isinstance(error,ImportRejected):return reply(code=str(error),status=409)
         if isinstance(error,TMDBError):return reply(code='TMDB_'+error.code,status=503)
         if isinstance(error,(ValueError,TypeError,KeyError)):return reply(code='INVALID_INPUT',status=400)
-        app.logger.error('Admin import failure: %s',type(error).__name__)
+        orig=getattr(error,'orig',None)
+        args=getattr(orig,'args',()) if orig is not None else ()
+        errno=args[0] if args and isinstance(args[0],int) else getattr(orig,'errno',None)
+        if isinstance(errno,int):
+            app.logger.error('Admin import failure: %s errno=%s',type(error).__name__,errno)
+        else:
+            app.logger.error('Admin import failure: %s',type(error).__name__)
         return reply(code='IMPORT_UNAVAILABLE',status=503)
     @bp.get('')
     def listing():return reply(dict(items=jobs.list(g.import_owner),max_movies=MAX_MOVIES,kind='tmdb_catalog'))
