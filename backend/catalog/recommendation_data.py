@@ -7,18 +7,39 @@ snapshot).  Historical records are still consulted, but only for a bounded
 fallback: movies without a current supplement capture (e.g. the 114 unmapped
 titles) and cumulative revenue that a newer heat-only capture dropped.
 """
-import math,json
+import math,json,threading
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from sqlalchemy import Integer, Numeric, String, and_, case, cast, column, func, inspect, literal, or_, select, table
+from weakref import WeakKeyDictionary
+from sqlalchemy import Integer, Numeric, String, and_, case, cast, collate, column, func, inspect, literal, or_, select, table
 from . import current_state, public_catalog_cache
 from .models import CatalogBase
 from .media_urls import asset_url
 
 
+_METADATA_SCHEMA_CACHE = WeakKeyDictionary()
+_SCHEMA_LOCK = threading.Lock()
+
+
 def invalidate(engine):
+    with _SCHEMA_LOCK:
+        if engine is None:
+            _METADATA_SCHEMA_CACHE.clear()
+        else:
+            _METADATA_SCHEMA_CACHE.pop(engine, None)
     public_catalog_cache.invalidate(engine)
+
+
+def warm_async(engine):
+    if engine is None:
+        return False
+    return public_catalog_cache.warm_async(
+        engine,
+        lambda counters: _load_candidates(engine, stats=counters),
+        lambda movie_ids, counters: _load_candidates(engine, stats=counters, movie_ids=movie_ids),
+        finalize,
+    )
 
 
 def _cached_candidates(engine, copy_mode):
@@ -245,6 +266,28 @@ def _read_archive(path, modified, size):
     return rows
 
 
+_DEFAULT_ARCHIVED_FEATURES = archived_features
+
+
+def _metadata_schema(connection):
+    engine = getattr(connection, 'engine', None)
+    dialect = getattr(getattr(connection, 'dialect', None), 'name', None)
+    if engine is not None:
+        with _SCHEMA_LOCK:
+            cached = _METADATA_SCHEMA_CACHE.get(engine)
+        if cached is not None:
+            return cached
+    inspector = inspect(connection)
+    has_table = inspector.has_table('tmdb_movie_metadata')
+    columns = (frozenset(entry['name'] for entry in inspector.get_columns('tmdb_movie_metadata'))
+               if has_table else frozenset())
+    result = (has_table, columns)
+    if engine is not None and (has_table or dialect == 'mysql'):
+        with _SCHEMA_LOCK:
+            _METADATA_SCHEMA_CACHE[engine] = result
+    return result
+
+
 def attach_backdrops(engine, items):
     ids = {item['movie_id'] for item in items if item.get('movie_id') is not None
            and not item.get('backdrop')}
@@ -264,7 +307,7 @@ def attach_backdrops(engine, items):
             item['backdrop'] = urls.get(item.get('movie_id'))
 
 
-def sql_feature_projection(connection, pool, *, revenue=False):
+def _build_feature_projection(connection, pool, *, revenue=False, include_archive=True):
     """Project verified scalar facts in SQL without returning source payloads to Python."""
     tables = CatalogBase.metadata.tables
     sources, external = (tables[name] for name in ('movie_source_records', 'movie_external_ids'))
@@ -273,6 +316,10 @@ def sql_feature_projection(connection, pool, *, revenue=False):
     def value(document, path):
         expression = func.json_extract(document, path)
         return func.json_unquote(expression) if mysql else expression
+
+    def id_text(expression):
+        casted = cast(expression, String(128) if mysql else String)
+        return collate(casted, 'utf8mb4_bin') if mysql else casted
 
     def kind(document, path):
         return func.lower(func.json_type(func.json_extract(document, path)) if mysql
@@ -291,7 +338,7 @@ def sql_feature_projection(connection, pool, *, revenue=False):
     def historical(field, *conditions):
         return (select(field).select_from(sources)
                 .where(sources.c.movie_id == mapped.c.movie_id, sources.c.source == 'tmdb',
-                       cast(value(payload, '$.id'), String) == mapped.c.external_id, *conditions)
+                       id_text(value(payload, '$.id')) == mapped.c.external_id, *conditions)
                 .order_by(sources.c.fetched_at.desc(), sources.c.id.desc()).limit(1)
                 .correlate(mapped).scalar_subquery())
 
@@ -302,9 +349,8 @@ def sql_feature_projection(connection, pool, *, revenue=False):
     base_applied, base_empty = literal(False), literal(False)
     metrics_applied = literal(False)
     metrics_payload, base_payload = latest_payload, latest_payload
-    inspector = inspect(connection)
-    if inspector.has_table('tmdb_movie_metadata'):
-        columns = {entry['name'] for entry in inspector.get_columns('tmdb_movie_metadata')}
+    has_meta, columns = _metadata_schema(connection)
+    if has_meta:
         meta = table('tmdb_movie_metadata', *(column(name) for name in columns))
         provenance = meta.c.get('provenance_json', literal(None))
         base_pk = meta.c.get('source_record_pk', literal(None))
@@ -319,7 +365,7 @@ def sql_feature_projection(connection, pool, *, revenue=False):
         def attributed_record(record, pk):
             return and_(record.c.id == pk, record.c.movie_id == mapped.c.movie_id,
                         record.c.source == 'tmdb',
-                        cast(value(record.c.metadata_json, '$.id'), String) == mapped.c.external_id)
+                        id_text(value(record.c.metadata_json, '$.id')) == mapped.c.external_id)
 
         join = join.outerjoin(base, attributed_record(base, func.coalesce(number(provenance, 'base.source_record_pk', integer=True), base_pk)))
         join = join.outerjoin(metrics, attributed_record(metrics, number(provenance, 'metrics.source_record_pk', integer=True)))
@@ -343,6 +389,26 @@ def sql_feature_projection(connection, pool, *, revenue=False):
         historical_amount = number(payload, 'revenue')
         amount = case((base_empty, None), (base_amount > 0, base_amount),
                       else_=historical(historical_amount, historical_amount > 0))
+
+    if not include_archive:
+        raw = (select(mapped.c.movie_id, mapped.c.external_id, feature_stamp.label('feature_stamp'),
+                      metrics_payload.label('metrics_doc'), amount.label('amount'),
+                      metrics_applied.label('metrics_applied'), base_applied.label('base_applied'))
+               .select_from(join).cte('rec_raw_facts'))
+        heat = number(raw.c.metrics_doc, 'popularity')
+        votes = number(raw.c.metrics_doc, 'vote_count', integer=True)
+        score = number(raw.c.metrics_doc, 'vote_average')
+        total_revenue = func.floor(raw.c.amount) if mysql else cast(raw.c.amount, Integer)
+        return (select(raw.c.movie_id,
+                       raw.c.external_id,
+                       raw.c.feature_stamp,
+                       raw.c.base_applied,
+                       raw.c.metrics_applied,
+                       case((heat >= 0, heat)).label('heat'),
+                       case((votes >= 0, votes)).label('votes'),
+                       case((and_(votes > 0, score.between(0, 10)), score)).label('score'),
+                       total_revenue.label('revenue'))
+                .cte('rec_scalar_facts'))
 
     archive_ids, archive = _archive_projection()
     archive_key = literal('$.') + func.json_quote(cast(mapped.c.movie_id, String) + literal(':') + mapped.c.external_id)
@@ -372,8 +438,17 @@ def sql_feature_projection(connection, pool, *, revenue=False):
             .cte('rec_facts'))
 
 
-def _archive_projection():
-    archive = archived_features()
+def sql_feature_projection(connection, pool, *, revenue=False):
+    """Project verified scalar facts in SQL without returning source payloads to Python."""
+    return _build_feature_projection(connection, pool, revenue=revenue, include_archive=True)
+
+
+def sql_scalar_projection(connection, pool, *, revenue=True):
+    """Project DB-only scalar facts without embedding static archive JSON into SQL."""
+    return _build_feature_projection(connection, pool, revenue=revenue, include_archive=False)
+
+
+def _build_archive_map(archive):
     projected = {}
     for movie_id, facts in archive.items():
         for fact in facts:
@@ -386,7 +461,44 @@ def _archive_projection():
             if not valid_number(projected[key].get('revenue')) or not projected[key]['revenue']:
                 projected[key]['revenue'] = old.get('revenue')
             projected[key]['stamp'] = stamp
-    return sorted(mid for mid in archive if type(mid) is int), json.dumps(projected, separators=(',', ':'))
+    return projected
+
+
+def _build_archive_projection(archive):
+    projected = _build_archive_map(archive)
+    return tuple(sorted(mid for mid in archive if type(mid) is int)), json.dumps(projected, separators=(',', ':'))
+
+
+@lru_cache(maxsize=2)
+def _cached_archive_map(path, modified, size):
+    return _build_archive_map(_read_archive(path, modified, size))
+
+
+@lru_cache(maxsize=2)
+def _cached_archive_projection(path, modified, size):
+    return _build_archive_projection(_read_archive(path, modified, size))
+
+
+def archived_scalar_map():
+    if archived_features is _DEFAULT_ARCHIVED_FEATURES:
+        path = Path(__file__).with_name('data') / 'archived_features.json'
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return {}
+        return _cached_archive_map(path, stat.st_mtime_ns, stat.st_size)
+    return _build_archive_map(archived_features())
+
+
+def _archive_projection():
+    if archived_features is _DEFAULT_ARCHIVED_FEATURES:
+        path = Path(__file__).with_name('data') / 'archived_features.json'
+        try:
+            stat = path.stat()
+        except FileNotFoundError:
+            return (), '{}'
+        return _cached_archive_projection(path, stat.st_mtime_ns, stat.st_size)
+    return _build_archive_projection(archived_features())
 
 
 def finalize(movies):

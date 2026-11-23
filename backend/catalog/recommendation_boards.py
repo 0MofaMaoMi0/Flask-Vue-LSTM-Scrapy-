@@ -9,7 +9,9 @@ from datetime import datetime,timedelta,timezone
 from weakref import WeakKeyDictionary
 from sqlalchemy import and_, case, func, inspect, literal, or_, select
 from .recommendation_pipeline import rank_movies
-from .recommendation_data import _load_candidates, attach_backdrops, finalize, sql_feature_projection, valid_number
+from .recommendation_data import (_load_candidates, archived_scalar_map, attach_backdrops,
+                                  finalize, load_candidates_readonly, sql_feature_projection,
+                                  sql_scalar_projection, valid_number)
 from .models import CatalogBase
 from . import public_catalog_cache
 from assistant.conditions import genre_groups,matches,validate_filters
@@ -370,7 +372,122 @@ def _profile_ids(state, channel, weights, small):
     return {mid for _, mid in nlargest(positive_count, positive) + nlargest(MAX_SEEDS - positive_count, negative)}
 
 
-def _catalog_counts(engine, cache, catalog_token):
+_DEFAULT_LOAD_CANDIDATES = _load_candidates
+_RATINGS_SCHEMA_CACHE = WeakKeyDictionary()
+
+
+def _ratings_schema(connection):
+    engine = getattr(connection, 'engine', None)
+    dialect = getattr(getattr(connection, 'dialect', None), 'name', None)
+    if engine is not None:
+        with _cache_lock:
+            cached = _RATINGS_SCHEMA_CACHE.get(engine)
+        if cached is not None:
+            return cached
+    inspector = inspect(connection)
+    has_table = inspector.has_table(_RATINGS.name)
+    cols = (frozenset(column['name'] for column in inspector.get_columns(_RATINGS.name))
+            if has_table else frozenset())
+    result = (has_table, cols)
+    if engine is not None and (dialect == 'mysql' or (has_table and 'score_scale' in cols)):
+        with _cache_lock:
+            _RATINGS_SCHEMA_CACHE[engine] = result
+    return result
+
+
+def _thaw_movie(movie):
+    row = dict(movie)
+    row['genres'] = list(movie.get('genres') or ())
+    row['director_ids'] = list(movie.get('director_ids') or ())
+    row['actor_ids'] = list(movie.get('actor_ids') or ())
+    return row
+
+
+def _warmed_public_movies(engine, cache):
+    if _load_candidates is not _DEFAULT_LOAD_CANDIDATES:
+        return None
+    peek = public_catalog_cache.peek(engine)
+    if peek is None:
+        return None
+    if cache.invalidated_public_version is not None and peek.get('version') == cache.invalidated_public_version:
+        return None
+    return load_candidates_readonly(engine)
+
+
+def _scalar_catalog(engine, cache, catalog_token):
+    with _cache_lock:
+        previous = cache.scalar
+        if previous and previous[0] == catalog_token and previous[1] > time.monotonic():
+            return previous[2]
+        pending = cache.scalar_inflight.get(catalog_token)
+        if pending is None:
+            pending = cache.scalar_inflight[catalog_token] = Future()
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        return pending.result()
+    try:
+        with engine.connect() as connection:
+            facts = sql_scalar_projection(connection, _active_ids().cte('rec_active'), revenue=True)
+            rows = connection.execute(select(facts)).all()
+        db_rows = {
+            int(row.movie_id): (
+                row.external_id,
+                None if row.feature_stamp is None else str(row.feature_stamp),
+                bool(row.base_applied),
+                bool(row.metrics_applied),
+                None if row.heat is None else float(row.heat),
+                None if row.votes is None else int(row.votes),
+                None if row.score is None else float(row.score),
+                None if row.revenue is None else int(row.revenue),
+            )
+            for row in rows
+        }
+        with _cache_lock:
+            if cache.catalog_token is catalog_token[0]:
+                cache.scalar = (catalog_token, time.monotonic() + BOARD_TTL, db_rows)
+        pending.set_result(db_rows)
+        return db_rows
+    except BaseException as error:
+        pending.set_exception(error)
+        raise
+    finally:
+        with _cache_lock:
+            cache.scalar_inflight.pop(catalog_token, None)
+
+
+def _effective_scalars(db_rows):
+    archive = archived_scalar_map()
+    if not archive:
+        return {mid: (row[4], row[5], row[6], row[7]) for mid, row in db_rows.items()}
+    effective = {}
+    for mid, (ext_id, f_stamp, base_app, metrics_app, heat, votes, score, rev) in db_rows.items():
+        if ext_id is not None:
+            entry = archive.get(f'{mid}:{ext_id}')
+            if entry:
+                a_stamp = entry.get('stamp') or ''
+                newer = (f_stamp is None) or (f_stamp.replace(' ', 'T')[:19] < a_stamp[:19])
+                if newer:
+                    if not metrics_app:
+                        pop = entry.get('popularity')
+                        heat = float(pop) if valid_number(pop) else None
+                        vc = entry.get('vote_count')
+                        votes = vc if type(vc) is int and vc >= 0 else None
+                        va = entry.get('vote_average')
+                        score = float(va) if votes is not None and votes > 0 and valid_number(va, 10) else None
+                    if not base_app:
+                        a_rev = entry.get('revenue')
+                        if valid_number(a_rev) and a_rev > 0:
+                            rev = int(a_rev)
+        effective[mid] = (heat, votes, score, rev)
+    return effective
+
+
+def _catalog_counts(engine, cache, catalog_token, *, ro_movies=None):
+    if ro_movies is not None:
+        active = [m for m in ro_movies if m.get('catalog_status') == 'active' and m.get('is_adult') is not True]
+        return len(active), sum(1 for m in active if m.get('tmdb_popularity') is not None)
     with _cache_lock:
         previous = cache.coverage
         if previous and previous[0] == catalog_token and previous[1] > time.monotonic():
@@ -384,9 +501,8 @@ def _catalog_counts(engine, cache, catalog_token):
     if not owner:
         return pending.result()
     try:
-        with engine.connect() as connection:
-            facts = sql_feature_projection(connection, _active_ids().cte('rec_active'))
-            totals = tuple(connection.execute(select(func.count(), func.count(facts.c.heat)).select_from(facts)).one())
+        eff = _effective_scalars(_scalar_catalog(engine, cache, catalog_token))
+        totals = (len(eff), sum(1 for val in eff.values() if val[0] is not None))
         with _cache_lock:
             if cache.catalog_token is catalog_token[0]:
                 cache.coverage = (catalog_token, time.monotonic() + BOARD_TTL, totals)
@@ -400,7 +516,27 @@ def _catalog_counts(engine, cache, catalog_token):
             cache.coverage_inflight.pop(catalog_token, None)
 
 
-def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, persisted, catalog_total, snapshot):
+def _rank_by_scalars(rows, scalars, *, prefix_cols=0):
+    ordered = sorted(rows, key=lambda r: r[0])
+    ordered.sort(key=lambda r: (r[-1] is not None, r[-1]), reverse=True)
+
+    def scalar_tuple(mid):
+        val = scalars.get(mid)
+        if val is None:
+            return (False, 0.0, False, 0, False, 0.0)
+        heat, votes, score, _rev = val
+        return (
+            score is not None, score if score is not None else 0.0,
+            votes is not None, votes if votes is not None else 0,
+            heat is not None, heat if heat is not None else 0.0,
+        )
+
+    ordered.sort(key=lambda r: (*r[1:1 + prefix_cols], *scalar_tuple(r[0])), reverse=True)
+    return [r[0] for r in ordered]
+
+
+def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, persisted, catalog_total, snapshot,
+            cache=None, catalog_token=None):
     if channel in PUBLIC:
         upstream = [str(row['id']) for row in (snapshot or {}).get('items', [])[:60]
                     if type(row.get('id')) is int and row['id'] > 0]
@@ -432,10 +568,45 @@ def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, per
         return [], 0, None
 
     matching_count, rating_mean = None, None
+    if channel in ('top_rated', 'revenue') and cache is not None and catalog_token is not None:
+        scalars = _effective_scalars(_scalar_catalog(engine, cache, catalog_token))
+        if not filters and not keyword:
+            exclude_watched = bool(filters.get('unwatched'))
+            excluded = _state_ids(state, lambda item: item.get('not_interested') or (exclude_watched and item.get('watched')))
+            allowed_ids = set(scalars) - excluded
+        else:
+            with engine.connect() as connection:
+                allowed_ids = set(connection.execute(_eligible_ids(state, channel, filters, keyword)).scalars())
+        if channel == 'top_rated':
+            threshold = 100 if min_votes is None else max(1, min_votes)
+            matched = [(mid, val[1], val[2]) for mid in allowed_ids
+                       if (val := scalars.get(mid)) is not None and val[2] is not None and val[1] is not None and val[1] >= threshold]
+            matching_count = len(matched)
+            rating_mean = sum(s for _, _, s in matched) / matching_count if matching_count else 0
+            matched.sort(key=lambda item: (-((item[1] * item[2] + 100 * rating_mean) / (item[1] + 100)), -item[1], item[0]))
+            recalled = [mid for mid, _, _ in matched[:400]]
+        else:
+            matched = [(mid, val[3]) for mid in allowed_ids
+                       if (val := scalars.get(mid)) is not None and val[3] is not None and val[3] >= 1
+                       and (min_votes is None or (val[1] is not None and val[1] >= min_votes))]
+            matching_count = len(matched)
+            matched.sort(key=lambda item: (-item[1], item[0]))
+            recalled = [mid for mid, _ in matched[:400]]
+        loaded = {seed['movie_id']: seed for seed in seeds}
+        loaded.update((movie['movie_id'], movie) for movie in _load_candidates(engine, movie_ids=set(recalled) - loaded.keys()))
+        return finalize([loaded[mid] for mid in sorted(loaded)]), matching_count, rating_mean
+
     eligible = _eligible_ids(state, channel, filters, keyword).cte('rec_eligible')
     with engine.connect() as connection:
         start = eligible
-        if min_votes is not None or channel in ('top_rated', 'revenue'):
+        if min_votes is not None and cache is not None and catalog_token is not None:
+            scalars = _effective_scalars(_scalar_catalog(engine, cache, catalog_token))
+            eligible_ids = [mid for mid in connection.execute(select(eligible.c.movie_id)).scalars()
+                            if (val := scalars.get(mid)) is not None and val[1] is not None and val[1] >= min_votes]
+            if not eligible_ids:
+                return [], 0, None
+            start = select(_MOVIES.c.movie_id).where(_MOVIES.c.movie_id.in_(eligible_ids)).cte('rec_filtered_facts')
+        elif min_votes is not None or channel in ('top_rated', 'revenue'):
             facts = sql_feature_projection(connection, eligible, revenue=channel == 'revenue')
             narrowed = select(facts)
             if min_votes is not None:
@@ -463,9 +634,22 @@ def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, per
         elif channel == 'because':
             directors, actors, genres = _relations(start.c.movie_id, seeds)
             ids = ids.where(start.c.movie_id.not_in(sorted(seed_ids)), or_(directors, actors, genres))
-            matching_count = connection.scalar(select(func.count()).select_from(ids.subquery()))
-            ids, quality = _quality(connection, ids, start, eligible)
-            ids = ids.order_by(case((directors, 3), else_=0).desc(), case((actors, 2), else_=0).desc(), *quality).limit(400)
+            if not _ratings_schema(connection)[0] and cache is not None and catalog_token is not None:
+                scalars = _effective_scalars(_scalar_catalog(engine, cache, catalog_token))
+                rows = connection.execute(
+                    select(start.c.movie_id,
+                           case((directors, 3), else_=0).label('d_hit'),
+                           case((actors, 2), else_=0).label('a_hit'),
+                           _MOVIES.c.updated_at)
+                    .select_from(start.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id))
+                    .where(start.c.movie_id.not_in(sorted(seed_ids)), or_(directors, actors, genres))
+                ).all()
+                matching_count = len(rows)
+                recalled, ids = _rank_by_scalars(rows, scalars, prefix_cols=2)[:400], None
+            else:
+                matching_count = connection.scalar(select(func.count()).select_from(ids.subquery()))
+                ids, quality = _quality(connection, ids, start, eligible)
+                ids = ids.order_by(case((directors, 3), else_=0).desc(), case((actors, 2), else_=0).desc(), *quality).limit(400)
         else:
             matching_count = connection.scalar(select(func.count()).select_from(start))
             seed_loaded = {seed['movie_id'] for seed in seeds}
@@ -484,16 +668,42 @@ def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, per
                     for genre in seed['genres']:
                         preferred[genre] += _seed_weight(state[str(seed['movie_id'])], weights)
                 genre_ids = [genre for genre, weight in preferred.most_common(5) if weight > 0]
-                quality_ids, quality = _quality(connection, ids, start, eligible)
-                lanes = [connection.execute(quality_ids.order_by(*quality).limit(140)).scalars().all(),
-                         connection.execute(ids.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id)
-                                            .order_by(_MOVIES.c.updated_at.desc(), start.c.movie_id).limit(40)).scalars().all()]
-                if seeds:
-                    lanes.append(connection.execute(quality_ids.where(or_(directors, actors))
-                                 .order_by(case((directors, 1), else_=0).desc(), *quality).limit(160)).scalars().all())
-                if genre_ids:
-                    lanes.append(connection.execute(quality_ids.where(_genre_match(start.c.movie_id, _GENRES.c.name_zh.in_(genre_ids)))
-                                 .order_by(*quality).limit(180)).scalars().all())
+                if not _ratings_schema(connection)[0] and cache is not None and catalog_token is not None:
+                    scalars = _effective_scalars(_scalar_catalog(engine, cache, catalog_token))
+                    base_rows = connection.execute(
+                        select(start.c.movie_id, _MOVIES.c.updated_at)
+                        .select_from(start.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id))
+                    ).all()
+                    lanes = [
+                        _rank_by_scalars(base_rows, scalars)[:140],
+                        connection.execute(ids.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id)
+                                           .order_by(_MOVIES.c.updated_at.desc(), start.c.movie_id).limit(40)).scalars().all(),
+                    ]
+                    if seeds:
+                        credit_rows = connection.execute(
+                            select(start.c.movie_id, case((directors, 1), else_=0), _MOVIES.c.updated_at)
+                            .select_from(start.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id))
+                            .where(or_(directors, actors))
+                        ).all()
+                        lanes.append(_rank_by_scalars(credit_rows, scalars, prefix_cols=1)[:160])
+                    if genre_ids:
+                        genre_rows = connection.execute(
+                            select(start.c.movie_id, _MOVIES.c.updated_at)
+                            .select_from(start.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id))
+                            .where(_genre_match(start.c.movie_id, _GENRES.c.name_zh.in_(genre_ids)))
+                        ).all()
+                        lanes.append(_rank_by_scalars(genre_rows, scalars)[:180])
+                else:
+                    quality_ids, quality = _quality(connection, ids, start, eligible)
+                    lanes = [connection.execute(quality_ids.order_by(*quality).limit(140)).scalars().all(),
+                             connection.execute(ids.join(_MOVIES, _MOVIES.c.movie_id == start.c.movie_id)
+                                                .order_by(_MOVIES.c.updated_at.desc(), start.c.movie_id).limit(40)).scalars().all()]
+                    if seeds:
+                        lanes.append(connection.execute(quality_ids.where(or_(directors, actors))
+                                     .order_by(case((directors, 1), else_=0).desc(), *quality).limit(160)).scalars().all())
+                    if genre_ids:
+                        lanes.append(connection.execute(quality_ids.where(_genre_match(start.c.movie_id, _GENRES.c.name_zh.in_(genre_ids)))
+                                     .order_by(*quality).limit(180)).scalars().all())
                 recalled = dict.fromkeys(pinned[:50])
                 for index in range(max(map(len, lanes))):
                     for lane in lanes:
@@ -508,15 +718,15 @@ def _recall(engine, channel, state, *, filters, keyword, min_votes, weights, per
 
 
 def _quality(connection, query, start, eligible):
-    inspector = inspect(connection)
+    has_ratings, rating_cols = _ratings_schema(connection)
     if 'score' in start.c:
         quality = (start.c.score.desc(), start.c.votes.desc(), start.c.heat.desc())
-    elif inspector.has_table(_RATINGS.name):
+    elif has_ratings:
         tmdb_r = _RATINGS.alias('rec_tmdb_ratings')
         douban_r = _RATINGS.alias('rec_douban_ratings')
         tmdb_on = and_(tmdb_r.c.movie_id == start.c.movie_id, tmdb_r.c.source == 'tmdb')
         douban_on = and_(douban_r.c.movie_id == start.c.movie_id, douban_r.c.source == 'douban')
-        if any(column['name'] == 'score_scale' for column in inspector.get_columns(_RATINGS.name)):
+        if 'score_scale' in rating_cols:
             douban_on = and_(douban_on, douban_r.c.score_scale == 10)
         query = query.outerjoin(tmdb_r, tmdb_on).outerjoin(douban_r, douban_on)
         score_val = func.coalesce(tmdb_r.c.score_value, douban_r.c.score_value)
@@ -533,14 +743,17 @@ def _quality(connection, query, start, eligible):
 
 BOARD_TTL = 120
 BOARD_STALE_GRACE = 15
-MAX_BOARD_CACHE = 256
+MAX_BOARD_CACHE = 64
+_GLOBAL_BOARD_OWNER = '__public__'
+_GLOBAL_CHANNELS = PUBLIC | frozenset(('top_rated', 'revenue'))
 _cache_lock = threading.RLock()
 _board_caches = WeakKeyDictionary()
 _refresh_workers = ThreadPoolExecutor(max_workers=4, thread_name_prefix='recommendation-warm')
 
 
 class _BoardCache:
-    def __init__(self):
+    def __init__(self, engine=None):
+        self.engine = engine
         self.results = OrderedDict()
         self.inflight = {}
         self.warming = {}
@@ -548,11 +761,18 @@ class _BoardCache:
         self.catalog_token = object()
         self.coverage = None
         self.coverage_inflight = {}
+        self.scalar = None
+        self.scalar_inflight = {}
+        self.user_states = OrderedDict()
+        self.invalidated_public_version = None
 
 
 def _engine_cache(engine):
     with _cache_lock:
-        return _board_caches.setdefault(engine, _BoardCache())
+        cache = _board_caches.get(engine)
+        if cache is None:
+            cache = _board_caches[engine] = _BoardCache(engine)
+        return cache
 
 
 def invalidate_board_cache(engine=None, user=None, *, behavior_version=None):
@@ -563,6 +783,11 @@ def invalidate_board_cache(engine=None, user=None, *, behavior_version=None):
                 cache.results.clear()
                 cache.catalog_token = object()
                 cache.coverage = None
+                cache.scalar = None
+                cache.user_states.clear()
+                if cache.engine is not None:
+                    cache.invalidated_public_version = (public_catalog_cache.peek(cache.engine) or {}).get('version')
+                    _RATINGS_SCHEMA_CACHE.pop(cache.engine, None)
             else:
                 principal = str(user)
                 previous, _ = cache.versions.get(principal, (None, None))
@@ -571,10 +796,14 @@ def invalidate_board_cache(engine=None, user=None, *, behavior_version=None):
                 cache.versions.move_to_end(principal)
                 for key in [key for key in cache.results if key[0] == principal]:
                     del cache.results[key]
+                for key in [key for key in cache.user_states if key[0] == principal]:
+                    del cache.user_states[key]
                 if len(cache.versions) > MAX_BOARD_CACHE:
                     dropped, _ = cache.versions.popitem(last=False)
                     for key in [key for key in cache.results if key[0] == dropped]:
                         del cache.results[key]
+                    for key in [key for key in cache.user_states if key[0] == dropped]:
+                        del cache.user_states[key]
 
 
 def _canonical_filters(filters):
@@ -653,6 +882,102 @@ def for_app(app, user, channel='personal', **kwargs):
     return _for_app(app, user, channel, binding=_request_binding(app), **kwargs)
 
 
+def _has_personal_exclusions(state, filters):
+    if not state:
+        return False
+    check_watched = bool(filters.get('unwatched'))
+    return any(
+        item.get('not_interested') or (check_watched and item.get('watched'))
+        for item in state.values()
+    )
+
+
+def _user_state(cache, repository, user, principal, behavior_token):
+    state_key = (principal, id(repository))
+    now_mono = time.monotonic()
+    with _cache_lock:
+        cached = cache.user_states.get(state_key)
+        if cached and cached[0] == behavior_token and cached[1] > now_mono:
+            cache.user_states.move_to_end(state_key)
+            return cached[2]
+    state = repository.snapshot(user)
+    if BOARD_TTL > 0:
+        with _cache_lock:
+            if cache.versions.get(principal) == behavior_token:
+                cache.user_states[state_key] = (behavior_token, time.monotonic() + BOARD_TTL, state)
+                cache.user_states.move_to_end(state_key)
+                while len(cache.user_states) > MAX_BOARD_CACHE:
+                    cache.user_states.popitem(last=False)
+    return state
+
+
+def _with_tmdb_status(dto, service, user, binding):
+    out = _clone_dto(dto)
+    if service:
+        status = service.status(user, binding)
+        out['tmdb_connection'] = status
+        if status.get('last_error'):
+            message = 'TMDB在线读取失败，当前使用可用缓存；可在数据连接中检查原因。'
+            if message not in out['limitations']:
+                out['limitations'].append(message)
+    return out
+
+
+def _warmed_board(ro_movies, state, user, channel, *, limit, filters, keyword, min_votes,
+                  scope, folder, now, weights, snapshot):
+    active_ro = [m for m in ro_movies if m.get('catalog_status') == 'active' and m.get('is_adult') is not True]
+    totals = (len(active_ro), sum(1 for m in active_ro if m.get('tmdb_popularity') is not None))
+    personal = channel in ('daily', 'weekly', 'because', 'personal')
+    kw = keyword.casefold() if keyword else ''
+
+    def allowed(m):
+        s = state.get(str(m.get('movie_id')), {})
+        return (matches(m, filters, s)
+                and (not personal or not s.get('watched') or filters.get('unwatched') is False)
+                and (not kw or kw in (m['title'] + ' ' + (m.get('original_title') or '')).casefold())
+                and (min_votes is None or (m.get('vote_count') is not None and m['vote_count'] >= min_votes)))
+
+    candidate_count = None
+    rating_mean = None
+    if channel in PUBLIC:
+        bytmdb = {str(m['tmdb_id']): m for m in active_ro if m.get('tmdb_id')}
+        movies = []
+        seen_ids = set()
+        for raw in (snapshot or {}).get('items', []):
+            m = bytmdb.get(str(raw.get('id')))
+            if m is not None and m['movie_id'] not in seen_ids:
+                seen_ids.add(m['movie_id'])
+                movies.append(_thaw_movie(m))
+    elif channel == 'top_rated':
+        threshold = 100 if min_votes is None else max(1, min_votes)
+        eligible = [m for m in active_ro if allowed(m) and m.get('tmdb_rating') is not None and (m.get('vote_count') or 0) >= threshold]
+        candidate_count = len(eligible)
+        rating_mean = sum(m['tmdb_rating'] for m in eligible) / candidate_count if candidate_count else 0
+        ordered = sorted(
+            eligible,
+            key=lambda m: (-((m['vote_count'] * m['tmdb_rating'] + 100 * rating_mean) / (m['vote_count'] + 100)),
+                           -m['vote_count'], m['movie_id']),
+        )
+        movies = [_thaw_movie(m) for m in ordered[:400]]
+    elif channel == 'revenue':
+        eligible = [m for m in active_ro if allowed(m) and m.get('revenue') is not None and m['revenue'] > 0]
+        candidate_count = len(eligible)
+        ordered = sorted(eligible, key=lambda m: (-m['revenue'], m['movie_id']))
+        movies = [_thaw_movie(m) for m in ordered[:400]]
+    else:
+        movies = [_thaw_movie(m) for m in active_ro]
+
+    result = _board(movies, state, user, channel, limit=limit, filters=filters, keyword=keyword,
+                    min_votes=min_votes, scope=scope, cache_dir=folder, now=now, weights=weights,
+                    snapshot=snapshot, rating_mean=rating_mean)
+    result['catalog_total'], result['popularity_covered'] = totals
+    if candidate_count is not None:
+        result['candidate_count'] = candidate_count
+    elif channel in PUBLIC and 'candidate_count' not in result:
+        result['candidate_count'] = result['ranked_window_count'] = 0
+    return result
+
+
 def _for_app(app, user, channel, *, binding, limit=12, filters=None, keyword='', min_votes=None,
              scope='all', now=None, weights=None, trusted_filters=False, refresh=False):
     from .tmdb_connection import using
@@ -676,10 +1001,26 @@ def _for_app(app, user, channel, *, binding, limit=12, filters=None, keyword='',
         with _cache_lock:
             catalog_token = (cache.catalog_token, catalog_version)
             behavior_token = cache.versions.get(principal)
-            options_key = (principal, channel, scope, limit, _canonical_filters(filters), keyword, min_votes,
-                           tuple(sorted(weights.items())), period, catalog_token, behavior_token,
-                           snapshot_token, explicit_now, folder, id(repository))
-            key = (*options_key, _tmdb_token(service, user, binding))
+        preloaded_state = None
+        if channel in _GLOBAL_CHANNELS:
+            preloaded_state = _user_state(cache, repository, user, principal, behavior_token)
+            if _has_personal_exclusions(preloaded_state, filters):
+                cache_owner = principal
+                cache_behavior_token = behavior_token
+                effective_state = preloaded_state
+            else:
+                cache_owner = _GLOBAL_BOARD_OWNER
+                cache_behavior_token = None
+                effective_state = {}
+        else:
+            cache_owner = principal
+            cache_behavior_token = behavior_token
+            effective_state = None
+
+        key = (cache_owner, channel, scope, limit, _canonical_filters(filters), keyword, min_votes,
+               tuple(sorted(weights.items())), period, catalog_token, cache_behavior_token,
+               snapshot_token, explicit_now, folder, id(repository))
+        with _cache_lock:
             hit = cache.results.get(key)
             if hit:
                 age = time.monotonic() - hit[0]
@@ -689,7 +1030,7 @@ def _for_app(app, user, channel, *, binding, limit=12, filters=None, keyword='',
                         _schedule_home_work(app, user, lambda: _for_app(app, user, channel, binding=binding, limit=limit,
                                             filters=filters, keyword=keyword, min_votes=min_votes, scope=scope,
                                             now=explicit_now, weights=weights, trusted_filters=True, refresh=True))
-                    return _clone_dto(hit[1])
+                    return _with_tmdb_status(hit[1], service, user, binding)
             future = cache.inflight.get(key)
             if future is None:
                 future = cache.inflight[key] = Future()
@@ -697,40 +1038,46 @@ def _for_app(app, user, channel, *, binding, limit=12, filters=None, keyword='',
             else:
                 owner = False
         if not owner:
-            return _clone_dto(future.result())
+            return _with_tmdb_status(future.result(), service, user, binding)
         try:
-            state = repository.snapshot(user)
-            totals = _catalog_counts(engine, cache, catalog_token)
-            persisted = []
-            if period:
-                options = _period_options(filters, keyword, min_votes, weights)
-                persisted = _read_period_ids(Path(folder) / (_period_key(user, channel, period, options) + '.json'), period)
-            movies, candidate_count, mean = _recall(engine, channel, state, filters=filters, keyword=keyword,
-                                                    min_votes=min_votes, weights=weights, persisted=persisted,
-                                                    catalog_total=totals[0], snapshot=snapshot)
-            result = _board(movies, state, user, channel, limit=limit, filters=filters, keyword=keyword,
-                            min_votes=min_votes, scope=scope, cache_dir=folder, now=now, weights=weights,
-                            snapshot=snapshot, rating_mean=mean)
-            result['catalog_total'], result['popularity_covered'] = totals
-            if candidate_count is not None:
-                result['candidate_count'] = candidate_count
-            elif channel in PUBLIC and 'candidate_count' not in result:
-                result['candidate_count'] = result['ranked_window_count'] = 0
+            state = effective_state if effective_state is not None else repository.snapshot(user)
+            ro_movies = _warmed_public_movies(engine, cache)
+            if ro_movies is not None:
+                result = _warmed_board(
+                    ro_movies, state, user, channel, limit=limit, filters=filters,
+                    keyword=keyword, min_votes=min_votes, scope=scope, folder=folder,
+                    now=now, weights=weights, snapshot=snapshot,
+                )
+            else:
+                totals = _catalog_counts(engine, cache, catalog_token)
+                persisted = []
+                if period:
+                    options = _period_options(filters, keyword, min_votes, weights)
+                    persisted = _read_period_ids(Path(folder) / (_period_key(user, channel, period, options) + '.json'), period)
+                movies, candidate_count, mean = _recall(
+                    engine, channel, state, filters=filters, keyword=keyword,
+                    min_votes=min_votes, weights=weights, persisted=persisted,
+                    catalog_total=totals[0], snapshot=snapshot,
+                    cache=cache, catalog_token=catalog_token,
+                )
+                result = _board(movies, state, user, channel, limit=limit, filters=filters, keyword=keyword,
+                                min_votes=min_votes, scope=scope, cache_dir=folder, now=now, weights=weights,
+                                snapshot=snapshot, rating_mean=mean)
+                result['catalog_total'], result['popularity_covered'] = totals
+                if candidate_count is not None:
+                    result['candidate_count'] = candidate_count
+                elif channel in PUBLIC and 'candidate_count' not in result:
+                    result['candidate_count'] = result['ranked_window_count'] = 0
             attach_backdrops(engine, result['items'])
-            if service:
-                result['tmdb_connection'] = service.status(user, binding)
-                if result['tmdb_connection']['last_error']:
-                    result['limitations'].append('TMDB在线读取失败，当前使用可用缓存；可在数据连接中检查原因。')
-            final_tmdb_token = _tmdb_token(service, user, binding)
             with _cache_lock:
-                if cache.catalog_token is catalog_token[0] and cache.versions.get(principal) == behavior_token:
-                    saved_key = (*options_key, final_tmdb_token)
-                    cache.results[saved_key] = (time.monotonic(), result)
-                    cache.results.move_to_end(saved_key)
+                if cache.catalog_token is catalog_token[0] and (
+                        cache_owner == _GLOBAL_BOARD_OWNER or cache.versions.get(principal) == behavior_token):
+                    cache.results[key] = (time.monotonic(), result)
+                    cache.results.move_to_end(key)
                     while len(cache.results) > MAX_BOARD_CACHE:
                         cache.results.popitem(last=False)
                 future.set_result(result)
-            return _clone_dto(result)
+            return _with_tmdb_status(result, service, user, binding)
         except BaseException as error:
             future.set_exception(error)
             raise

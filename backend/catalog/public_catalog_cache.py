@@ -405,8 +405,9 @@ def invalidate(engine=None):
             _MEMORY.clear()
         else:
             state = _ENGINE_STATES.get(engine)
-            if state is not None:
-                state.revision += 1
+            if state is None:
+                state = _ENGINE_STATES[engine] = _EngineState()
+            state.revision += 1
             _MEMORY.pop(engine, None)
             _FORCE_ENGINES[engine] = True
 
@@ -436,6 +437,18 @@ def peek(engine=None):
     return None if entry is None else {"version": entry["version"],
                                        "movies": len(entry["readonly"]),
                                        "namespace": entry["namespace"]}
+
+
+def cache_revision(engine=None):
+    """Return a revision tuple that advances on invalidation or snapshot version change."""
+    with _LOCK:
+        state = _ENGINE_STATES.get(engine) if engine is not None else None
+        entry = _MEMORY.get(engine) if engine is not None else None
+        return (
+            _GLOBAL_REVISION,
+            state.revision if state is not None else 0,
+            entry["version"] if entry is not None else None,
+        )
 
 
 def _start_refresh(engine, build_all, build_subset, finalize, *, ttl=None,

@@ -14,7 +14,7 @@ from collections import Counter, defaultdict
 from weakref import WeakKeyDictionary
 
 from sqlalchemy import (BigInteger, Numeric, and_, bindparam, case, cast, column,
-                        distinct, func, inspect, or_, select, table, text, true)
+                        distinct, func, inspect, or_, select, table, text)
 from sqlalchemy.exc import SQLAlchemyError
 
 from app.models import AuthSession, User
@@ -113,6 +113,41 @@ def _valid_state_rating(value):
     return Decimal('0.5') <= scaled <= Decimal(5)
 
 
+def _catalog_country_rows(connection, movies, active):
+    active_ids = [
+        int(mid) for mid in connection.execute(
+            select(movies.c.movie_id).where(active)
+        ).scalars().all()
+    ]
+    if not active_ids:
+        return [], 0
+    countries_table = table('tmdb_movie_countries', column('movie_id'), column('country_iso2'))
+    mapping = defaultdict(set)
+    for mid, code in connection.execute(
+        select(countries_table.c.movie_id, countries_table.c.country_iso2)
+        .select_from(countries_table.join(movies, movies.c.movie_id == countries_table.c.movie_id))
+        .where(active)
+    ).all():
+        iso2 = str(code or '').strip().upper()
+        if len(iso2) == 2 and iso2.isascii() and iso2.isalpha():
+            mapping[int(mid)].add(iso2)
+    remaining = sorted(set(active_ids) - set(mapping))
+    if remaining:
+        for mid, codes in _movie_countries(connection, remaining, has_supplement=False).items():
+            if codes:
+                mapping[int(mid)].update(codes)
+    covered = sum(1 for codes in mapping.values() if codes)
+    iso_counts = Counter()
+    for codes in mapping.values():
+        for iso2 in codes:
+            iso_counts[iso2] += 1
+    rows = [
+        {'iso2': iso2, 'movie_count': count, 'covered_movies': covered}
+        for iso2, count in sorted(iso_counts.items(), key=lambda item: (-item[1], item[0]))
+    ]
+    return rows, covered
+
+
 def catalog_snapshot(connection):
     tables = CatalogBase.metadata.tables
     movies = tables['movies']; external = tables['movie_external_ids']
@@ -142,8 +177,15 @@ def catalog_snapshot(connection):
                          .select_from(ratings.join(movies)).where(comparable).group_by(bucket)).all())
     mean = connection.scalar(select(func.avg(ratings.c.score_value))
                              .select_from(ratings.join(movies)).where(comparable))
-    country_rows = connection.execute(COUNTRIES_SQL).mappings().all()
-    country_covered = int(country_rows[0]['covered_movies']) if country_rows else 0
+    try:
+        has_countries = inspect(connection).has_table('tmdb_movie_countries')
+    except Exception:
+        has_countries = False
+    if has_countries:
+        country_rows, country_covered = _catalog_country_rows(connection, movies, active)
+    else:
+        country_rows = connection.execute(COUNTRIES_SQL).mappings().all()
+        country_covered = int(country_rows[0]['covered_movies']) if country_rows else 0
     posters = _count(connection, select(func.count(distinct(assets.c.movie_id)))
                      .select_from(assets.join(movies)).where(active, assets.c.asset_type == 'poster',
                          func.length(func.trim(assets.c.source_path)) > 0))
@@ -330,23 +372,24 @@ def _catalog_cache_ttl(app, override):
 def _catalog_watermark(connection):
     tables = CatalogBase.metadata.tables
     movies, assets, credits = (tables[name] for name in ('movies', 'movie_assets', 'movie_credits'))
-
-    def aggregate(source, *high_water_columns):
-        values = [func.count().label('row_count')]
-        values.extend(func.max(col).label(col.name) for col in high_water_columns)
-        return select(*values).select_from(source).subquery()
-
-    blocks = [aggregate(movies, movies.c.movie_id, movies.c.updated_at),
-              aggregate(assets, assets.c.asset_id, assets.c.updated_at),
-              aggregate(credits, credits.c.credit_id)]
+    scalars = [
+        select(func.count()).select_from(movies).scalar_subquery(),
+        select(func.max(movies.c.movie_id)).scalar_subquery(),
+        select(func.max(movies.c.updated_at)).scalar_subquery(),
+        select(func.count()).select_from(assets).scalar_subquery(),
+        select(func.max(assets.c.asset_id)).scalar_subquery(),
+        select(func.max(assets.c.updated_at)).scalar_subquery(),
+        select(func.count()).select_from(credits).scalar_subquery(),
+        select(func.max(credits.c.credit_id)).scalar_subquery(),
+    ]
     if inspect(connection).has_table('tmdb_movie_metadata'):
         metadata = table('tmdb_movie_metadata', column('fetched_at'), column('updated_at'))
-        blocks.append(aggregate(metadata, metadata.c.fetched_at, metadata.c.updated_at))
-    combined = blocks[0]
-    for block in blocks[1:]:
-        combined = combined.join(block, true())
-    statement = select(*(col for block in blocks for col in block.c)).select_from(combined)
-    return tuple(connection.execute(statement).one())
+        scalars.extend([
+            select(func.count()).select_from(metadata).scalar_subquery(),
+            select(func.max(metadata.c.fetched_at)).scalar_subquery(),
+            select(func.max(metadata.c.updated_at)).scalar_subquery(),
+        ])
+    return tuple(connection.execute(select(*scalars)).one())
 
 
 def _cached_catalog_snapshot(connection, ttl, refresh):
