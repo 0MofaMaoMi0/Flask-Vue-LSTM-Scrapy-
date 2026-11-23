@@ -27,7 +27,7 @@
 
 ## 常用入口与运行链路
 
-- **一键启动（隧道 + 前端 + 浏览器）**：双击或执行根目录 `启动项目.cmd`（支持 `--check` / `--health` / `--no-browser`）
+- **一键启动（`3306` 数据库隧道 + 本机 Flask `8091` + Vite `5174` + 浏览器）**：双击或执行根目录 `启动项目.cmd`（支持 `--check` / `--health` / `--no-browser`）
 - **仅前端 / 仅后端检查**：
 
 ```bat
@@ -37,4 +37,4 @@ scripts\windows\check-backend.cmd
 ```
 
 - **统一采集与清洗入库 CLI**：`.local-cache\auth-venv\Scripts\python.exe scripts\data_collector.py --help`
-- **当前运行链路**：本机前端 `127.0.0.1:5174` → 受控 SSH 隧道 `127.0.0.1:3629` → 隔离 Ubuntu 后端 `127.0.0.1:5000`
+- **当前本地运行链路**：本机前端 `127.0.0.1:5174` → Windows 本地 Flask `127.0.0.1:8091` → SSH 数据库隧道 `127.0.0.1:3306` → 隔离 Ubuntu MySQL `127.0.0.1:3306`

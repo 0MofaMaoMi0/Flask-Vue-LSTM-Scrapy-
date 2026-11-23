@@ -80,10 +80,10 @@
 浏览器 (http://127.0.0.1:5174)
    │
    ▼  Vite Dev Server (/api/v1, /api/catalog, /api/admin, /api/media 代理)
-MI2_API_TARGET (默认 http://127.0.0.1:8091；SSH 隧道模式为 http://127.0.0.1:3629)
+MI2_API_TARGET (默认本机隔离后端 http://127.0.0.1:8091)
    │
    ▼
-Flask 后端 (本机 127.0.0.1:8091 或 隔离服务 127.0.0.1:5000) ──▶ MySQL 8.0
+Windows 本机 Flask 后端 (127.0.0.1:8091) ──▶ SSH 数据库隧道 (127.0.0.1:3306) ──▶ Ubuntu MySQL 8.0
 ```
 
 ---
@@ -281,24 +281,25 @@ npm run dev
 
 ---
 
-#### 模式 B：通过受控 SSH 隧道连接既有远程 Ubuntu 后端
+#### 模式 B：Ubuntu 仅作隔离 MySQL 数据库 + Windows 本地运行后端与前端
 
-适用于团队成员在本地仅跑前端、后端由隔离 Ubuntu 虚拟机托管的场景（本地无需安装或运行 MySQL）：
+适用于团队成员通过本地启动后端与前端开发调试、数据库继续隔离托管在 VMware Ubuntu 虚拟机中的场景（Windows 无需安装本地 MySQL）：
 
 1. 在仓库父级目录（与本仓库同级）准备好私有运行时配置：
-   - `../运行配置/Ubuntu/http-tunnel.json`（包含 `local_port`、`remote_target`、`ssh_host`、`ssh_user`、`host_key_alias`）
+   - `../运行配置/Ubuntu/db-tunnel.json`（配置 `local_port: 3306`、`remote_target: "127.0.0.1:3306"`、`ssh_host`、`ssh_user`、`host_key_alias`）
    - `../运行配置/Ubuntu/private/` 中的 SSH 私钥与 `known_hosts`
-2. 确认 Ubuntu 已启动且其内部服务监听 `127.0.0.1:5000`。
+   - `../敏感信息调用/ubuntu-db/backend.local.env` 与 `m7-master.key`（存放隔离 MySQL 连接串、M6 实例 UUID 与 M7 主密钥，仓库内路径重定向至 `.local-cache/`）
+2. 确认 Ubuntu 已开机且本机 `mysql` 服务监听 `127.0.0.1:3306`。
 3. 在仓库根目录执行：
 
 ```bat
-启动项目.cmd              :: 自动检查/建立 3629 SSH 隧道、启动 5174 前端并打开浏览器
+启动项目.cmd              :: 自动拉起 3306 数据库 SSH 隧道、启动 Windows Flask (8091) 与 Vite 前端 (5174) 并打开浏览器
 启动项目.cmd --check      :: 仅做离线启动条件自检
-启动项目.cmd --health     :: 仅检查远端健康状态（/api/v1/health 与 /api/v1/ready）
+启动项目.cmd --health     :: 只读检查本机后端健康状态（/api/v1/health 与 /api/v1/ready）
 启动项目.cmd --no-browser :: 启动但不自动弹出浏览器
 ```
 
-或仅单独管理前端 / 后端状态检查（不自动拉起隧道）：
+或仅单独管理前端 / 后端状态检查（不自动拉起隧道与后端）：
 
 ```bat
 scripts\windows\start-frontend.cmd
@@ -315,8 +316,8 @@ scripts\windows\check-backend.cmd
 | `RuntimeError: Explicit M6 schema required` / `M6 connection contract mismatch` | 检查 `MI2_M6_SCHEMA` 是否匹配 `mi2_m6_*`、账号名是否以 `mi2` 开头、连接串主机是否为 `127.0.0.1:3306` 且无 query 参数 |
 | `RuntimeError: Explicit M6 migration environment required` | 未开启 `MI2_M6_ISOLATED=true` 时不要运行 `alembic upgrade head`，基础认证模式请运行 `alembic upgrade 0001_auth` |
 | `RuntimeError: New absolute DDL ledger required` | `MI2_M6_DDL_LEDGER` 必须设为绝对路径且文件尚不存在；重跑前请删除或更换新文件名 |
-| `CredentialError: Persistent credentials require the protected installer` | 完整模式下未设置 `MI2_CREDENTIALS_MASTER_FILE` 或文件非 32 字节；按模式 A 第 2 步生成密钥文件即可 |
-| 前端 `/api/...` 返回 `502 / ECONNREFUSED` | 确认 `MI2_API_TARGET` 与后端实际监听端口一致（本机隔离模式 `5000`、基础模式 `8091`、SSH 隧道模式 `3629`） |
+| `CredentialError: Persistent credentials require the protected installer` | 完整模式下未设置 `MI2_CREDENTIALS_MASTER_FILE` 或文件非 32 字节；按模式 A 第 2 步生成密钥文件或检查 `backend.local.env` |
+| 前端 `/api/...` 返回 `502 / ECONNREFUSED` | 确认 `MI2_API_TARGET` 与后端实际监听端口一致（Windows 本地模式默认 `8091`，Linux 独立服务默认 `5000`） |
 
 ---
 

@@ -13,11 +13,11 @@ if ($Help) {
     @'
 Usage: project.ps1 [-CheckOnly | -HealthOnly] [-DryRun] [-TunnelJson <path>] [-Timeout <seconds>] [-Help]
 
-  (no switch)  start or reuse the current frontend at 5174
+  (no switch)  start or reuse the current frontend at 5174 (targets local backend 8091)
   -CheckOnly   offline prerequisite check only; no HTTP, no process start
-  -HealthOnly  read-only GET /api/v1/health through the current tunnel
-  -DryRun      validate then print the start plan; no process start
-  -TunnelJson  override the external tunnel JSON (only local_port/remote_target are read)
+  -HealthOnly  read-only GET /api/v1/health and /api/v1/ready on local backend 8091
+  -DryRun      validate local backend then print the frontend start plan; no process start
+  -TunnelJson  override the external DB tunnel JSON (only local_port/remote_target are read)
   -Timeout     frontend readiness timeout in seconds (default 90)
 '@
     exit 0
