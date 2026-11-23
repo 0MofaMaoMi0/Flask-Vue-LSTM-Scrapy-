@@ -68,7 +68,6 @@
 │  └─ tests/                        # 启动器离线自测
 ├─ docs/                            # 仓库内文档导航
 ├─ data/                            # 本地素材占位目录
-├─ legacy/                          # 历史旧版资产保留目录（不作为运行入口）
 ├─ project_config.py                # 共享配置加载与检查脚本
 ├─ .env.example                     # 根环境变量模板
 ├─ 启动项目.cmd                      # Windows 一键启动脚本（配合既有远程 SSH 隧道配置）
