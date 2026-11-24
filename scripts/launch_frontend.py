@@ -1,20 +1,21 @@
 #!/usr/bin/env python
-"""Canonical local entry launcher for the current project (5174 + SSH HTTP tunnel).
+"""Canonical local entry launcher for the current project (5174 + local 8091 backend).
 
 What it does
 ------------
-1. Reads only ``local_port`` and ``remote_target`` from the external tunnel
-   settings file (``http-tunnel.json``). Every other key is ignored.
-2. Validates that the target is a loopback address and that both ports are
-   real, allowed ports. The read-only acceptance ports 1461 / 3575 and the old
-   fallback 8091 are rejected.
+1. Reads only ``local_port`` and ``remote_target`` from the external DB tunnel
+   settings file (``db-tunnel.json``). Every other key is ignored.
+2. Validates that the tunnel target is loopback and that tunnel/backend ports
+   are valid, rejecting read-only acceptance ports (1461 / 3575), frontend
+   port (5174), and the DB tunnel port (3306) as HTTP backend targets.
 3. If 5174 already answers as this app, reports REUSE and never starts a second
    dev server and never kills the existing process.
-4. Otherwise requires ``GET /api/v1/health`` on the tunnel port to succeed and
-   then starts the existing local Vite dependency with
-   ``MI2_API_TARGET=http://127.0.0.1:<tunnel_port>``.
+4. Otherwise requires ``GET /api/v1/health`` and ``GET /api/v1/ready`` on the
+   local Windows backend (default ``127.0.0.1:8091``) to succeed and then starts
+   the existing local Vite dependency with
+   ``MI2_API_TARGET=http://127.0.0.1:<backend_port>``.
 
-It performs GET requests only, to the health endpoint. It never logs in,
+It performs GET requests only, to health/readiness endpoints. It never logs in,
 never sends cookies, never calls MySQL/SSH, never installs anything and never
 writes outside the repository's ``.local-cache/startup`` tree; logs, TEMP and
 cache stay on F: and are separate from the running Vite cache.
@@ -36,7 +37,7 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-TUNNEL_JSON = REPO_ROOT.parent / "运行配置" / "Ubuntu" / "http-tunnel.json"
+TUNNEL_JSON = REPO_ROOT.parent / "运行配置" / "Ubuntu" / "db-tunnel.json"
 MOVIE_WEB = REPO_ROOT / "movie-web"
 DEFAULT_NODE_EXE = Path("F:/Node/node.exe")
 
@@ -60,9 +61,12 @@ NODE_EXE = resolve_node_exe()
 VITE_BIN = MOVIE_WEB / "node_modules/vite/bin/vite.js"
 FRONTEND_HOST = "127.0.0.1"
 FRONTEND_PORT = 5174
+BACKEND_HOST = "127.0.0.1"
+DEFAULT_BACKEND_PORT = 8091
 HEALTH_PATH = "/api/v1/health"
+READY_PATH = "/api/v1/ready"
 READONLY_PORTS = frozenset({1461, 3575})
-OLD_FALLBACK_PORTS = frozenset({8091})
+FORBIDDEN_BACKEND_PORTS = READONLY_PORTS | frozenset({FRONTEND_PORT, 3306})
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 CACHE_ROOT = REPO_ROOT / ".local-cache" / "startup"
 TMP = CACHE_ROOT / "tmp"
@@ -93,8 +97,41 @@ def ensure_dirs() -> None:
         path.mkdir(parents=True, exist_ok=True)
 
 
-def load_settings(path: Path = TUNNEL_JSON) -> dict:
-    """Read only local_port and remote_target; reject unsafe values."""
+def _validate_port_int(value, name: str) -> int:
+    if type(value) is not int or isinstance(value, bool) or not 1 <= value <= 65535:
+        raise LaunchError("%s 必须是 1..65535 的整数" % name, EXIT_CONFIG, {name: value})
+    return value
+
+
+def resolve_backend_port(backend_port: int | None = None) -> int:
+    """Resolve and validate the local Windows Flask backend HTTP port."""
+    if backend_port is not None:
+        port = _validate_port_int(backend_port, "backend_port")
+    else:
+        raw = os.environ.get("MI2_BACKEND_PORT", "").strip()
+        if not raw:
+            port = DEFAULT_BACKEND_PORT
+        elif not (raw.isascii() and raw.isdigit()):
+            raise LaunchError("MI2_BACKEND_PORT 必须是 1..65535 的整数", EXIT_CONFIG,
+                              {"MI2_BACKEND_PORT": raw})
+        else:
+            port = _validate_port_int(int(raw), "MI2_BACKEND_PORT")
+
+    if port in READONLY_PORTS:
+        raise LaunchError("backend_port 指向只读验收端口 %d，拒绝使用" % port,
+                          EXIT_CONFIG, {"backend_port": port})
+    if port == FRONTEND_PORT:
+        raise LaunchError("backend_port 不能是正常前端端口 5174", EXIT_CONFIG,
+                          {"backend_port": port})
+    if port in FORBIDDEN_BACKEND_PORTS:
+        raise LaunchError("backend_port 不能使用保留端口 %d" % port, EXIT_CONFIG,
+                          {"backend_port": port})
+    return port
+
+
+def load_settings(path: Path = TUNNEL_JSON, backend_port: int | None = None) -> dict:
+    """Read only local_port and remote_target from db-tunnel.json; reject unsafe values."""
+    resolved_backend_port = resolve_backend_port(backend_port)
     if not path.is_file():
         raise LaunchError("隧道设置文件不存在: %s" % path, EXIT_CONFIG, {"path": str(path)})
     try:
@@ -105,34 +142,32 @@ def load_settings(path: Path = TUNNEL_JSON) -> dict:
     if type(doc) is not dict:
         raise LaunchError("隧道设置必须是 JSON 对象", EXIT_CONFIG)
 
-    local_port = doc.get("local_port")
-    if type(local_port) is not int or isinstance(local_port, bool) or not 1 <= local_port <= 65535:
-        raise LaunchError("local_port 必须是 1..65535 的整数", EXIT_CONFIG,
-                          {"local_port": local_port})
+    local_port = _validate_port_int(doc.get("local_port"), "local_port")
     if local_port in READONLY_PORTS:
         raise LaunchError("local_port 指向只读验收端口 %d，拒绝使用" % local_port,
-                          EXIT_CONFIG, {"local_port": local_port})
-    if local_port in OLD_FALLBACK_PORTS:
-        raise LaunchError("local_port 指向旧回退端口 %d，拒绝使用" % local_port,
                           EXIT_CONFIG, {"local_port": local_port})
     if local_port == FRONTEND_PORT:
         raise LaunchError("local_port 不能是正常前端端口 5174", EXIT_CONFIG,
                           {"local_port": local_port})
+    if local_port == resolved_backend_port:
+        raise LaunchError("local_port 不能与本机后端端口 %d 冲突" % resolved_backend_port,
+                          EXIT_CONFIG, {"local_port": local_port,
+                                        "backend_port": resolved_backend_port})
 
     remote = doc.get("remote_target")
     if type(remote) is not str:
         raise LaunchError("remote_target 必须是 host:port 文本", EXIT_CONFIG,
                           {"remote_target": remote})
     host, sep, port_text = remote.rpartition(":")
-    if not sep or not host or not port_text.isdigit():
+    if not sep or not host or not (port_text.isascii() and port_text.isdigit()):
         raise LaunchError("remote_target 必须是 host:port 文本", EXIT_CONFIG,
                           {"remote_target": remote})
     remote_port = int(port_text)
     if not 1 <= remote_port <= 65535:
         raise LaunchError("remote_target 端口越界", EXIT_CONFIG,
                           {"remote_target": remote})
-    if remote_port in READONLY_PORTS or remote_port in OLD_FALLBACK_PORTS:
-        raise LaunchError("remote_target 指向只读/旧端口 %d，拒绝使用" % remote_port,
+    if remote_port in READONLY_PORTS or remote_port == FRONTEND_PORT:
+        raise LaunchError("remote_target 指向禁止端口 %d，拒绝使用" % remote_port,
                           EXIT_CONFIG, {"remote_target": remote})
     if host not in LOOPBACK_HOSTS:
         raise LaunchError("remote_target 必须是回环地址，当前为 %r" % host,
@@ -145,8 +180,10 @@ def load_settings(path: Path = TUNNEL_JSON) -> dict:
         "remote_host": host,
         "remote_port": remote_port,
         "ignored_keys": sorted(set(doc) - {"local_port", "remote_target"}),
+        "backend_host": BACKEND_HOST,
+        "backend_port": resolved_backend_port,
         "frontend_base": "http://%s:%d" % (FRONTEND_HOST, FRONTEND_PORT),
-        "api_target": "http://127.0.0.1:%d" % local_port,
+        "api_target": "http://%s:%d" % (BACKEND_HOST, resolved_backend_port),
     }
 
 
@@ -158,10 +195,11 @@ def tcp_open(host: str, port: int, timeout: float = 2.0) -> bool:
         return False
 
 
-def get_json_health(port: int, timeout: float = 5.0) -> dict:
-    """GET-only health probe; no cookies, no auth, no proxy."""
-    url = "http://%s:%d%s" % (FRONTEND_HOST if port == FRONTEND_PORT else "127.0.0.1",
-                              port, HEALTH_PATH)
+def get_json_health(port: int, timeout: float = 5.0,
+                    path: str = HEALTH_PATH, expected_status: str = "ok") -> dict:
+    """GET-only probe for /api/v1/health or /api/v1/ready; no cookies, no auth, no proxy."""
+    host = FRONTEND_HOST if port == FRONTEND_PORT else BACKEND_HOST
+    url = "http://%s:%d%s" % (host, port, path)
     started = time.perf_counter()
     request = urllib.request.Request(url, method="GET", headers={
         "User-Agent": "m10-normal-entry-launcher/1.0",
@@ -195,8 +233,15 @@ def get_json_health(port: int, timeout: float = 5.0) -> dict:
             data = doc.get("data")
             result["ok"] = (doc.get("code") in (0, "OK")
                             and type(data) is dict
-                            and data.get("status") == "ok")
+                            and data.get("status") == expected_status)
     return result
+
+
+def probe_backend_health(port: int, timeout: float = 5.0) -> tuple[bool, dict, dict]:
+    """Check both /api/v1/health and /api/v1/ready on the local backend port."""
+    health = get_json_health(port, timeout=timeout, path=HEALTH_PATH, expected_status="ok")
+    ready = get_json_health(port, timeout=timeout, path=READY_PATH, expected_status="ready")
+    return bool(health["ok"] and ready["ok"]), health, ready
 
 
 def probe_frontend() -> dict:
@@ -216,6 +261,8 @@ def check_prerequisites(settings: dict) -> dict:
         "node_exists": _node_exe().is_file(),
         "vite_exists": VITE_BIN.is_file(),
         "tunnel_settings_exists": Path(settings["path"]).is_file(),
+        "db_tunnel_listening": tcp_open("127.0.0.1", settings["local_port"]),
+        "backend_port_listening": tcp_open(BACKEND_HOST, settings["backend_port"]),
         "frontend_port_listening": tcp_open(FRONTEND_HOST, FRONTEND_PORT),
     }
     checks["all_ok"] = all(checks[key] for key in (
@@ -231,7 +278,7 @@ def build_env(settings: dict) -> dict:
     env["TMPDIR"] = str(TMP)
     env["NODE_COMPILE_CACHE"] = str(CACHE)
     env["PYTHONDONTWRITEBYTECODE"] = "1"
-    # Remove values that would silently redirect the frontend to the old stack.
+    # Remove values that would silently redirect the frontend to legacy targets.
     for key in ("VITE_API_TARGET", "MI2_TUNNEL_PORT"):
         env.pop(key, None)
     return env
@@ -246,9 +293,10 @@ def describe(settings: dict) -> dict:
     return {
         "normal_ui": "%s/ (5174, Vite dev server)" % settings["frontend_base"],
         "api_target": settings["api_target"],
-        "tunnel": "127.0.0.1:%d -> %s" % (settings["local_port"], settings["remote_target"]),
+        "backend": "%s:%d (Windows local Flask)" % (
+            settings["backend_host"], settings["backend_port"]),
+        "db_tunnel": "127.0.0.1:%d -> %s" % (settings["local_port"], settings["remote_target"]),
         "readonly_acceptance": "1461/3575 只读验收端口不参与本启动链路",
-        "old_fallback": "8091 不被使用",
         "logs": str(LOGS),
         "temp": str(TMP),
     }
@@ -282,13 +330,13 @@ def start(settings: dict, args) -> int:
         return EXIT_OK
 
     log_path = LOGS / ("frontend-%s.log" % datetime.now().strftime("%Y%m%dT%H%M%S"))
-    log = log_path.open("ab")
-    process = subprocess.Popen(
-        command, cwd=str(MOVIE_WEB), env=env, stdin=subprocess.DEVNULL,
-        stdout=log, stderr=subprocess.STDOUT,
-        creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-                       | getattr(subprocess, "CREATE_NO_WINDOW", 0)),
-    )
+    with log_path.open("ab") as log:
+        process = subprocess.Popen(
+            command, cwd=str(MOVIE_WEB), env=env, stdin=subprocess.DEVNULL,
+            stdout=log, stderr=subprocess.STDOUT,
+            creationflags=(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+                           | getattr(subprocess, "CREATE_NO_WINDOW", 0)),
+        )
     ready = wait_ready(args.timeout)
     state = {
         "at": now_iso(), "pid": process.pid, "log": str(log_path),
@@ -312,7 +360,10 @@ def start(settings: dict, args) -> int:
 
 def run(args) -> int:
     try:
-        settings = load_settings(Path(args.tunnel_json) if args.tunnel_json else TUNNEL_JSON)
+        settings = load_settings(
+            Path(args.tunnel_json) if args.tunnel_json else TUNNEL_JSON,
+            backend_port=args.backend_port,
+        )
     except LaunchError as exc:
         print("配置错误：%s" % exc, file=sys.stderr)
         print(json.dumps(exc.detail, ensure_ascii=False), file=sys.stderr)
@@ -337,8 +388,8 @@ def run(args) -> int:
             "result": "REUSE_EXISTING_FRONTEND",
             "frontend": settings["frontend_base"] + "/",
             "note": "5174 已通过 /api/v1/health，未重复启动、未结束任何进程。",
-            "reuse_note": "复用前请确认其 MI2_API_TARGET 指向本次隧道端口 %d。"
-                          % settings["local_port"],
+            "reuse_note": "复用前请确认其 MI2_API_TARGET 指向本机后端端口 %d。"
+                          % settings["backend_port"],
             **describe(settings),
         }, ensure_ascii=False, indent=2))
         return EXIT_OK
@@ -351,21 +402,22 @@ def run(args) -> int:
             "note": "5174 被占用但未通过健康检查；不结束占用进程，也不另起端口。",
         }, ensure_ascii=False, indent=2), file=sys.stderr)
         return EXIT_PORT_CONFLICT
-    if not tcp_open("127.0.0.1", settings["local_port"]):
+    if not tcp_open(BACKEND_HOST, settings["backend_port"]):
         print(json.dumps({
             "result": "BACKEND_UNAVAILABLE",
-            "reason": "隧道本地端口 127.0.0.1:%d 未监听" % settings["local_port"],
-            "tunnel": settings["remote_target"],
-            "note": "未启动前端；不启动/重启隧道或后端，不回退 8091 或只读端口。",
+            "reason": "本机后端端口 %s:%d 未监听" % (BACKEND_HOST, settings["backend_port"]),
+            "db_tunnel": "127.0.0.1:%d -> %s" % (settings["local_port"], settings["remote_target"]),
+            "note": "未启动前端；请先启动本机后端（依赖 DB 隧道），不回退只读端口。",
         }, ensure_ascii=False, indent=2), file=sys.stderr)
         return EXIT_BACKEND
-    health = get_json_health(settings["local_port"])
-    if not health["ok"]:
+    ok, health, ready = probe_backend_health(settings["backend_port"])
+    if not ok:
         print(json.dumps({
             "result": "BACKEND_UNAVAILABLE",
-            "reason": "隧道端口未通过 GET %s" % HEALTH_PATH,
-            "detail": health,
-            "note": "未启动前端；不启动/重启隧道或后端，不回退 8091 或只读端口。",
+            "reason": "本机后端未通过 GET %s 或 %s" % (HEALTH_PATH, READY_PATH),
+            "health": health,
+            "ready": ready,
+            "note": "未启动前端；请先确认本机后端与 DB 隧道就绪，不回退只读端口。",
         }, ensure_ascii=False, indent=2), file=sys.stderr)
         return EXIT_BACKEND
     return start(settings, args)
@@ -373,32 +425,40 @@ def run(args) -> int:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="项目级正常入口：校验隧道设置并通过现有 Vite 启动 5174 前端（GET 健康检查）。",
+        description="项目级正常入口：校验配置并启动 5174 前端（代理至本机 8091 后端）。",
         epilog=("示例：--check 离线校验；--health 只 GET 健康；--dry-run 只打印启动计划；"
                 "默认真正启动。5174 已健康时只复用不重启。"))
     parser.add_argument("--check", action="store_true",
                         help="离线参数/文件校验，不发起任何网络请求")
     parser.add_argument("--health", action="store_true",
-                        help="只 GET 隧道端口 /api/v1/health 并报告")
+                        help="只 GET 本机后端 /api/v1/health 与 /api/v1/ready 并报告")
     parser.add_argument("--dry-run", action="store_true",
                         help="校验后端健康后只打印启动命令与环境，不启动进程")
     parser.add_argument("--timeout", type=float, default=90.0,
                         help="等待前端就绪的秒数，默认 90")
     parser.add_argument("--tunnel-json", default=None,
-                        help="覆盖隧道设置路径（只读取 local_port/remote_target）")
+                        help="覆盖 DB 隧道设置路径（只读取 local_port/remote_target）")
+    parser.add_argument("--backend-port", type=int, default=None,
+                        help="覆盖本机 Flask 后端端口（默认 8091 或 MI2_BACKEND_PORT）")
     args = parser.parse_args(argv)
 
     if args.health:
         try:
-            settings = load_settings(Path(args.tunnel_json) if args.tunnel_json else TUNNEL_JSON)
+            settings = load_settings(
+                Path(args.tunnel_json) if args.tunnel_json else TUNNEL_JSON,
+                backend_port=args.backend_port,
+            )
         except LaunchError as exc:
             print("配置错误：%s" % exc, file=sys.stderr)
             return exc.code
-        health = get_json_health(settings["local_port"])
-        print(json.dumps({"result": "HEALTH_OK" if health["ok"] else "HEALTH_FAILED",
-                          "port": settings["local_port"], "health": health},
-                         ensure_ascii=False, indent=2))
-        return EXIT_OK if health["ok"] else EXIT_BACKEND
+        ok, health, ready = probe_backend_health(settings["backend_port"])
+        print(json.dumps({
+            "result": "HEALTH_OK" if ok else "HEALTH_FAILED",
+            "port": settings["backend_port"],
+            "health": health,
+            "ready": ready,
+        }, ensure_ascii=False, indent=2))
+        return EXIT_OK if ok else EXIT_BACKEND
     return run(args)
 
 
